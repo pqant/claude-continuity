@@ -1,0 +1,22 @@
+# throwaway spike artifacts (nested git repos, hook outputs, tmux logs)
+.sandbox/
+# local experiments (class E — never public)
+.spikes/
+# local Claude Code project state (settings.local.json, plans, tasks)
+.claude/
+# third-party dependencies
+node_modules/
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+# packaging/secret hygiene (defensive)
+.env*
+# internal dev logs (class E — kept local, never public)
+HANDOFF.md
+PROGRESS.md
+docs/watchdog-acceptance-record.md
+.DS_Store
