@@ -96,6 +96,23 @@ def load_state(project_key: str, nnn: int) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def update_fields(project_key: str, nnn: int, **fields: object) -> dict:
+    """Update non-state fields (``turn_active``, ``off``, …) under the lock.
+
+    No transition validation, no ledger event — for flags the state machine
+    does not model (PRD §9 hooks). Raises :class:`StateNotFoundError` like
+    :func:`load_state` when the session does not exist.
+    """
+    if not fields:
+        return load_state(project_key, nnn)
+    with lock.held(project_key):
+        record = load_state(project_key, nnn)
+        record.update(fields)
+        record["updated"] = _now()
+        atomic.atomic_write_json(_state_path(project_key, nnn), record)
+        return record
+
+
 def transition(project_key: str, nnn: int, new_state: str,
                **fields: object) -> tuple[dict, bool]:
     """Validate and apply one transition. Returns ``(record, changed)``.

@@ -4,6 +4,8 @@ Every transition goes through one function that locks, validates, writes
 atomically, and appends a ledger event. Same-state calls are idempotent no-ops.
 """
 
+import threading
+
 import pytest
 
 from cc_continuity import ledger, paths, state
@@ -132,3 +134,48 @@ def test_two_sessions_are_independent(cc_home):
     state.transition(KEY, 1, "ACTIVE")
     assert state.load_state(KEY, 1)["state"] == "ACTIVE"
     assert state.load_state(KEY, 2)["state"] == "BOOTSTRAPPING"
+
+
+# ---------------------------------------------------------- update_fields
+
+
+def test_update_fields_sets_flags_without_state_change(cc_home):
+    _create()
+    record = state.update_fields(KEY, 1, turn_active=True)
+    assert record["turn_active"] is True
+    on_disk = state.load_state(KEY, 1)
+    assert on_disk["turn_active"] is True
+    assert on_disk["state"] == "BOOTSTRAPPING"  # state untouched
+
+
+def test_update_fields_multiple_fields_and_no_ledger_event(cc_home):
+    _create()
+    before = len(_events())
+    state.update_fields(KEY, 1, turn_active=False, last_stop_ts=1234.5, off=True)
+    on_disk = state.load_state(KEY, 1)
+    assert on_disk["turn_active"] is False
+    assert on_disk["last_stop_ts"] == 1234.5
+    assert on_disk["off"] is True
+    assert len(_events()) == before  # flags are not ledger events
+
+
+def test_update_fields_missing_session_raises(cc_home):
+    with pytest.raises(state.StateNotFoundError):
+        state.update_fields(KEY, 99, turn_active=True)
+
+
+def test_update_fields_concurrent_writes_stay_consistent(cc_home):
+    _create()
+
+    def worker(tid):
+        for i in range(15):
+            state.update_fields(KEY, 1, turn_active=(tid + i) % 2 == 0)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    on_disk = state.load_state(KEY, 1)  # parses → no torn writes
+    assert isinstance(on_disk["turn_active"], bool)

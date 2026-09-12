@@ -1,7 +1,8 @@
 """cc-continuity command-line entry point (PRD §16).
 
-Phase 2 implements ``statusline`` (PRD §7) and ``status [--json]``; the
-remaining subcommands still report which phase implements them.
+Phase 2 implements ``statusline`` (PRD §7) and ``status [--json]``;
+Phase 3 implements ``hook <event>`` (PRD §9) and ``history``. The remaining
+subcommands still report which phase implements them.
 """
 
 from __future__ import annotations
@@ -11,13 +12,14 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from . import __version__, config, naming, paths, project, statusline
+from .hooks import (common, session_end, session_start, task, tool_use,
+                    user_prompt)
 
 # subcommand -> phase that implements it (PRD §20)
 SUBCOMMAND_PHASES: dict[str, int] = {
-    "hook": 3,
-    "history": 3,
     "checkpoint": 4,
     "validate": 4,
     "validate-draft": 4,
@@ -29,6 +31,17 @@ SUBCOMMAND_PHASES: dict[str, int] = {
     "uninstall": 7,
     "doctor": 7,
     "launch": 7,
+}
+
+# event -> handler (PRD §9). Phase 5–6 add PreToolUse/Stop/PreCompact.
+HOOK_HANDLERS: dict[str, Callable[[common.HookContext], dict | None]] = {
+    "SessionStart": session_start.handle,
+    "UserPromptSubmit": user_prompt.handle,
+    "PostToolUse": tool_use.handle,
+    "PostToolUseFailure": tool_use.handle_failure,
+    "TaskCreated": task.handle,
+    "TaskCompleted": task.handle,
+    "SessionEnd": session_end.handle,
 }
 
 
@@ -46,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true",
                           help="machine-readable output")
     sub.add_parser("statusline", help="status line entry (PRD §7)")
+
+    p_hook = sub.add_parser("hook", help="hook entry (PRD §9)")
+    p_hook.add_argument("event",
+                        help="hook event name (e.g. UserPromptSubmit)")
+
+    p_hist = sub.add_parser("history", help="session chain for this project")
+    p_hist.add_argument("-n", type=int, default=20,
+                        help="show at most N most recent sessions (default 20)")
 
     for name in SUBCOMMAND_PHASES:
         sub.add_parser(name,
@@ -193,6 +214,48 @@ def cmd_statusline(args: argparse.Namespace) -> int:
     return 0
 
 
+# -------------------------------------------------------------------- hook
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Read the hook payload on stdin and run the matching handler.
+
+    PRD §9: always exit 0 for the Phase 3 ledger hooks (they never block);
+    exceptions are swallowed inside ``common.run_event`` (→ errors.log).
+    """
+    try:
+        text = sys.stdin.read()
+    except Exception:
+        text = ""
+    return common.run_event(args.event, text, HOOK_HANDLERS)
+
+
+# ----------------------------------------------------------------- history
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    """Session chain for the current project (PRD §16)."""
+    cwd = Path.cwd()
+    root = project.resolve_root(cwd)
+    key = project.project_key_for_root(root)
+    pfile = paths.project_dir(key) / "project.json"
+    if not pfile.is_file():
+        print(f"No cc-continuity project for {root} "
+              f"(a project registers itself on its first hook).")
+        return 0
+    try:
+        record = json.loads(pfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"cc-continuity history: unreadable project record: {e}",
+              file=sys.stderr)
+        return 1
+    for s in (record.get("sessions") or [])[-args.n:]:
+        nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
+        print(f"{nnn:03d}  {s.get('name')}  {s.get('session_id')}  "
+              f"{s.get('created')}")
+    return 0
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -206,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_statusline(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "hook":
+        return cmd_hook(args)
+    if args.command == "history":
+        return cmd_history(args)
     phase = SUBCOMMAND_PHASES[args.command]
     print(
         f"cc-continuity {args.command}: not implemented yet (Phase {phase})",
