@@ -7,6 +7,9 @@ outside a git repo only ``cwd`` itself is consulted, so an unrelated ancestor
 directory can never disable/override a project.
 
 ``CC_CONTINUITY=0`` in the environment disables everything, regardless of files.
+
+``window_tokens`` default chain (PRD §7): if no config file sets it, the
+``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` environment value is used; else 262144.
 """
 
 from __future__ import annotations
@@ -109,14 +112,25 @@ def load_config(cwd: str | Path | None = None) -> dict:
     cwd = Path(cwd)
 
     cfg = dict(DEFAULTS)
+    window_explicit = False
 
     global_path = paths.config_path()
     if global_path.is_file():
-        cfg.update(_read_json_object(global_path))
+        g = _read_json_object(global_path)
+        cfg.update(g)
+        window_explicit = "window_tokens" in g
 
     project_path = _project_config_path(cwd)
     if project_path is not None:
-        cfg.update(_read_json_object(project_path))
+        p = _read_json_object(project_path)
+        cfg.update(p)
+        window_explicit = window_explicit or "window_tokens" in p
+
+    if not window_explicit:
+        # PRD §7: default window is CLAUDE_CODE_MAX_CONTEXT_TOKENS, else 262144.
+        env = os.environ.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "").strip()
+        if env.isdigit():
+            cfg["window_tokens"] = int(env)
 
     return cfg
 

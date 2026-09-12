@@ -34,7 +34,9 @@ def test_defaults_match_prd_section_15():
     assert "sk-[A-Za-z0-9]{20,}" in d["redact_patterns"]
 
 
-def test_no_files_gives_pure_defaults(cc_home, tmp_path):
+def test_no_files_gives_pure_defaults(cc_home, tmp_path, monkeypatch):
+    # With no file setting window_tokens the env var would otherwise apply.
+    monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
     assert config.load_config(cwd=tmp_path) == config.DEFAULTS
 
 

@@ -1,4 +1,8 @@
-"""cli.py skeleton: entry point, --version, unimplemented-subcommand dispatch."""
+"""cli.py: entry point, --version, dispatch (implemented + unimplemented).
+
+``statusline`` and ``status`` are implemented in Phase 2; the rest still
+report their implementing phase.
+"""
 
 import pytest
 
@@ -19,8 +23,8 @@ def test_no_command_exits_2_with_help(capsys):
 
 @pytest.mark.parametrize(
     "command",
-    ["statusline", "hook", "rotate", "status", "checkpoint", "validate",
-     "doctor", "install", "uninstall"],
+    ["hook", "rotate", "checkpoint", "validate", "doctor",
+     "install", "uninstall"],
 )
 def test_unimplemented_subcommand_reports_phase(command, capsys):
     assert cli.main([command]) == 2
