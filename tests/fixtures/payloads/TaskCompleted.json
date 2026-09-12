@@ -1,0 +1,20 @@
+{
+ "event": "TaskCompleted",
+ "mode": "log",
+ "ts": 1789160152.2445052,
+ "pid": 88431,
+ "env": {
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95"
+ },
+ "payload": {
+  "session_id": "6c037d48-a850-45ac-81e1-60d36fdd654a",
+  "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.qT3MhwLJIl/.claude/projects/-Users-eralp-arid-claude-continuity--sandbox-spike-repo/6c037d48-a850-45ac-81e1-60d36fdd654a.jsonl",
+  "cwd": "$HOME/arid/claude-continuity/.sandbox/spike-repo",
+  "prompt_id": "37611856-f887-42d4-adbf-15b6f63a5797",
+  "hook_event_name": "TaskCompleted",
+  "task_id": "1",
+  "task_subject": "S1 spike task",
+  "task_description": "test task"
+ }
+}

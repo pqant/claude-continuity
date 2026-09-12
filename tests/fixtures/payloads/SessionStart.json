@@ -1,0 +1,18 @@
+{
+ "event": "SessionStart",
+ "mode": "log",
+ "ts": 1789159959.606071,
+ "pid": 88231,
+ "env": {
+  "CLAUDE_ENV_FILE": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.qT3MhwLJIl/.claude/session-env/6c037d48-a850-45ac-81e1-60d36fdd654a/sessionstart-hook-0.sh",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95"
+ },
+ "payload": {
+  "session_id": "6c037d48-a850-45ac-81e1-60d36fdd654a",
+  "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.qT3MhwLJIl/.claude/projects/-Users-eralp-arid-claude-continuity--sandbox-spike-repo/6c037d48-a850-45ac-81e1-60d36fdd654a.jsonl",
+  "cwd": "$HOME/arid/claude-continuity/.sandbox/spike-repo",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+ }
+}

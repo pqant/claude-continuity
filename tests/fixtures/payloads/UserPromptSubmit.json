@@ -1,0 +1,19 @@
+{
+ "event": "UserPromptSubmit",
+ "mode": "log",
+ "ts": 1789159959.638674,
+ "pid": 88237,
+ "env": {
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95"
+ },
+ "payload": {
+  "session_id": "6c037d48-a850-45ac-81e1-60d36fdd654a",
+  "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.qT3MhwLJIl/.claude/projects/-Users-eralp-arid-claude-continuity--sandbox-spike-repo/6c037d48-a850-45ac-81e1-60d36fdd654a.jsonl",
+  "cwd": "$HOME/arid/claude-continuity/.sandbox/spike-repo",
+  "prompt_id": "37611856-f887-42d4-adbf-15b6f63a5797",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Do exactly these steps, in this order, and nothing else:\n1) Use the Write tool to create a file named s1-test.txt in the current directory containing the text 's1'.\n2) Use the Bash tool to run: git status --short\n3) Use the Bash tool to run: ls /nonexistent-s1-xyz\n4) Use the TaskCreate tool to create a task with subject 'S1 spike task' and description 'test task'.\n5) Use the TaskUpdate tool to mark that task as completed.\n6) Reply with exactly: S1 DONE"
+ }
+}

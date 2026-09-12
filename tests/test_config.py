@@ -1,0 +1,106 @@
+"""config.py: PRD §15 defaults + global/project merge + CC_CONTINUITY=0."""
+
+import json
+import subprocess
+
+import pytest
+
+from cc_continuity import config
+
+
+def _git(root, *args):
+    subprocess.run(["git", *args], cwd=root, check=True,
+                   capture_output=True, env={**__import__("os").environ,
+                                             "GIT_CONFIG_GLOBAL": "/dev/null",
+                                             "GIT_CONFIG_SYSTEM": "/dev/null"})
+
+
+def test_defaults_match_prd_section_15():
+    d = config.DEFAULTS
+    assert d["enabled"] is True
+    assert d["window_tokens"] == 262144
+    assert d["warn_ratio"] == 0.55
+    assert d["rotate_ratio"] == 0.62
+    assert d["hard_ratio"] == 0.72
+    assert d["full_auto"] is True
+    assert d["settle_ms"] == 1500
+    assert d["git_snapshot"] is True
+    assert d["snapshot_retention"] == 20
+    assert d["handoff_max_words"] == 2500
+    assert d["inline_handoff_max_chars"] == 12000
+    assert d["notify_command"] is None
+    assert d["log_level"] == "info"
+    assert len(d["redact_patterns"]) == 3
+    assert "sk-[A-Za-z0-9]{20,}" in d["redact_patterns"]
+
+
+def test_no_files_gives_pure_defaults(cc_home, tmp_path):
+    assert config.load_config(cwd=tmp_path) == config.DEFAULTS
+
+
+def test_global_config_merges_over_defaults(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"warn_ratio": 0.5}))
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["warn_ratio"] == 0.5
+    assert cfg["hard_ratio"] == 0.72  # untouched default survives
+
+
+def test_project_override_wins_over_global(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"warn_ratio": 0.5}))
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "continuity.json").write_text(json.dumps({"warn_ratio": 0.45}))
+    assert config.load_config(cwd=proj)["warn_ratio"] == 0.45
+
+
+def test_project_file_at_git_root_found_from_subdir(cc_home, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "continuity.json").write_text(json.dumps({"rotate_ratio": 0.6}))
+    sub = repo / "src" / "deep"
+    sub.mkdir(parents=True)
+    assert config.load_config(cwd=sub)["rotate_ratio"] == 0.6
+    assert config.load_config(cwd=repo)["rotate_ratio"] == 0.6
+
+
+def test_non_git_parent_config_not_picked_up(cc_home, tmp_path):
+    parent = tmp_path / "a"
+    child = tmp_path / "a" / "b"
+    (parent / ".claude").mkdir(parents=True)
+    (parent / ".claude" / "continuity.json").write_text(json.dumps({"warn_ratio": 0.1}))
+    child.mkdir(parents=True)
+    # Not in git → only the cwd itself is searched.
+    assert config.load_config(cwd=child)["warn_ratio"] == 0.55
+    (child / ".claude").mkdir()
+    (child / ".claude" / "continuity.json").write_text(json.dumps({"warn_ratio": 0.2}))
+    assert config.load_config(cwd=child)["warn_ratio"] == 0.2
+
+
+def test_cc_continuity_0_disables(monkeypatch, cc_home, tmp_path):
+    cfg = config.load_config(cwd=tmp_path)
+    monkeypatch.setenv("CC_CONTINUITY", "0")
+    assert config.is_enabled(cfg) is False
+    monkeypatch.setenv("CC_CONTINUITY", "1")
+    assert config.is_enabled(cfg) is True
+
+
+def test_enabled_false_in_config_wins_over_env(monkeypatch, cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"enabled": False}))
+    monkeypatch.delenv("CC_CONTINUITY", raising=False)
+    assert config.is_enabled(config.load_config(cwd=tmp_path)) is False
+
+
+def test_invalid_global_json_raises_config_error(cc_home, tmp_path):
+    (cc_home / "config.json").write_text("{not json")
+    with pytest.raises(config.ConfigError):
+        config.load_config(cwd=tmp_path)
+
+
+def test_invalid_project_json_raises_config_error(cc_home, tmp_path):
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "continuity.json").write_text("nope")
+    with pytest.raises(config.ConfigError):
+        config.load_config(cwd=proj)

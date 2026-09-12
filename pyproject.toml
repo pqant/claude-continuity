@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cc-continuity"
+version = "0.1.0"
+description = "Zero-touch session rotation for Claude Code (local large-context model)"
+requires-python = ">=3.11"
+dependencies = []  # stdlib only at runtime (PRD §0.5)
+
+[project.scripts]
+cc-continuity = "cc_continuity.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["cc_continuity*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
