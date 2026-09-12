@@ -1,0 +1,20 @@
+{
+ "event": "PreCompact",
+ "mode": "log",
+ "ts": 1789165893.993104,
+ "pid": 97667,
+ "env": {
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "80000",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "30000"
+ },
+ "payload": {
+  "session_id": "306e9086-9fcc-4ba1-872c-5a75bed80cff",
+  "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.t2haMJITR9/.claude/projects/-Users-eralp-arid-claude-continuity/306e9086-9fcc-4ba1-872c-5a75bed80cff.jsonl",
+  "cwd": "$HOME/arid/claude-continuity",
+  "prompt_id": "77813aa1-0029-4bb9-811f-df59173b4510",
+  "hook_event_name": "PreCompact",
+  "trigger": "auto",
+  "custom_instructions": null
+ }
+}
