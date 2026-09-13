@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import redact
+from . import ledger, redact
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -188,3 +188,58 @@ def git_facts(root: Path) -> dict:
         rc, stat = _git(root, "diff", "--cached", "--stat")
     facts["diff_stat"] = stat.splitlines()[:MAX_DIFF_LINES] if rc == 0 else []
     return facts
+
+
+MAX_TOUCHED = 50
+MAX_COMMANDS = 30
+MAX_PROMPTS = 10
+PROMPT_CHARS = 500
+
+
+def ledger_summary(session_dir: Path) -> dict:
+    """PRD §10.2 — aggregate the session ledger into snapshot sections.
+
+    Inputs are already redacted/truncated by the Phase 3 hooks.
+    """
+    entries = ledger.read(session_dir)
+    touched: dict = {}
+    order: list = []
+    commands: list = []
+    failed: list = []
+    tasks: dict = {}
+    prompts: list = []
+    for e in entries:
+        t = e.get("type")
+        if t == "tool_use" and e.get("file_path"):
+            p = e["file_path"]
+            if p not in touched:
+                touched[p] = {"path": p, "op": e.get("tool"), "count": 0}
+                order.append(p)
+            touched[p]["count"] += 1
+            touched[p]["op"] = e.get("tool")
+        elif t == "tool_use" and e.get("tool") == "Bash" and e.get("command"):
+            commands.append({"command": e["command"],
+                             "interrupted": bool(e.get("interrupted"))})
+        elif t == "tool_failure":
+            failed.append({"tool": e.get("tool"),
+                           "command": e.get("command"),
+                           "error_first_line": e.get("error_first_line")})
+        elif t in ("task_created", "task_completed"):
+            tid = e.get("task_id")
+            if tid is None:
+                continue
+            task = tasks.setdefault(tid,
+                                    {"id": tid, "subject": None, "status": "created"})
+            if e.get("subject"):
+                task["subject"] = e["subject"]
+            if e.get("status"):
+                task["status"] = e["status"]
+        elif t == "user_prompt":
+            prompts.append(str(e.get("text", ""))[:PROMPT_CHARS])
+    return {
+        "files_touched": [touched[p] for p in reversed(order)][:MAX_TOUCHED],
+        "commands": commands[-MAX_COMMANDS:],
+        "failed_commands": failed,
+        "tasks": list(tasks.values()),
+        "user_prompts": prompts[-MAX_PROMPTS:],
+    }
