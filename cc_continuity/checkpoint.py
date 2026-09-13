@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import ledger, redact
+from . import gitsnap, ledger, naming, paths, redact
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -242,4 +242,62 @@ def ledger_summary(session_dir: Path) -> dict:
         "failed_commands": failed,
         "tasks": list(tasks.values()),
         "user_prompts": prompts[-MAX_PROMPTS:],
+    }
+
+
+def build_snapshot(*, key: str, nnn: int, root: Path, cfg: dict,
+                   metric: dict | None, degraded: bool, created: str,
+                   state_record: dict, project_record: dict) -> dict:
+    """PRD §10.2 — the deterministic part, produced by code only.
+
+    ``created`` comes from the state record (never ``time.time()`` here) so
+    a run's output is deterministic for its inputs.
+    """
+    root = Path(root)
+    gf = git_facts(root)
+    slug = project_record.get("slug") or naming.slug_for_dir(root)
+    snap: dict = {"ref": None, "commit": None, "tree": None}
+    snap_error: str | None = None
+    if cfg.get("git_snapshot") and gf["git_root"] is not None:
+        try:
+            snap = gitsnap.make_snapshot(root, slug, nnn)
+            gitsnap.prune_snapshots(root, slug,
+                                    int(cfg.get("snapshot_retention", 20)))
+        except gitsnap.GitSnapError as e:
+            snap, snap_error = {"ref": None, "commit": None, "tree": None}, str(e)
+    metric = metric or {}
+    return {
+        "schema_version": 1,
+        "checkpoint": f"cp-{naming.pad_nnn(nnn)}",
+        "created": created,
+        "degraded": degraded,
+        "session": {
+            "name": state_record["name"],
+            "nnn": nnn,
+            "session_id": state_record["session_id"],
+            "predecessor": state_record.get("predecessor"),
+            "successor": state_record.get("successor"),
+            "cc_version": metric.get("cc_version"),
+            "ratio": metric.get("ratio"),
+            "window_tokens": metric.get("window_tokens"),
+            "state_at_checkpoint": state_record["state"],
+        },
+        "project": {
+            "root": str(root),
+            "slug": slug,
+            "git_root": gf["git_root"],
+            "branch": gf["branch"],
+            "head": gf["head"],
+            "ahead": gf["ahead"],
+            "behind": gf["behind"],
+        },
+        "git": {
+            "status": gf["status"],
+            "diff_stat": gf["diff_stat"],
+            "staged": gf["staged"],
+            "unstaged": gf["unstaged"],
+            "snapshot": snap if snap["ref"] else None,
+            "snapshot_error": snap_error,
+        },
+        **ledger_summary(paths.session_dir(key, nnn)),
     }
