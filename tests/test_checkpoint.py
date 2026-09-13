@@ -219,3 +219,55 @@ def test_git_facts_upstream_ahead_behind(cc_home, tmp_path):
     _git(repo, "update-ref", f"refs/remotes/origin/{branch}", c2)
     facts = checkpoint.git_facts(repo)
     assert (facts["ahead"], facts["behind"]) == (1, 1)
+
+
+# ------------------------------------------------------------ ledger summary
+
+KEY = "proj-1a2b3c4d"
+
+
+def _sdir():
+    return paths.session_dir(KEY, 1)
+
+
+def test_ledger_summary_aggregation(cc_home):
+    sdir = _sdir()
+    ledger.append(sdir, {"type": "tool_use", "tool": "Write", "file_path": "/x/a.py"})
+    ledger.append(sdir, {"type": "tool_use", "tool": "Edit", "file_path": "/x/a.py"})
+    ledger.append(sdir, {"type": "tool_use", "tool": "Bash", "command": "pytest -q"})
+    ledger.append(sdir, {"type": "tool_use", "tool": "Bash",
+                         "command": "boom", "interrupted": True})
+    ledger.append(sdir, {"type": "tool_failure", "tool": "Bash",
+                         "command": "boom", "error_first_line": "Exit code 1"})
+    ledger.append(sdir, {"type": "task_created", "task_id": "1", "subject": "Build X"})
+    ledger.append(sdir, {"type": "task_completed", "task_id": "1",
+                         "status": "completed"})
+    for i in range(12):
+        ledger.append(sdir, {"type": "user_prompt", "text": f"prompt {i} " + "x" * 600})
+    s = checkpoint.ledger_summary(sdir)
+    assert s["files_touched"] == [{"path": "/x/a.py", "op": "Edit", "count": 2}]
+    assert s["commands"] == [
+        {"command": "pytest -q", "interrupted": False},
+        {"command": "boom", "interrupted": True}]
+    assert s["failed_commands"] == [
+        {"tool": "Bash", "command": "boom", "error_first_line": "Exit code 1"}]
+    assert s["tasks"] == [{"id": "1", "subject": "Build X", "status": "completed"}]
+    assert len(s["user_prompts"]) == 10
+    assert s["user_prompts"][0].startswith("prompt 2 ")
+    assert all(len(p) == 500 for p in s["user_prompts"])
+
+
+def test_ledger_summary_caps_and_order(cc_home):
+    sdir = _sdir()
+    for i in range(55):
+        ledger.append(sdir, {"type": "tool_use", "tool": "Edit",
+                             "file_path": f"/x/f{i:02d}.py"})
+    for i in range(35):
+        ledger.append(sdir, {"type": "tool_use", "tool": "Bash",
+                             "command": f"cmd-{i}"})
+    s = checkpoint.ledger_summary(sdir)
+    assert len(s["files_touched"]) == 50
+    assert s["files_touched"][0]["path"] == "/x/f54.py"   # most recent first
+    assert s["files_touched"][0]["count"] == 1
+    assert len(s["commands"]) == 30
+    assert s["commands"][0] == {"command": "cmd-5", "interrupted": False}
