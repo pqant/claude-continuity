@@ -14,13 +14,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import gitsnap, ledger, naming, paths, redact
+from . import atomic, gitsnap, ledger, lock, naming, paths, redact, state
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -371,3 +375,171 @@ def render_handoff(snapshot: dict, draft_text: str | None,
     lines += ["", "### User prompts this session (last 10)", ""]
     lines += [f"> {pr}" for pr in snapshot["user_prompts"]] or ["(none recorded)"]
     return "\n".join(lines).rstrip() + "\n"
+
+
+HANDOFF_WALK: dict[str, list[str]] = {
+    "BOOTSTRAPPING": ["ACTIVE", "ROTATION_PENDING", "HANDOFF_REQUESTED"],
+    "ACTIVE": ["ROTATION_PENDING", "HANDOFF_REQUESTED"],
+    "WARNED": ["ROTATION_PENDING", "HANDOFF_REQUESTED"],
+    "ROTATION_PENDING": ["HANDOFF_REQUESTED"],
+    "HANDOFF_REQUESTED": [],
+    "HANDOFF_FAILED": [],
+    "CHECKPOINT_WRITING": [],
+}
+
+
+def _read_project_record(key: str) -> dict:
+    """Lock-free read — callers hold the project lock."""
+    pfile = paths.project_dir(key) / "project.json"
+    return json.loads(pfile.read_text(encoding="utf-8"))
+
+
+def _write_file_fsync(path: Path, data: bytes) -> None:
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _verify_checkpoint_dir(tmp: Path, *, snapshot: dict, state_record: dict,
+                           root: Path, degraded: bool) -> None:
+    """PRD §10.4 step 3 — re-read and verify. Raises CheckpointError."""
+    for name in ("handoff.md", "state.json", "snapshot.json",
+                 "ledger.jsonl", "SHA256SUMS"):
+        if not (tmp / name).is_file():
+            raise CheckpointError(f"verify: missing {name}")
+    sums: dict = {}
+    for line in (tmp / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        digest, _, name = line.partition("  ")
+        sums[name.strip()] = digest
+    expected = {"handoff.md", "state.json", "snapshot.json", "ledger.jsonl"}
+    if set(sums) != expected:
+        raise CheckpointError("verify: SHA256SUMS covers wrong file set")
+    for name, digest in sums.items():
+        actual = hashlib.sha256((tmp / name).read_bytes()).hexdigest()
+        if actual != digest:
+            raise CheckpointError(f"verify: checksum mismatch: {name}")
+    try:
+        cp_state = json.loads((tmp / "state.json").read_text(encoding="utf-8"))
+        cp_snap = json.loads((tmp / "snapshot.json").read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise CheckpointError(f"verify: unparseable JSON: {e}")
+    handoff = (tmp / "handoff.md").read_text(encoding="utf-8")
+    if degraded:
+        if C7 not in handoff:
+            raise CheckpointError("verify: degraded header missing")
+    elif not headings_in_order(handoff):
+        raise CheckpointError("verify: handoff headings missing/out of order")
+    if cp_snap["project"]["root"] != str(root):
+        raise CheckpointError("verify: project_dir mismatch")
+    if (cp_snap["session"]["session_id"] != state_record["session_id"]
+            or cp_state["session_id"] != state_record["session_id"]):
+        raise CheckpointError("verify: session_id mismatch")
+
+
+def _set_latest_checkpoint(key: str, nnn: int, snapshot: dict,
+                           final: Path) -> None:
+    pfile = paths.project_dir(key) / "project.json"
+    record = json.loads(pfile.read_text(encoding="utf-8"))
+    record["latest_checkpoint"] = {
+        "cp_id": snapshot["checkpoint"],
+        "nnn": nnn,
+        "created": snapshot["created"],
+        "handoff_path": str(final / "handoff.md"),
+        "pending_consumption": True,
+    }
+    atomic.atomic_write_json(pfile, record)
+
+
+def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
+             metric: dict | None = None,
+             fault: Callable[[int], None] | None = None) -> tuple[str, bool]:
+    """PRD §10.4 — build + finalize the checkpoint for session ``nnn``.
+
+    The whole sequence runs under the project lock. ``fault(step)`` (tests
+    only) may raise before a step to simulate a kill; step numbers are
+    documented in the module plan (0 stale-tmp … 8 state+pointer). A crash
+    at any point leaves either the previous valid checkpoint or a
+    ``checkpoint.tmp-*`` dir, never ``CHECKPOINT_VERIFIED`` state.
+    Returns ``(checkpoint_id, degraded)``.
+    """
+    root = Path(root)
+
+    def step(i: int) -> None:
+        if fault is not None:
+            fault(i)
+
+    with lock.held(key):
+        step(0)
+        pdir = paths.session_dir(key, nnn)
+        for stale in pdir.glob("checkpoint.tmp-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        step(1)
+        record = state.load_state(key, nnn)
+        if record["state"] not in HANDOFF_WALK:
+            raise CheckpointError(
+                f"cannot checkpoint from state {record['state']} "
+                f"(session {nnn:03d})")
+        for target in HANDOFF_WALK[record["state"]]:
+            state._transition_unlocked(key, nnn, target)
+        state._transition_unlocked(key, nnn, "CHECKPOINT_WRITING")
+        record = state.load_state(key, nnn)
+        step(2)
+        draft_path = pdir / "handoff.draft.md"
+        draft_text = None
+        if draft_path.is_file():
+            report = validate_draft(draft_path.read_text(encoding="utf-8"), cfg)
+            if report.ok:
+                draft_text = report.redacted_text
+        degraded = draft_text is None
+        step(3)
+        snapshot = build_snapshot(key=key, nnn=nnn, root=root, cfg=cfg,
+                                  metric=metric, degraded=degraded,
+                                  created=record["updated"],
+                                  state_record=record,
+                                  project_record=_read_project_record(key))
+        step(4)
+        handoff = render_handoff(snapshot, draft_text, degraded)
+        step(5)
+        tmp = pdir / f"checkpoint.tmp-{os.getpid()}"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir()
+        state_copy = dict(record)
+        state_copy["degraded"] = degraded
+        _write_file_fsync(tmp / "handoff.md", handoff.encode("utf-8"))
+        _write_file_fsync(tmp / "state.json",
+                          (json.dumps(state_copy, indent=2, ensure_ascii=False)
+                           + "\n").encode("utf-8"))
+        _write_file_fsync(tmp / "snapshot.json",
+                          (json.dumps(snapshot, indent=2, ensure_ascii=False)
+                           + "\n").encode("utf-8"))
+        ledger_file = pdir / "ledger.jsonl"
+        _write_file_fsync(tmp / "ledger.jsonl",
+                          ledger_file.read_bytes() if ledger_file.is_file()
+                          else b"")
+        sum_lines = []
+        for name in ("handoff.md", "state.json", "snapshot.json",
+                     "ledger.jsonl"):
+            digest = hashlib.sha256((tmp / name).read_bytes()).hexdigest()
+            sum_lines.append(f"{digest}  {name}")
+        _write_file_fsync(tmp / "SHA256SUMS",
+                          ("\n".join(sum_lines) + "\n").encode("utf-8"))
+        step(6)
+        try:
+            _verify_checkpoint_dir(tmp, snapshot=snapshot, state_record=record,
+                                   root=root, degraded=degraded)
+        except CheckpointError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        step(7)
+        final = pdir / "checkpoint"
+        if final.exists():
+            shutil.rmtree(final)
+        os.rename(tmp, final)
+        atomic.fsync_dir(pdir)
+        step(8)
+        state._transition_unlocked(key, nnn, "CHECKPOINT_VERIFIED",
+                                   degraded=degraded)
+        _set_latest_checkpoint(key, nnn, snapshot, final)
+    return snapshot["checkpoint"], degraded
