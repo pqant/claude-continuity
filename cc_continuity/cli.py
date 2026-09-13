@@ -1,8 +1,10 @@
 """cc-continuity command-line entry point (PRD §16).
 
 Phase 2 implements ``statusline`` (PRD §7) and ``status [--json]``;
-Phase 3 implements ``hook <event>`` (PRD §9) and ``history``. The remaining
-subcommands still report which phase implements them.
+Phase 3 implements ``hook <event>`` (PRD §9) and ``history``.
+Phase 4 implements ``checkpoint`` / ``validate`` / ``validate-draft``
+(PRD §10/§12). The remaining subcommands still report which phase
+implements them.
 """
 
 from __future__ import annotations
@@ -14,15 +16,13 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from . import __version__, config, naming, paths, project, statusline
+from . import (__version__, checkpoint, config, naming, paths, project,
+               state, statusline, validate)
 from .hooks import (common, session_end, session_start, task, tool_use,
                     user_prompt)
 
 # subcommand -> phase that implements it (PRD §20)
 SUBCOMMAND_PHASES: dict[str, int] = {
-    "checkpoint": 4,
-    "validate": 4,
-    "validate-draft": 4,
     "request-rotation": 5,
     "off": 5,
     "on": 5,
@@ -67,6 +67,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist = sub.add_parser("history", help="session chain for this project")
     p_hist.add_argument("-n", type=int, default=20,
                         help="show at most N most recent sessions (default 20)")
+
+    p_vd = sub.add_parser("validate-draft",
+                          help="validate a handoff draft (PRD §10.1)")
+    p_vd.add_argument("file", help="path to handoff.draft.md")
+
+    p_val = sub.add_parser("validate", help="validate a checkpoint (PRD §12)")
+    p_val.add_argument("--checkpoint", required=True, dest="checkpoint",
+                       help="checkpoint directory to validate")
+
+    p_cp = sub.add_parser("checkpoint",
+                          help="build + finalize a checkpoint now (PRD §10)")
+    p_cp.add_argument("--no-rotate", action="store_true",
+                      help="finalize without rotating (rotation lands in "
+                           "Phase 6; no-op in Phase 4)")
 
     for name in SUBCOMMAND_PHASES:
         sub.add_parser(name,
@@ -256,6 +270,57 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------- Phase 4 cmds
+
+
+def cmd_validate_draft(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    path = Path(args.file)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"cc-continuity validate-draft: {e}", file=sys.stderr)
+        return 1
+    report = checkpoint.validate_draft(text, cfg)
+    if report.ok:
+        print(f"DRAFT OK ({report.word_count} words, {report.warnings} redacted)")
+        return 0
+    # Appendix C.6
+    print("CONTINUITY: handoff draft invalid: " + "; ".join(report.problems)
+          + f". Fix {path} and end your turn.")
+    return 1
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    status, details = validate.validate_checkpoint(Path(args.checkpoint), cfg)
+    print(f"VALIDATION: {status}")
+    for line in details:
+        print(line)
+    return 0 if status == "OK" else 1
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    root = project.resolve_root(Path.cwd())
+    key = project.project_key_for_root(root)
+    record, metric = _resolve_session(root, key)
+    if record is None:
+        print("No registered session for this project "
+              "(a project registers itself on its first hook).",
+              file=sys.stderr)
+        return 1
+    try:
+        cp_id, degraded = checkpoint.finalize(key, record["nnn"], cfg=cfg,
+                                              root=root, metric=metric)
+    except (checkpoint.CheckpointError, state.StateNotFoundError) as e:
+        print(f"cc-continuity checkpoint: {e}", file=sys.stderr)
+        return 1
+    final = paths.session_dir(key, record["nnn"]) / "checkpoint" / "handoff.md"
+    print(f"CHECKPOINT {cp_id}{' (DEGRADED)' if degraded else ''} → {final}")
+    return 0
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -273,6 +338,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_hook(args)
     if args.command == "history":
         return cmd_history(args)
+    if args.command == "validate-draft":
+        return cmd_validate_draft(args)
+    if args.command == "validate":
+        return cmd_validate(args)
+    if args.command == "checkpoint":
+        return cmd_checkpoint(args)
     phase = SUBCOMMAND_PHASES[args.command]
     print(
         f"cc-continuity {args.command}: not implemented yet (Phase {phase})",
