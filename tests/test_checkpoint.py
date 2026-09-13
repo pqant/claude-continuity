@@ -359,3 +359,83 @@ def test_build_snapshot_non_git_dir(cc_home, tmp_path):
     assert snap["project"]["git_root"] is None
     assert snap["git"]["snapshot"] is None
     assert snap["git"]["status"] == []
+
+
+# ---------------------------------------------------------- render handoff
+
+
+def _snap(**over):
+    base = {
+        "schema_version": 1, "checkpoint": "cp-001",
+        "created": "2026-09-13T05:00:00+00:00", "degraded": False,
+        "session": {"name": "spike-001", "nnn": 1, "session_id": "sid-1",
+                    "predecessor": None, "successor": None,
+                    "cc_version": "2.1.209", "ratio": 0.62,
+                    "window_tokens": 262144,
+                    "state_at_checkpoint": "CHECKPOINT_WRITING"},
+        "project": {"root": "/repo", "slug": "spike", "git_root": "/repo",
+                    "branch": "main", "head": "a" * 40, "ahead": 0, "behind": 0},
+        "git": {"status": [" M a.txt", "?? b.txt"], "diff_stat": [" a.txt | 1 +"],
+                "staged": 0, "unstaged": 1,
+                "snapshot": {"ref": "refs/continuity/spike/cp-001",
+                             "commit": "b" * 40, "tree": "c" * 40},
+                "snapshot_error": None},
+        "files_touched": [{"path": "a.txt", "op": "Edit", "count": 2}],
+        "commands": [{"command": "pytest -q", "interrupted": False}],
+        "failed_commands": [{"tool": "Bash", "command": "boom",
+                             "error_first_line": "Exit code 1"}],
+        "tasks": [{"id": "1", "subject": "Build X", "status": "completed"}],
+        "user_prompts": ["hello"],
+    }
+    base.update(over)
+    return base
+
+
+DRAFT_TEXT = _draft()
+
+
+def test_render_full_draft():
+    text = checkpoint.render_handoff(_snap(), DRAFT_TEXT, False)
+    assert text.startswith("# Handoff cp-001 — spike-001\n")
+    assert "· sid `sid-1`" in text and "2.1.209" in text
+    assert "62.0%" in text and "window 262144" in text
+    assert "branch `main`" in text and "a" * 7 in text
+    assert "refs/continuity/spike/cp-001" in text
+    assert DRAFT_TEXT.rstrip() in text          # draft verbatim
+    assert "staged: 0 · unstaged: 1" in text
+    assert "`a.txt` — Edit ×2" in text
+    assert "hello" in text
+    assert checkpoint.C7 not in text
+    assert checkpoint.headings_in_order(text)   # final doc keeps the 9 in order
+
+
+def test_render_degraded():
+    text = checkpoint.render_handoff(_snap(degraded=True), None, True)
+    assert checkpoint.C7 in text
+    assert "## Objective" not in text
+    assert checkpoint.headings_in_order(text) is False
+
+
+def test_render_no_snapshot_clean_tree():
+    s = _snap()
+    s["git"] = {"status": [], "diff_stat": [], "staged": 0, "unstaged": 0,
+                "snapshot": None, "snapshot_error": None}
+    text = checkpoint.render_handoff(s, DRAFT_TEXT, False)
+    assert "- git snapshot: —" in text
+    assert "(working tree clean)" in text
+
+
+def test_render_snapshot_error():
+    s = _snap()
+    s["git"]["snapshot"] = None
+    s["git"]["snapshot_error"] = "index corrupt"
+    text = checkpoint.render_handoff(s, DRAFT_TEXT, False)
+    assert "- git snapshot: — (index corrupt)" in text
+
+
+def test_render_no_ratio_or_predecessor():
+    s = _snap()
+    s["session"]["ratio"] = None
+    text = checkpoint.render_handoff(s, DRAFT_TEXT, False)
+    assert "ratio at rotation: —" in text
+    assert "- predecessor: —" in text

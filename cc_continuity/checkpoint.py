@@ -301,3 +301,73 @@ def build_snapshot(*, key: str, nnn: int, root: Path, cfg: dict,
         },
         **ledger_summary(paths.session_dir(key, nnn)),
     }
+
+
+def render_handoff(snapshot: dict, draft_text: str | None,
+                   degraded: bool) -> str:
+    """PRD §10.4 step 1 — meta header + model sections (or C.7) + appendix."""
+    s, p, g = snapshot["session"], snapshot["project"], snapshot["git"]
+    lines: list = [
+        f"# Handoff {snapshot['checkpoint']} — "
+        f"{naming.logical_name(p['slug'], s['nnn'])}",
+        "",
+        f"- session: `{s['name']}` ({naming.pad_nnn(s['nnn'])}) "
+        f"· sid `{s['session_id']}`",
+        f"- predecessor: `{s['predecessor']}`" if s["predecessor"]
+        else "- predecessor: —",
+        f"- created: {snapshot['created']}",
+        f"- cc version: {s['cc_version'] or '—'}",
+    ]
+    ratio = s["ratio"]
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        wt = s.get("window_tokens")
+        lines.append(f"- ratio at rotation: {ratio * 100:.1f}%"
+                     + (f" (window {wt})" if wt else ""))
+    else:
+        lines.append("- ratio at rotation: —")
+    proj = f"- project: {p['root']}"
+    if p["branch"]:
+        proj += f" (branch `{p['branch']}`"
+        if p["head"]:
+            proj += f", HEAD `{p['head'][:7]}`"
+        proj += ")"
+    lines.append(proj)
+    snap = g.get("snapshot")
+    if snap:
+        lines.append(f"- git snapshot: `{snap['ref']}` @ `{snap['commit'][:7]}`"
+                     f" (tree `{snap['tree'][:7]}`)")
+    elif g.get("snapshot_error"):
+        lines.append(f"- git snapshot: — ({g['snapshot_error']})")
+    else:
+        lines.append("- git snapshot: —")
+    lines.append("")
+    if degraded:
+        lines += [f"> {C7}", ""]
+    else:
+        lines += [draft_text.rstrip(), ""]
+    lines += ["## Appendix — Deterministic state (auto-generated)", ""]
+    lines.append(f"### Git working tree (staged: {g['staged']} · "
+                 f"unstaged: {g['unstaged']})")
+    lines.append("")
+    if g["status"]:
+        lines += ["```"] + g["status"] + ["```", ""]
+    else:
+        lines += ["(working tree clean)", ""]
+    if g["diff_stat"]:
+        lines += ["```"] + g["diff_stat"] + ["```", ""]
+    lines += ["### Files touched this session (last 50)", ""]
+    lines += [f"- `{f['path']}` — {f['op']} ×{f['count']}"
+              for f in snapshot["files_touched"]] or ["(none recorded)"]
+    lines += ["", "### Commands run this session (last 30)", ""]
+    lines += [f"- `{c['command']}`" + (" (interrupted)" if c["interrupted"] else "")
+              for c in snapshot["commands"]] or ["(none recorded)"]
+    lines += ["", "### Failed commands", ""]
+    lines += [f"- {f['tool']}: {f.get('error_first_line') or 'no error line'}"
+              + (f" — `{f['command']}`" if f.get("command") else "")
+              for f in snapshot["failed_commands"]] or ["(none recorded)"]
+    lines += ["", "### Tasks (last known)", ""]
+    lines += [f"- {t['id']} {t['subject'] or ''} — {t['status']}".rstrip()
+              for t in snapshot["tasks"]] or ["(none recorded)"]
+    lines += ["", "### User prompts this session (last 10)", ""]
+    lines += [f"> {pr}" for pr in snapshot["user_prompts"]] or ["(none recorded)"]
+    return "\n".join(lines).rstrip() + "\n"
