@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 
-def _fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path) -> None:
     """fsync a directory so the rename itself is durable (best effort)."""
     try:
         dfd = os.open(path, os.O_RDONLY)
@@ -49,7 +49,7 @@ def atomic_write(path: str | Path, data: bytes) -> None:
         except OSError:
             pass
         raise
-    _fsync_dir(parent)
+    fsync_dir(parent)
 
 
 def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> None:

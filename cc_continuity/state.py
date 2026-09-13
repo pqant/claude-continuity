@@ -113,33 +113,37 @@ def update_fields(project_key: str, nnn: int, **fields: object) -> dict:
         return record
 
 
-def transition(project_key: str, nnn: int, new_state: str,
-               **fields: object) -> tuple[dict, bool]:
-    """Validate and apply one transition. Returns ``(record, changed)``.
+def _transition_unlocked(project_key: str, nnn: int, new_state: str,
+                         **fields: object) -> tuple[dict, bool]:
+    """One transition — caller must hold the project lock.
 
-    ``changed`` is False when ``new_state`` equals the current state
-    (idempotent no-op: nothing is written, no event is appended).
-    Extra ``fields`` (e.g. ``ratio_at_pending``, ``degraded``) are stored on
-    the record when the transition is applied.
+    Returns ``(record, changed)``; ``changed`` is False when ``new_state``
+    equals the current state (idempotent no-op: nothing written, no event).
     """
     if new_state not in STATES:
         raise InvalidTransitionError(f"unknown state {new_state!r}")
-    with lock.held(project_key):
-        record = load_state(project_key, nnn)  # raises StateNotFoundError
-        current = record["state"]
-        if new_state == current:
-            return record, False
-        if new_state not in VALID_TRANSITIONS[current]:
-            raise InvalidTransitionError(
-                f"{current} -> {new_state} not allowed (session {nnn:03d})"
-            )
-        record["state"] = new_state
-        record["updated"] = _now()
-        for key, value in fields.items():
-            record[key] = value
-        atomic.atomic_write_json(_state_path(project_key, nnn), record)
-        ledger.append(
-            paths.session_dir(project_key, nnn),
-            {"type": "state", "from": current, "to": new_state, "fields": fields},
+    record = load_state(project_key, nnn)  # raises StateNotFoundError
+    current = record["state"]
+    if new_state == current:
+        return record, False
+    if new_state not in VALID_TRANSITIONS[current]:
+        raise InvalidTransitionError(
+            f"{current} -> {new_state} not allowed (session {nnn:03d})"
         )
-        return record, True
+    record["state"] = new_state
+    record["updated"] = _now()
+    for key, value in fields.items():
+        record[key] = value
+    atomic.atomic_write_json(_state_path(project_key, nnn), record)
+    ledger.append(
+        paths.session_dir(project_key, nnn),
+        {"type": "state", "from": current, "to": new_state, "fields": fields},
+    )
+    return record, True
+
+
+def transition(project_key: str, nnn: int, new_state: str,
+               **fields: object) -> tuple[dict, bool]:
+    """Validate and apply one transition (takes the project lock)."""
+    with lock.held(project_key):
+        return _transition_unlocked(project_key, nnn, new_state, **fields)
