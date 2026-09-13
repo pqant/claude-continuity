@@ -28,8 +28,7 @@ def test_no_command_exits_2_with_help(capsys):
 
 @pytest.mark.parametrize(
     "command",
-    ["rotate", "checkpoint", "validate", "doctor",
-     "install", "uninstall"],
+    ["rotate", "doctor", "install", "uninstall"],
 )
 def test_unimplemented_subcommand_reports_phase(command, capsys):
     assert cli.main([command]) == 2
@@ -128,3 +127,116 @@ def test_history_n_limits_output(cc_home, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "spike-repo-002" in out
     assert "spike-repo-001" not in out
+
+
+# ------------------------------------------------------------- Phase 4 cmds
+
+import os as _os
+import subprocess as _subprocess
+import sys as _sys
+from pathlib import Path as _Path
+
+REPO_ROOT = _Path(__file__).resolve().parent.parent
+
+DRAFT_ORDER = [
+    "Objective", "Current Task and Exact Stopping Point", "Completed This Session",
+    "Next Atomic Action", "Remaining Plan", "Decisions and Rationale",
+    "Rejected Approaches — Do Not Repeat",
+    "Open Problems, Risks, Questions for the User", "Runtime Environment Notes",
+]
+DRAFT_BODIES = {
+    "Objective": "Ship the checkpoint engine for cc-continuity this session.",
+    "Current Task and Exact Stopping Point": (
+        "Stopped after implementing finalize; tests green."),
+    "Completed This Session": "- Wrote finalize",
+    "Next Atomic Action": "Edit `a.txt` and run the quick check.",
+    "Remaining Plan": "1. CLI",
+    "Decisions and Rationale": "Fault injection for step tests.",
+    "Rejected Approaches — Do Not Repeat": "Rejected model-written snapshots.",
+    "Open Problems, Risks, Questions for the User": "Watch the gitsnap flake.",
+    "Runtime Environment Notes": "Local vLLM, effort low.",
+}
+
+
+def _draft_text(omit=()):
+    return "\n".join(f"## {t}\n{DRAFT_BODIES[t]}\n"
+                     for t in DRAFT_ORDER if t not in omit)
+
+
+def _run_cli(*args, cwd, env_extra=None):
+    env = {**_os.environ, "PYTHONPATH": str(REPO_ROOT),
+           **(env_extra or {})}
+    return _subprocess.run(
+        [_sys.executable, "-m", "cc_continuity", *args],
+        cwd=cwd, env=env, capture_output=True, text=True)
+
+
+def _registered(tmp_path):
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    return repo, key, nnn, SID
+
+
+def test_cli_validate_draft_ok(cc_home, tmp_path, capsys):
+    f = tmp_path / "draft.md"
+    f.write_text(_draft_text(), encoding="utf-8")
+    assert cli.main(["validate-draft", str(f)]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("DRAFT OK") and "redacted" in out
+
+
+def test_cli_validate_draft_invalid(cc_home, tmp_path, capsys):
+    f = tmp_path / "draft.md"
+    f.write_text(_draft_text(omit=("Remaining Plan",)), encoding="utf-8")
+    assert cli.main(["validate-draft", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "handoff draft invalid" in out
+    assert "missing heading: Remaining Plan" in out
+
+
+def test_cli_checkpoint_e2e(cc_home, tmp_path, capsys):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import paths as _paths
+    (_paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _draft_text(), encoding="utf-8")
+    r = _run_cli("checkpoint", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert f"CHECKPOINT cp-{nnn:03d}" in r.stdout
+    cp = _paths.session_dir(key, nnn) / "checkpoint"
+    assert (cp / "handoff.md").is_file() and (cp / "SHA256SUMS").is_file()
+    from cc_continuity import state as _state
+    assert _state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_cli_checkpoint_degraded_without_draft(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    r = _run_cli("checkpoint", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "DEGRADED" in r.stdout
+
+
+def test_cli_checkpoint_no_session(cc_home, tmp_path, capsys):
+    repo = tmp_path / "empty"
+    repo.mkdir()
+    # empty value = unset (see _resolve_session); guard against the
+    # developer's own env leaking a live session id
+    r = _run_cli("checkpoint", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": ""})
+    assert r.returncode == 1
+    assert "No registered session" in r.stderr
+
+
+def test_cli_validate_e2e(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import paths as _paths
+    (_paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _draft_text(), encoding="utf-8")
+    r = _run_cli("checkpoint", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    cp = _paths.session_dir(key, nnn) / "checkpoint"
+    r = _run_cli("validate", "--checkpoint", str(cp), cwd=repo)
+    assert r.returncode == 0 and "VALIDATION: OK" in r.stdout, r.stdout + r.stderr
+    (repo / "b.txt").write_text("b\n")
+    r = _run_cli("validate", "--checkpoint", str(cp), cwd=repo)
+    assert r.returncode == 1 and "VALIDATION: MISMATCH" in r.stdout
+    assert "b.txt" in r.stdout
