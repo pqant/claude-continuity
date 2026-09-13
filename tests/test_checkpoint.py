@@ -271,3 +271,91 @@ def test_ledger_summary_caps_and_order(cc_home):
     assert s["files_touched"][0]["count"] == 1
     assert len(s["commands"]) == 30
     assert s["commands"][0] == {"command": "cmd-5", "interrupted": False}
+
+
+# ---------------------------------------------------------- build snapshot
+
+from cc_continuity import project as _project
+
+
+def hookutil_key(d):
+    return _project.project_key_for_root(_project.resolve_root(d))
+
+
+def _registered(tmp_path, draft=None):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    if draft is not None:
+        (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+            draft, encoding="utf-8")
+    return repo, key, nnn
+
+
+def _build(repo, key, nnn, **over):
+    rec = state.load_state(key, nnn)
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text(encoding="utf-8"))
+    args = dict(key=key, nnn=nnn, root=repo, cfg=config.load_config(cwd=repo),
+                metric=over.pop("metric", None), degraded=False,
+                created=rec["updated"], state_record=rec, project_record=pref)
+    args.update(over)
+    return checkpoint.build_snapshot(**args)
+
+
+def test_build_snapshot_full(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path)
+    (repo / "new.txt").write_text("n\n")
+    snap = _build(repo, key, nnn,
+                  metric={"cc_version": "2.1.209", "ratio": 0.62,
+                          "window_tokens": 262144})
+    assert snap["checkpoint"] == f"cp-{naming.pad_nnn(nnn)}"
+    assert snap["schema_version"] == 1 and snap["degraded"] is False
+    assert snap["session"]["session_id"] == SID
+    assert snap["session"]["cc_version"] == "2.1.209"
+    assert snap["session"]["ratio"] == 0.62
+    assert snap["project"]["root"] == str(repo)
+    snapref = snap["git"]["snapshot"]
+    assert snapref["tree"] and len(snapref["tree"]) == 40
+    assert snapref["ref"] == f"refs/continuity/{snap['project']['slug']}/cp-{naming.pad_nnn(nnn)}"
+    r = subprocess.run(["git", "rev-parse", "--verify", snapref["ref"]],
+                       cwd=repo, capture_output=True)
+    assert r.returncode == 0                            # ref really exists
+    assert any("new.txt" in line for line in snap["git"]["status"])
+
+
+def test_build_snapshot_deterministic(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path)
+    s1 = _build(repo, key, nnn)
+    s2 = _build(repo, key, nnn)
+    # same worktree → same tree sha; everything except commit shas identical
+    assert s1["git"]["snapshot"]["tree"] == s2["git"]["snapshot"]["tree"]
+    g1 = {k: v for k, v in s1["git"].items() if k != "snapshot"}
+    g2 = {k: v for k, v in s2["git"].items() if k != "snapshot"}
+    assert g1 == g2
+    assert s1["files_touched"] == s2["files_touched"]
+    for k in ("session", "project", "commands", "failed_commands", "tasks",
+              "user_prompts"):
+        assert s1[k] == s2[k], k
+
+
+def test_build_snapshot_git_disabled(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path)
+    (paths.config_path()).write_text(json.dumps({"git_snapshot": False}),
+                                     encoding="utf-8")
+    (repo / "new.txt").write_text("n\n")                  # dirty tree
+    snap = _build(repo, key, nnn)
+    assert snap["git"]["snapshot"] is None
+    assert snap["git"]["snapshot_error"] is None
+    assert snap["git"]["status"]                          # facts still collected
+
+
+def test_build_snapshot_non_git_dir(cc_home, tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "f.txt").write_text("x\n")
+    run_hook("SessionStart", payload("SessionStart", plain, source="startup"))
+    key = hookutil_key(plain)
+    snap = _build(plain, key, 1)
+    assert snap["project"]["git_root"] is None
+    assert snap["git"]["snapshot"] is None
+    assert snap["git"]["status"] == []
