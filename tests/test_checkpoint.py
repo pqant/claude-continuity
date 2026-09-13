@@ -151,3 +151,71 @@ def test_hard_failure_coexists_with_warnings():
     assert r.ok is False
     assert r.warnings >= 1
     assert any("missing heading" in p for p in r.problems)
+
+
+# -------------------------------------------------------------- git facts
+
+
+def test_git_facts_dirty_repo(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "a.txt").write_text("a changed\n")          # unstaged modification
+    (repo / "b.txt").write_text("b\n")                   # untracked
+    (repo / "c.txt").write_text("c\n")
+    _git(repo, "add", "c.txt")                           # staged addition
+    facts = checkpoint.git_facts(repo)
+    assert facts["git_root"] == str(repo)
+    assert facts["branch"] in ("main", "master")
+    assert len(facts["head"]) == 40
+    assert facts["staged"] == 1 and facts["unstaged"] == 1
+    assert len(facts["status"]) == 3
+    assert facts["diff_stat"]                             # a.txt in diff --stat
+    assert facts["ahead"] is None and facts["behind"] is None
+
+
+def test_git_facts_non_git_dir(cc_home, tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "f.txt").write_text("x\n")
+    facts = checkpoint.git_facts(plain)
+    assert facts["git_root"] is None
+    assert facts["head"] is None and facts["branch"] is None
+    assert facts["status"] == [] and facts["diff_stat"] == []
+    assert facts["staged"] == 0 and facts["unstaged"] == 0
+
+
+def test_git_facts_repo_without_commits(cc_home, tmp_path):
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.txt").write_text("a\n")
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "a.txt")
+    facts = checkpoint.git_facts(repo)
+    assert facts["git_root"] == str(repo)
+    assert facts["head"] is None
+    assert facts["branch"] == "HEAD"                      # unborn HEAD
+    assert facts["staged"] == 1 and facts["unstaged"] == 0
+    assert any("a.txt" in line for line in facts["status"])
+    assert facts["diff_stat"]                             # staged vs empty tree
+
+
+def test_git_facts_upstream_ahead_behind(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-qm", "second")
+    branch = _gitout(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    # a configured remote makes refs/remotes/origin/* a real remote-tracking
+    # ref; without it `--set-upstream-to` refuses the bare ref
+    _git(repo, "remote", "add", "origin", str(repo))
+    c1 = _gitout(repo, "rev-parse", "HEAD~1")
+    _git(repo, "update-ref", f"refs/remotes/origin/{branch}", c1)
+    _git(repo, "branch", f"--set-upstream-to=origin/{branch}")
+    facts = checkpoint.git_facts(repo)
+    assert (facts["ahead"], facts["behind"]) == (1, 0)
+    # diverge the upstream: different commit, same parent
+    tree = _gitout(repo, "write-tree")
+    c2 = _gitout(repo, "commit-tree", tree, "-p", c1, "-m", "upstream extra")
+    _git(repo, "update-ref", f"refs/remotes/origin/{branch}", c2)
+    facts = checkpoint.git_facts(repo)
+    assert (facts["ahead"], facts["behind"]) == (1, 1)
