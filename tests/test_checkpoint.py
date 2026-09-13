@@ -572,3 +572,138 @@ def test_verify_detects_tampering(cc_home, tmp_path):
         checkpoint._verify_checkpoint_dir(tmp, snapshot=snap,
                                           state_record=rec, root=repo,
                                           degraded=False)
+
+
+# ------------------------------------------------------- finalize: edges
+
+
+def test_finalize_degraded_without_draft(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path)           # no draft at all
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=_cfg_for(repo),
+                                          root=repo)
+    assert degraded is True
+    st = state.load_state(key, nnn)
+    assert st["state"] == "CHECKPOINT_VERIFIED" and st["degraded"] is True
+    sdir = paths.session_dir(key, nnn)
+    handoff = (sdir / "checkpoint" / "handoff.md").read_text(encoding="utf-8")
+    assert checkpoint.C7 in handoff
+    snap = json.loads((sdir / "checkpoint" / "snapshot.json")
+                      .read_text(encoding="utf-8"))
+    assert snap["degraded"] is True
+    assert _pref(key)["latest_checkpoint"] is not None
+
+
+def test_finalize_degraded_on_invalid_draft(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path,
+                                 draft=_draft(omit=("Remaining Plan",)))
+    _, degraded = checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo)
+    assert degraded is True
+    assert state.load_state(key, nnn)["degraded"] is True
+
+
+def test_finalize_from_handoff_failed_retries(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    for target in ("ACTIVE", "WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+                   "HANDOFF_FAILED"):
+        state.transition(key, nnn, target)
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=_cfg_for(repo),
+                                          root=repo)
+    assert not degraded
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_finalize_from_checkpoint_writing_resumes(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    with pytest.raises(CrashSim):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo,
+                            fault=_fault(6))         # tmp left behind
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=_cfg_for(repo),
+                                          root=repo)
+    assert not degraded
+    sdir = paths.session_dir(key, nnn)
+    assert list(sdir.glob("checkpoint.tmp-*")) == []   # stale tmp cleaned
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+
+
+@pytest.mark.parametrize("start", ["CHECKPOINT_VERIFIED", "ROTATING",
+                                   "ROTATED", "AWAITING_MANUAL_CLEAR"])
+def test_finalize_rejects_bad_states(cc_home, tmp_path, start):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    chain = {
+        "CHECKPOINT_VERIFIED": ("ACTIVE", "WARNED", "ROTATION_PENDING",
+                                "HANDOFF_REQUESTED", "CHECKPOINT_WRITING",
+                                "CHECKPOINT_VERIFIED"),
+        "ROTATING": ("ACTIVE", "WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+                     "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED", "ROTATING"),
+        "ROTATED": ("ACTIVE", "WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+                    "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED", "ROTATING",
+                    "ROTATED"),
+        "AWAITING_MANUAL_CLEAR": ("ACTIVE", "WARNED", "ROTATION_PENDING",
+                                  "HANDOFF_REQUESTED", "CHECKPOINT_WRITING",
+                                  "CHECKPOINT_VERIFIED",
+                                  "AWAITING_MANUAL_CLEAR"),
+    }[start]
+    for target in chain:
+        state.transition(key, nnn, target)
+    with pytest.raises(checkpoint.CheckpointError, match=start):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo)
+    # rejected: no tmp, no checkpoint, state untouched
+    sdir = paths.session_dir(key, nnn)
+    assert list(sdir.glob("checkpoint.tmp-*")) == []
+    assert not (sdir / "checkpoint").exists()
+    assert state.load_state(key, nnn)["state"] == start
+
+
+def test_verify_failure_removes_tmp_keeps_writing_state(cc_home, tmp_path,
+                                                        monkeypatch):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+
+    def boom(*a, **k):
+        raise checkpoint.CheckpointError("verify: simulated")
+
+    monkeypatch.setattr(checkpoint, "_verify_checkpoint_dir", boom)
+    with pytest.raises(checkpoint.CheckpointError):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo)
+    sdir = paths.session_dir(key, nnn)
+    assert list(sdir.glob("checkpoint.tmp-*")) == []
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_WRITING"
+    assert _pref(key)["latest_checkpoint"] is None
+
+
+def test_retry_after_crash_at_8_replaces_checkpoint(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    with pytest.raises(CrashSim):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo,
+                            fault=_fault(8))          # renamed, no state+ptr
+    sdir = paths.session_dir(key, nnn)
+    assert (sdir / "checkpoint").is_dir()
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_WRITING"
+    new_draft = _draft(**{"Objective":
+                          "A different objective for the second run, recorded here."})
+    (sdir / "handoff.draft.md").write_text(new_draft, encoding="utf-8")
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=_cfg_for(repo),
+                                          root=repo)
+    assert not degraded
+    handoff = (sdir / "checkpoint" / "handoff.md").read_text(encoding="utf-8")
+    assert "A different objective" in handoff
+    assert list(sdir.glob("checkpoint.tmp-*")) == []
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    assert _pref(key)["latest_checkpoint"]["cp_id"] == cp_id
+
+
+def test_finalize_non_git_dir(cc_home, tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "f.txt").write_text("x\n")
+    run_hook("SessionStart", payload("SessionStart", plain, source="startup"))
+    key = hookutil_key(plain)
+    (paths.session_dir(key, 1) / "handoff.draft.md").write_text(
+        DRAFT_TEXT, encoding="utf-8")
+    cp_id, degraded = checkpoint.finalize(key, 1, cfg=_cfg_for(plain),
+                                          root=plain)
+    assert not degraded
+    snap = json.loads((paths.session_dir(key, 1) / "checkpoint" /
+                       "snapshot.json").read_text(encoding="utf-8"))
+    assert snap["project"]["git_root"] is None
+    assert snap["git"]["snapshot"] is None
+    assert state.load_state(key, 1)["state"] == "CHECKPOINT_VERIFIED"
