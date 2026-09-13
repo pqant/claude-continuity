@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,8 @@ import pytest
 
 from cc_continuity import checkpoint, config, ledger, naming, paths, state
 from hookutil import SID, make_repo, payload, register_session, run_hook
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _ID = {
     "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
@@ -707,3 +711,36 @@ def test_finalize_non_git_dir(cc_home, tmp_path):
     assert snap["project"]["git_root"] is None
     assert snap["git"]["snapshot"] is None
     assert state.load_state(key, 1)["state"] == "CHECKPOINT_VERIFIED"
+
+
+# ----------------------------------------------------- real kill -9 smoke
+
+
+def test_kill_during_checkpoint_never_leaves_partial_state(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    env = {**os.environ, "CC_CONTINUITY_SESSION": SID,
+           "PYTHONPATH": str(REPO_ROOT)}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "cc_continuity", "checkpoint"],
+        cwd=repo, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.15)                    # mid-run; timing is inherently racy
+    proc.kill()
+    proc.wait()
+    sdir = paths.session_dir(key, nnn)
+    cp = sdir / "checkpoint"
+    if cp.exists():                     # if present it must be FULLY valid
+        _assert_cp_valid(cp)
+    st = state.load_state(key, nnn)["state"]
+    assert st in ("BOOTSTRAPPING", "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED")
+    ptr = _pref(key)["latest_checkpoint"]
+    # the pointer is written AFTER the state transition (PRD order), so the
+    # pointer can never lead the state — that direction is race-free:
+    if ptr is not None:
+        assert st == "CHECKPOINT_VERIFIED"
+        assert Path(ptr["handoff_path"]).is_file()
+    elif st != "CHECKPOINT_VERIFIED":
+        pass                             # expected: nothing committed
+    # NOTE: a kill in the microsecond window between the state write and the
+    # pointer write leaves (VERIFIED, ptr=None) — a permitted PRD-order
+    # outcome, deliberately not asserted against here.
