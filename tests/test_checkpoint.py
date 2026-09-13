@@ -439,3 +439,136 @@ def test_render_no_ratio_or_predecessor():
     text = checkpoint.render_handoff(s, DRAFT_TEXT, False)
     assert "ratio at rotation: —" in text
     assert "- predecessor: —" in text
+
+
+# ----------------------------------------------------------------- finalize
+
+
+class CrashSim(Exception):
+    """Simulated kill at a fault point."""
+
+
+def _fault(stop_before: int):
+    def fault(i):
+        if i == stop_before:
+            raise CrashSim(f"killed before step {i}")
+    return fault
+
+
+def _cfg_for(repo):
+    return config.load_config(cwd=repo)
+
+
+def _pref(key):
+    return json.loads((paths.project_dir(key) / "project.json")
+                      .read_text(encoding="utf-8"))
+
+
+def _assert_cp_valid(cp: Path):
+    sums = (cp / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert len(sums) == 4
+    for line in sums:
+        digest, _, name = line.partition("  ")
+        assert hashlib.sha256((cp / name).read_bytes()).hexdigest() == digest, name
+    json.loads((cp / "state.json").read_text(encoding="utf-8"))
+    json.loads((cp / "snapshot.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("stop", range(9))
+def test_crash_at_any_step_leaves_consistent_state(cc_home, tmp_path, stop):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    with pytest.raises(CrashSim):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo,
+                            fault=_fault(stop))
+    sdir = paths.session_dir(key, nnn)
+    cp = sdir / "checkpoint"
+    st = state.load_state(key, nnn)["state"]
+    assert st != "CHECKPOINT_VERIFIED"
+    assert _pref(key)["latest_checkpoint"] is None
+    if stop <= 1:                        # walk happens in step 1
+        assert st == "BOOTSTRAPPING"
+    else:
+        assert st == "CHECKPOINT_WRITING"
+    # tmp is written during step 5, removed only by the rename (step 7)
+    tmps = list(sdir.glob("checkpoint.tmp-*"))
+    assert (len(tmps) == 1) == (stop in (6, 7))
+    if stop == 8:                        # renamed, but state+pointer not done
+        assert cp.is_dir()
+        _assert_cp_valid(cp)
+    else:
+        assert not cp.exists()
+
+
+def test_finalize_walks_state_chain_from_bootstrap(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    with pytest.raises(CrashSim):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo,
+                            fault=_fault(5))
+    ev = [(e["from"], e["to"]) for e in ledger.read(paths.session_dir(key, nnn))
+          if e.get("type") == "state"]
+    assert ev == [("BOOTSTRAPPING", "ACTIVE"), ("ACTIVE", "ROTATION_PENDING"),
+                  ("ROTATION_PENDING", "HANDOFF_REQUESTED"),
+                  ("HANDOFF_REQUESTED", "CHECKPOINT_WRITING")]
+
+
+def test_finalize_success_full_path(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    cp_id, degraded = checkpoint.finalize(
+        key, nnn, cfg=_cfg_for(repo), root=repo,
+        metric={"cc_version": "2.1.209", "ratio": 0.6, "window_tokens": 262144})
+    assert cp_id == f"cp-{naming.pad_nnn(nnn)}" and degraded is False
+    sdir = paths.session_dir(key, nnn)
+    cp = sdir / "checkpoint"
+    for name in ("handoff.md", "state.json", "snapshot.json",
+                 "ledger.jsonl", "SHA256SUMS"):
+        assert (cp / name).is_file(), name
+    assert list(sdir.glob("checkpoint.tmp-*")) == []
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    st_cp = json.loads((cp / "state.json").read_text(encoding="utf-8"))
+    assert st_cp["state"] == "CHECKPOINT_WRITING"      # copy at build time
+    assert st_cp["degraded"] is False
+    ptr = _pref(key)["latest_checkpoint"]
+    assert ptr["cp_id"] == cp_id and ptr["nnn"] == nnn
+    assert ptr["pending_consumption"] is True
+    assert Path(ptr["handoff_path"]).is_file()
+    _assert_cp_valid(cp)
+    assert checkpoint.headings_in_order((cp / "handoff.md").read_text())
+    snap = json.loads((cp / "snapshot.json").read_text(encoding="utf-8"))
+    assert snap["project"]["root"] == str(repo)
+    assert (cp / "ledger.jsonl").read_text(encoding="utf-8")   # ledger copied
+
+
+def test_verify_detects_tampering(cc_home, tmp_path):
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    with pytest.raises(CrashSim):
+        checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo,
+                            fault=_fault(6))
+    tmp = next(iter(paths.session_dir(key, nnn).glob("checkpoint.tmp-*")))
+    snap = json.loads((tmp / "snapshot.json").read_text(encoding="utf-8"))
+    rec = state.load_state(key, nnn)
+    checkpoint._verify_checkpoint_dir(tmp, snapshot=snap, state_record=rec,
+                                      root=repo, degraded=False)  # intact: ok
+    handoff_bytes = (tmp / "handoff.md").read_bytes()
+    (tmp / "handoff.md").write_bytes(handoff_bytes + b"tampered\n")
+    with pytest.raises(checkpoint.CheckpointError, match="checksum"):
+        checkpoint._verify_checkpoint_dir(tmp, snapshot=snap,
+                                          state_record=rec, root=repo,
+                                          degraded=False)
+    (tmp / "handoff.md").write_bytes(handoff_bytes)           # restore
+    ledger_bytes = (tmp / "ledger.jsonl").read_bytes()
+    (tmp / "ledger.jsonl").unlink()
+    with pytest.raises(checkpoint.CheckpointError, match="missing"):
+        checkpoint._verify_checkpoint_dir(tmp, snapshot=snap,
+                                          state_record=rec, root=repo,
+                                          degraded=False)
+    (tmp / "ledger.jsonl").write_bytes(ledger_bytes)  # restore for JSON phase
+    bad = b"{not json"
+    (tmp / "snapshot.json").write_bytes(bad)
+    lines = (tmp / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    lines = [f"{hashlib.sha256(bad).hexdigest()}  snapshot.json"
+             if l.endswith("snapshot.json") else l for l in lines]
+    (tmp / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(checkpoint.CheckpointError, match="JSON"):
+        checkpoint._verify_checkpoint_dir(tmp, snapshot=snap,
+                                          state_record=rec, root=repo,
+                                          degraded=False)
