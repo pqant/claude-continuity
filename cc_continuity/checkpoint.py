@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -133,3 +134,57 @@ def headings_in_order(text: str) -> bool:
     h2 = [t for lvl, t in _parse_headings(text) if lvl == 2]
     it = iter(h2)
     return all(any(h == t for t in it) for h in TEMPLATE_HEADINGS)
+
+
+MAX_STATUS_LINES = 200    # PRD §10.2
+MAX_DIFF_LINES = 100
+
+
+def _git(root: Path, *args: str) -> tuple[int, str]:
+    try:
+        out = subprocess.run(["git", *args], cwd=root, capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+    # rstrip the newline only — leading spaces are significant (porcelain
+    # status encodes staged/unstaged in the first two columns).
+    return out.returncode, out.stdout.rstrip("\n")
+
+
+def git_facts(root: Path) -> dict:
+    """PRD §10.2 working-tree facts. Non-git dir → nulls/empties (no raise)."""
+    facts: dict = {"git_root": None, "branch": None, "head": None,
+                   "ahead": None, "behind": None, "status": [], "diff_stat": [],
+                   "staged": 0, "unstaged": 0}
+    rc, top = _git(root, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return facts
+    facts["git_root"] = top
+    rc, branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    facts["branch"] = branch or None
+    rc, head = _git(root, "rev-parse", "HEAD")
+    facts["head"] = head if rc == 0 else None
+    rc, upstream = _git(root, "rev-parse", "--abbrev-ref", "@{upstream}")
+    if rc == 0 and upstream:
+        rc, counts = _git(root, "rev-list", "--left-right", "--count",
+                          f"{upstream}...HEAD")
+        if rc == 0:
+            parts = counts.split()  # tab-separated, e.g. "0\t1"
+            if len(parts) == 2:
+                facts["behind"], facts["ahead"] = int(parts[0]), int(parts[1])
+    rc, status = _git(root, "status", "--porcelain=v1")
+    lines = status.splitlines() if rc == 0 else []
+    facts["status"] = lines[:MAX_STATUS_LINES]
+    staged = unstaged = 0
+    for line in lines:
+        if len(line) >= 2:
+            if line[0] in "MADRC":
+                staged += 1
+            if line[1] in "MD":
+                unstaged += 1
+    facts["staged"], facts["unstaged"] = staged, unstaged
+    rc, stat = _git(root, "diff", "--stat", "HEAD")
+    if rc != 0:                      # unborn HEAD → staged vs empty tree
+        rc, stat = _git(root, "diff", "--cached", "--stat")
+    facts["diff_stat"] = stat.splitlines()[:MAX_DIFF_LINES] if rc == 0 else []
+    return facts
