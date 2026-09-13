@@ -4,8 +4,9 @@
 command (≤ 500 chars) + interrupted flag (S1: a successful Bash response has
 no exit-code field, only ``interrupted``); task tools → task_id/subject/status.
 
-``PostToolUseFailure``: ``{type:tool_failure, tool, error_first_line}`` — S1/N1
-established that a failed Bash raises this event, NOT ``PostToolUse``.
+``PostToolUseFailure``: ``{type:tool_failure, tool, error_first_line}``,
+plus ``command`` (redacted, ≤ 500) for Bash — S1/N1 established that a
+failed Bash raises this event, NOT ``PostToolUse``.
 
 Threshold evaluation and ``additionalContext`` emission (C.1/C.2) are Phase 5.
 """
@@ -56,6 +57,11 @@ def handle_failure(ctx: HookContext) -> dict | None:
     if ctx.session is None:
         return None
     entry: dict = {"type": "tool_failure", "tool": ctx.payload.get("tool_name")}
+    if ctx.payload.get("tool_name") == "Bash":
+        command = _dict(ctx.payload.get("tool_input")).get("command")
+        if isinstance(command, str):
+            entry["command"] = redact.Redactor(ctx.cfg.get("redact_patterns")
+                                               ).redact(command)[0][:MAX_COMMAND_CHARS]
     error = ctx.payload.get("error")
     if isinstance(error, str) and error.strip():
         entry["error_first_line"] = error.strip().splitlines()[0].strip()

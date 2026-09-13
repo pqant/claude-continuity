@@ -140,3 +140,38 @@ def test_unregistered_session_is_silently_ignored(cc_home, tmp_path):
     assert run_hook("PostToolUse", p) == 0
     key = project.project_key_for_root(project.resolve_root(repo))
     assert not (paths.project_dir(key) / "sessions").is_dir()
+
+
+# ------------------------------------------------- Phase 4: failure command
+
+
+def test_failure_bash_records_redacted_command(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("PostToolUseFailure", payload(
+        "PostToolUseFailure", repo, tool_name="Bash",
+        tool_input={"command": "export token=abc123 && pytest -q"},
+        error="Exit code 1"))
+    entry = _last_tool_entry(key, nnn, etype="tool_failure")
+    assert entry["command"] == "export [REDACTED] && pytest -q"
+
+
+def test_failure_bash_command_truncated(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    long_cmd = "echo " + "x" * 600
+    run_hook("PostToolUseFailure", payload(
+        "PostToolUseFailure", repo, tool_name="Bash",
+        tool_input={"command": long_cmd}, error="Exit code 1"))
+    entry = _last_tool_entry(key, nnn, etype="tool_failure")
+    assert len(entry["command"]) == 500
+
+
+def test_failure_non_bash_has_no_command(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("PostToolUseFailure", payload(
+        "PostToolUseFailure", repo, tool_name="WebFetch",
+        tool_input={"url": "https://x"}, error="timeout"))
+    entry = _last_tool_entry(key, nnn, etype="tool_failure")
+    assert "command" not in entry
