@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from cc_continuity import ledger, paths, state
+from cc_continuity import ledger, lock, paths, state
 
 KEY = "proj-1a2b3c4d"
 
@@ -179,3 +179,17 @@ def test_update_fields_concurrent_writes_stay_consistent(cc_home):
 
     on_disk = state.load_state(KEY, 1)  # parses → no torn writes
     assert isinstance(on_disk["turn_active"], bool)
+
+
+# ---------------------------------------------------- _transition_unlocked
+
+
+def test_transition_unlocked_under_lock(cc_home):
+    state.create_session_state(KEY, "proj-001", 1, "sid-1")
+    with lock.held(KEY):
+        record, changed = state._transition_unlocked(KEY, 1, "ACTIVE")
+    assert record["state"] == "ACTIVE" and changed is True
+    with lock.held(KEY):
+        with pytest.raises(state.InvalidTransitionError):
+            state._transition_unlocked(KEY, 1, "ROTATING")  # ACTIVE -> ROTATING: no
+    assert state.load_state(KEY, 1)["state"] == "ACTIVE"
