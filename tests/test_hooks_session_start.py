@@ -12,7 +12,8 @@ import pytest
 
 from cc_continuity import ledger, paths, project, state
 
-from hookutil import SID, fixture_payload, make_repo, project_key_for, run_hook
+from hookutil import (SID, fixture_payload, make_repo, payload, project_key_for,
+                      register_session, run_hook, set_metric, walk_to)
 
 
 def _project_record(repo):
@@ -42,7 +43,7 @@ def test_startup_registers_project_and_session(cc_home, capsys, tmp_path):
     st = state.load_state(key, 1)
     assert st["name"] == "spike-repo-001"
     assert st["session_id"] == SID
-    assert st["state"] == "BOOTSTRAPPING"
+    assert st["state"] == "ACTIVE"  # Phase 5 D3: plain startup (no pending cp)
     assert st["predecessor"] is None
 
     entries = ledger.read(paths.session_dir(key, 1))
@@ -191,3 +192,64 @@ def test_no_session_in_payload_is_silently_ignored(cc_home, tmp_path):
     del p["session_id"]
     assert run_hook("SessionStart", p) == 0
     assert not (paths.projects_dir() / project_key_for(repo) / "project.json").exists()
+
+
+# ------------------------------------------------- Phase 5 (spec D1/D3)
+
+
+def test_startup_with_pending_checkpoint_still_bootstrap(cc_home, capsys,
+                                                         tmp_path):
+    """Guard (D3 path unchanged): pending checkpoint -> BOOTSTRAPPING + C.5."""
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo))
+    key = project_key_for(repo)
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text())
+    pref["latest_checkpoint"] = {
+        "cp_id": "cp-001", "created": "2026-09-12T05:00:00+00:00",
+        "pending_consumption": True, "handoff_path": "/x/handoff.md",
+    }
+    pfile.write_text(json.dumps(pref))
+    run_hook("SessionStart", fixture_payload("SessionStart", repo,
+             session_id="44444444-4444-4444-4444-444444444444"))
+    out = _stdout_json(capsys)
+    assert "unconsumed checkpoint cp-001" in out["hookSpecificOutput"]["additionalContext"]
+    assert state.load_state(key, 2)["state"] == "BOOTSTRAPPING"
+
+
+def _run_compact(capsys, repo):
+    p = fixture_payload("SessionStart", repo)
+    p["source"] = "compact"
+    run_hook("SessionStart", p)
+    return _stdout_json(capsys)
+
+
+def test_compact_in_pending_injects_state_ratio_and_boundary(cc_home, capsys,
+                                                             tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    walk_to(key, nnn, "ROTATION_PENDING")
+    run_hook("PostToolUse", payload("PostToolUse", repo, tool_name="Bash",
+                                    tool_input={"command": "pytest -q"}))
+    set_metric(0.63)
+    out = _run_compact(capsys, repo)
+    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "state ROTATION_PENDING" in ctx
+    assert "context at 63%" in ctx
+    assert "pytest -q" in ctx  # compact ledger_summary render
+    assert "Rotation will happen at the next boundary." in ctx
+
+
+def test_compact_in_active_omits_boundary_sentence(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    register_session(repo)  # Phase 5: registers in ACTIVE
+    out = _run_compact(capsys, repo)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "state ACTIVE" in ctx
+    assert "Rotation will happen" not in ctx
+
+
+def test_compact_unregistered_is_silent(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    assert _run_compact(capsys, repo) is None

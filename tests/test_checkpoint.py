@@ -490,7 +490,7 @@ def test_crash_at_any_step_leaves_consistent_state(cc_home, tmp_path, stop):
     assert st != "CHECKPOINT_VERIFIED"
     assert _pref(key)["latest_checkpoint"] is None
     if stop <= 1:                        # walk happens in step 1
-        assert st == "BOOTSTRAPPING"
+        assert st == "ACTIVE"  # Phase 5 D3: registration starts ACTIVE
     else:
         assert st == "CHECKPOINT_WRITING"
     # tmp is written during step 5, removed only by the rename (step 7)
@@ -510,7 +510,7 @@ def test_finalize_walks_state_chain_from_bootstrap(cc_home, tmp_path):
                             fault=_fault(5))
     ev = [(e["from"], e["to"]) for e in ledger.read(paths.session_dir(key, nnn))
           if e.get("type") == "state"]
-    assert ev == [("BOOTSTRAPPING", "ACTIVE"), ("ACTIVE", "ROTATION_PENDING"),
+    assert ev == [("ACTIVE", "ROTATION_PENDING"),  # Phase 5 D3: starts ACTIVE
                   ("ROTATION_PENDING", "HANDOFF_REQUESTED"),
                   ("HANDOFF_REQUESTED", "CHECKPOINT_WRITING")]
 

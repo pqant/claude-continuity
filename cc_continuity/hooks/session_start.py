@@ -1,27 +1,32 @@
-"""SessionStart hook (PRD §9) — Phase 3: ``startup`` registration only.
+"""SessionStart hook (PRD §9) — Phase 3: ``startup`` registration;
+Phase 5: initial state (spec D3) + ``compact`` re-injection (spec D1).
 
-Register the project + session (name from the ``CC_CONTINUITY_NAME`` env var
-set by the Phase 7 wrapper, else the project counter), create the state record
-in BOOTSTRAPPING, append the ledger entry, and inject the short C.5 notice
-when a checkpoint is ``pending_consumption``.
-
-Other sources (``clear``/``compact``/``resume``/``fork``) do not register
-here: ``clear`` bootstrap is Phase 6, ``compact``/``resume`` injections are
-Phase 5. The ``CC_CONTINUITY_SESSION`` env export (S11) happens in the common
-skeleton for every event that carries ``CLAUDE_ENV_FILE``.
+Register the project + session (name from the ``CC_CONTINUITY_NAME`` env
+var set by the Phase 7 wrapper, else the project counter). Plain
+startups register in ACTIVE; with a pending checkpoint (Phase 4
+``pending_consumption``) the session starts in BOOTSTRAPPING and gets
+the C.5 notice. ``compact`` injects a short post-compaction state block
+(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1);
+``clear`` bootstrap is Phase 6. The ``CC_CONTINUITY_SESSION`` env export
+(S11) happens in the common skeleton for every event that carries
+``CLAUDE_ENV_FILE``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 
-from .. import ledger, naming, paths, project, state
+from .. import checkpoint, ledger, naming, paths, project, state, statusline
 from .common import HookContext, log_error, session_start_output
 
 
 def handle(ctx: HookContext) -> dict | None:
-    if ctx.payload.get("source") != "startup":
+    source = ctx.payload.get("source")
+    if source == "compact":
+        return _compact_notice(ctx)
+    if source != "startup":
         return None
     cwd = ctx.payload.get("cwd")
     session_id = ctx.payload.get("session_id")
@@ -45,7 +50,9 @@ def _register(ctx: HookContext, key: str, session_id: str) -> None:
     sessions = record.get("sessions") or []
     predecessor = sessions[-1]["name"] if sessions else None
     name, nnn = _decide_name(key, record["slug"])
-    state.create_session_state(key, name, nnn, session_id, predecessor=predecessor)
+    initial = "BOOTSTRAPPING" if _pending_checkpoint(key) else "ACTIVE"
+    state.create_session_state(key, name, nnn, session_id,
+                               predecessor=predecessor, initial_state=initial)
     project.record_session(key, name, session_id, nnn)
     ledger.append(paths.session_dir(key, nnn),
                   {"type": "session_start", "source": "startup",
@@ -79,6 +86,41 @@ def _pending_checkpoint(key: str) -> dict | None:
     if isinstance(cp, dict) and cp.get("pending_consumption"):
         return cp
     return None
+
+
+def _compact_notice(ctx: HookContext) -> dict | None:
+    """Spec §6.7 — post-compaction re-injection (< 4 KB target)."""
+    rec = ctx.session
+    if rec is None:
+        return None
+    lines = [f"CONTINUITY (post-compaction state): session {rec['name']} "
+             f"({int(rec['nnn']):03d}), state {rec['state']}."]
+    metric = statusline.read_metric(rec["session_id"])
+    if metric and not statusline.is_stale(metric):
+        r = metric.get("ratio")
+        if isinstance(r, (int, float)) and not isinstance(r, bool):
+            lines.append(f"context at {math.ceil(round(r * 100, 6))}%.")
+    ls = checkpoint.ledger_summary(ctx.session_dir)
+    if ls["files_touched"]:
+        lines.append("Files touched (last 5): "
+                     + ", ".join(f["path"] for f in ls["files_touched"][:5]))
+    if ls["commands"]:
+        lines.append("Commands (last 3): "
+                     + " | ".join(c["command"][:80] for c in ls["commands"][-3:]))
+    if ls["failed_commands"]:
+        lines.append("Failed commands (last 2): " + "; ".join(
+            f"{f['tool']}: {f.get('error_first_line') or '?'}"
+            for f in ls["failed_commands"][-2:]))
+    if ls["tasks"]:
+        lines.append("Tasks (last 5): " + "; ".join(
+            f"{t['id']} {t['subject'] or ''} [{t['status']}]"
+            for t in ls["tasks"][-5:]))
+    if ls["user_prompts"]:
+        lines.append("Recent prompts (last 2): " + " | ".join(
+            p[:100] for p in ls["user_prompts"][-2:]))
+    if rec["state"] in ("ROTATION_PENDING", "HANDOFF_REQUESTED", "HANDOFF_FAILED"):
+        lines.append("Rotation will happen at the next boundary.")
+    return session_start_output("\n".join(lines)[:4000])
 
 
 def _c5_text(cp: dict, key: str) -> str:
