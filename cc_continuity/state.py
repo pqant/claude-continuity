@@ -61,15 +61,22 @@ def _now() -> str:
 
 def create_session_state(project_key: str, name: str, nnn: int,
                          session_id: str,
-                         predecessor: str | None = None) -> dict:
-    """Create a new session record in ``BOOTSTRAPPING`` (PRD §14 schema v1)."""
+                         predecessor: str | None = None,
+                         initial_state: str = "BOOTSTRAPPING") -> dict:
+    """Create a new session record (PRD §14 schema v1).
+
+    ``initial_state`` defaults to BOOTSTRAPPING; Phase 5 registers plain
+    startups directly in ACTIVE (spec D3).
+    """
+    if initial_state not in STATES:
+        raise ValueError(f"unknown initial state {initial_state!r}")
     record = {
         "schema_version": 1,
         "name": name,
         "nnn": nnn,
         "session_id": session_id,
         "project_key": project_key,
-        "state": "BOOTSTRAPPING",
+        "state": initial_state,
         "rotation_id": None,
         "predecessor": predecessor,
         "successor": None,
@@ -78,6 +85,9 @@ def create_session_state(project_key: str, name: str, nnn: int,
         "handoff_attempts": 0,
         "warned": False,
         "ratio_at_pending": None,
+        "boundary_pending": False,  # spec §5
+        "tool_calls": 0,            # spec §5
+        "ctx_emitted_at": None,     # spec §5
         "created": _now(),
         "updated": _now(),
         "degraded": False,
@@ -111,6 +121,24 @@ def update_fields(project_key: str, nnn: int, **fields: object) -> dict:
         record["updated"] = _now()
         atomic.atomic_write_json(_state_path(project_key, nnn), record)
         return record
+
+
+def increment(project_key: str, nnn: int, field: str) -> int:
+    """Locked read-increment-write of an int counter field.
+
+    No transition validation, no ledger event — for counters the state
+    machine does not model (``tool_calls``, PRD §9 Phase 5). Returns the
+    new value.
+    """
+    with lock.held(project_key):
+        record = load_state(project_key, nnn)  # raises StateNotFoundError
+        value = record.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"field {field!r} is not an int: {value!r}")
+        record[field] = value + 1
+        record["updated"] = _now()
+        atomic.atomic_write_json(_state_path(project_key, nnn), record)
+        return record[field]
 
 
 def _transition_unlocked(project_key: str, nnn: int, new_state: str,
