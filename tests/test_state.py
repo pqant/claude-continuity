@@ -193,3 +193,63 @@ def test_transition_unlocked_under_lock(cc_home):
         with pytest.raises(state.InvalidTransitionError):
             state._transition_unlocked(KEY, 1, "ROTATING")  # ACTIVE -> ROTATING: no
     assert state.load_state(KEY, 1)["state"] == "ACTIVE"
+
+
+# ------------------------------------------------- Phase 5: initial_state + increment
+
+
+def test_create_session_state_custom_initial_state(cc_home):
+    record = state.create_session_state(KEY, "proj-001", 1, "sid-x",
+                                        initial_state="ACTIVE")
+    assert record["state"] == "ACTIVE"
+    assert state.load_state(KEY, 1)["state"] == "ACTIVE"
+
+
+def test_create_session_state_default_stays_bootstrap(cc_home):
+    record = state.create_session_state(KEY, "proj-001", 1, "sid-x")
+    assert record["state"] == "BOOTSTRAPPING"
+
+
+def test_create_session_state_rejects_unknown_initial(cc_home):
+    with pytest.raises(ValueError):
+        state.create_session_state(KEY, "proj-001", 1, "sid-x",
+                                   initial_state="NOPE")
+
+
+def test_increment_field_locked_and_consistent(cc_home):
+    state.create_session_state(KEY, "proj-001", 1, "sid-1")
+    assert state.increment(KEY, 1, "tool_calls") == 1
+    assert state.increment(KEY, 1, "tool_calls") == 2
+    rec = state.load_state(KEY, 1)
+    assert rec["tool_calls"] == 2
+    assert rec["state"] == "BOOTSTRAPPING"  # no state change
+    assert all(e["type"] != "state"
+               for e in ledger.read(paths.session_dir(KEY, 1)))  # no ledger event
+
+
+def test_increment_rejects_non_int_fields(cc_home):
+    state.create_session_state(KEY, "proj-001", 1, "sid-1")
+    with pytest.raises(ValueError):
+        state.increment(KEY, 1, "name")
+    with pytest.raises(ValueError):
+        state.increment(KEY, 1, "no_such_field")
+
+
+def test_increment_missing_session_raises(cc_home):
+    with pytest.raises(state.StateNotFoundError):
+        state.increment(KEY, 1, "tool_calls")
+
+
+def test_increment_concurrent_writes_stay_consistent(cc_home):
+    state.create_session_state(KEY, "proj-001", 1, "sid-1")
+    results = []
+    def worker():
+        for _ in range(10):
+            results.append(state.increment(KEY, 1, "tool_calls"))
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == list(range(1, 81))
+    assert state.load_state(KEY, 1)["tool_calls"] == 80
