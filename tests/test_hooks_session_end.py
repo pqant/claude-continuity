@@ -39,7 +39,7 @@ def test_clear_while_rotating_is_logged_to_events_log(cc_home, tmp_path):
 def test_clear_while_not_rotating_is_not_logged(cc_home, tmp_path):
     repo = make_repo(tmp_path)
     key, nnn = register_session(repo)
-    assert state.load_state(key, nnn)["state"] == "BOOTSTRAPPING"
+    assert state.load_state(key, nnn)["state"] == "ACTIVE"  # Phase 5 D3
     run_hook("SessionEnd", payload("SessionEnd", repo, reason="clear"))
     assert not (cc_home / "logs" / "events.log").exists()
 
