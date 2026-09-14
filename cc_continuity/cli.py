@@ -17,15 +17,12 @@ from pathlib import Path
 from typing import Callable
 
 from . import (__version__, checkpoint, config, naming, paths, project,
-               state, statusline, validate)
+               state, statusline, thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
                     session_start, stop, task, tool_use, user_prompt)
 
 # subcommand -> phase that implements it (PRD §20)
 SUBCOMMAND_PHASES: dict[str, int] = {
-    "request-rotation": 5,
-    "off": 5,
-    "on": 5,
     "rotate": 6,
     "install": 7,
     "uninstall": 7,
@@ -84,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("--no-rotate", action="store_true",
                       help="finalize without rotating (rotation lands in "
                            "Phase 6; no-op in Phase 4)")
+
+    sub.add_parser("request-rotation",
+                   help="move the current session to ROTATION_PENDING now")
+    sub.add_parser("off",
+                   help="disable cc-continuity for the current session")
+    sub.add_parser("on",
+                   help="re-enable cc-continuity for the current session")
 
     for name in SUBCOMMAND_PHASES:
         sub.add_parser(name,
@@ -324,6 +328,56 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------- Phase 5 cmds
+
+
+def cmd_request_rotation(args: argparse.Namespace) -> int:
+    """Spec §6.8 — manual rotation request from any pre-handoff state."""
+    root = project.resolve_root(Path.cwd())
+    key = project.project_key_for_root(root)
+    record, metric = _resolve_session(root, key)
+    if record is None:
+        print("No registered session for this project "
+              "(a project registers itself on its first hook).", file=sys.stderr)
+        return 1
+    nnn = int(record["nnn"])
+    ratio = (metric.get("ratio") if metric and not statusline.is_stale(metric)
+             else None)
+    rec = state.load_state(key, nnn)
+    s = rec["state"]
+    if s in ("BOOTSTRAPPING", "ACTIVE", "WARNED"):
+        rec, _ = thresholds.advance(key, nnn, "ROTATION_PENDING", ratio=ratio)
+        print(f"Rotation pending: {rec['name']} -> "
+              f"{naming.successor_name(rec['name'])}")
+    elif s == "ROTATION_PENDING":
+        print(f"Already ROTATION_PENDING ({rec['name']}).")
+    else:
+        print(f"Already past ROTATION_PENDING (state: {s}).")
+    return 0
+
+
+def _toggle_off(args: argparse.Namespace, flag: bool) -> int:
+    root = project.resolve_root(Path.cwd())
+    key = project.project_key_for_root(root)
+    record, _ = _resolve_session(root, key)
+    if record is None:
+        print("No registered session for this project "
+              "(a project registers itself on its first hook).", file=sys.stderr)
+        return 1
+    rec = state.update_fields(key, int(record["nnn"]), off=flag)
+    print(f"cc-continuity {'off' if flag else 'on'}: {rec['name']} "
+          f"off={str(rec['off']).lower()}")
+    return 0
+
+
+def cmd_off(args: argparse.Namespace) -> int:
+    return _toggle_off(args, True)
+
+
+def cmd_on(args: argparse.Namespace) -> int:
+    return _toggle_off(args, False)
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -347,6 +401,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_validate(args)
     if args.command == "checkpoint":
         return cmd_checkpoint(args)
+    if args.command == "request-rotation":
+        return cmd_request_rotation(args)
+    if args.command == "off":
+        return cmd_off(args)
+    if args.command == "on":
+        return cmd_on(args)
     phase = SUBCOMMAND_PHASES[args.command]
     print(
         f"cc-continuity {args.command}: not implemented yet (Phase {phase})",

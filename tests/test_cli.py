@@ -240,3 +240,82 @@ def test_cli_validate_e2e(cc_home, tmp_path):
     r = _run_cli("validate", "--checkpoint", str(cp), cwd=repo)
     assert r.returncode == 1 and "VALIDATION: MISMATCH" in r.stdout
     assert "b.txt" in r.stdout
+
+
+# ------------------------------------------------- Phase 5: rotation cmds
+
+
+def test_cli_request_rotation_walks_to_pending(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import state as _state, statusline as _statusline
+    import time
+    _statusline.write_metric({"session_id": sid, "ts": time.time(),
+                              "used_tokens": 15729, "window_tokens": 262144,
+                              "ratio": 0.60})
+    r = _run_cli("request-rotation", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "Rotation pending" in r.stdout
+    rec = _state.load_state(key, nnn)
+    assert rec["state"] == "ROTATION_PENDING"
+    assert rec["ratio_at_pending"] == 0.60
+
+
+def test_cli_request_rotation_idempotent(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import state as _state
+    _state.transition(key, nnn, "ROTATION_PENDING")  # register starts ACTIVE
+    r = _run_cli("request-rotation", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "Already ROTATION_PENDING" in r.stdout
+
+
+def test_cli_request_rotation_past_pending(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import state as _state
+    for s in ("ROTATION_PENDING", "HANDOFF_REQUESTED"):
+        _state.transition(key, nnn, s)
+    r = _run_cli("request-rotation", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "Already past ROTATION_PENDING" in r.stdout
+
+
+def test_cli_request_rotation_no_session(cc_home, tmp_path):
+    repo = tmp_path / "empty"
+    repo.mkdir()
+    r = _run_cli("request-rotation", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": ""})
+    assert r.returncode == 1
+    assert "No registered session" in r.stderr
+
+
+def test_cli_off_on_toggle(cc_home, tmp_path):
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import state as _state
+    r = _run_cli("off", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "off=true" in r.stdout
+    assert _state.load_state(key, nnn)["off"] is True
+    r = _run_cli("on", cwd=repo, env_extra={"CC_CONTINUITY_SESSION": sid})
+    assert r.returncode == 0, r.stderr
+    assert "off=false" in r.stdout
+    assert _state.load_state(key, nnn)["off"] is False
+
+
+def test_post_tool_use_noop_when_session_off(cc_home, capsys, tmp_path):
+    """Spec §7: off wins everywhere — the ceiling itself is skipped."""
+    repo, key, nnn, sid = _registered(tmp_path)
+    from cc_continuity import state as _state, statusline as _statusline
+    import time
+    _state.transition(key, nnn, "ACTIVE")
+    _state.update_fields(key, nnn, off=True)
+    _statusline.write_metric({"session_id": sid, "ts": time.time(),
+                              "used_tokens": 235929, "window_tokens": 262144,
+                              "ratio": 0.90})
+    run_hook("PostToolUse", payload("PostToolUse", repo, tool_name="Bash",
+                                    tool_input={"command": "echo x"}))
+    assert capsys.readouterr().out == ""
+    rec = _state.load_state(key, nnn)
+    assert rec["state"] == "ACTIVE" and rec["tool_calls"] == 0
