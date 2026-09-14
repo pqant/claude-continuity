@@ -166,6 +166,16 @@ def test_advance_pending_to_handoff_direct(cc_home, tmp_path):
     assert rec["state"] == "HANDOFF_REQUESTED"
 
 
+def test_advance_to_warned_from_bootstrap_walks_via_active(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)  # created in BOOTSTRAPPING
+    rec, changed = thresholds.advance(key, 1, "WARNED")
+    assert changed is True and rec["state"] == "WARNED"
+    assert rec["warned"] is True
+    walk = [(e["from"], e["to"]) for e in ledger.read(paths.session_dir(key, 1))
+            if e["type"] == "state"]
+    assert walk == [("BOOTSTRAPPING", "ACTIVE"), ("ACTIVE", "WARNED")]
+
+
 def test_advance_idempotent_noop(cc_home, tmp_path):
     key = _mk(cc_home, tmp_path)
     _to(key, "ACTIVE", "ROTATION_PENDING")
