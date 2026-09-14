@@ -125,8 +125,10 @@ def advance(key: str, nnn: int, target: str, *,
     session is already in ``target`` (idempotent no-op).
 
     ``target`` is ``"ROTATION_PENDING"`` or ``"HANDOFF_REQUESTED"``. For the
-    latter the path is ``checkpoint.HANDOFF_WALK[current] + [target]`` (the
-    Phase 4 walk tables, re-used). On the step entering ROTATION_PENDING the
+    latter the path is ``checkpoint.HANDOFF_WALK[current]`` (the Phase 4
+    walk tables, re-used; every non-empty entry already ends at
+    HANDOFF_REQUESTED, so nothing is appended). On the step entering
+    ROTATION_PENDING the
     fields ``warned=True`` and — when ``ratio`` is not None —
     ``ratio_at_pending=ratio`` are written. Any unreachable source (unknown
     target, backwards move, or an illegal single step) raises
@@ -143,7 +145,11 @@ def advance(key: str, nnn: int, target: str, *,
             path = _PENDING_PATHS.get(current)
         else:
             walk = checkpoint.HANDOFF_WALK.get(current)
-            path = walk + ["HANDOFF_REQUESTED"] if walk is not None else None
+            if not walk:
+                raise state.InvalidTransitionError(
+                    f"advance: cannot reach {target} from {current} "
+                    f"(session {nnn:03d})")
+            path = walk  # HANDOFF_WALK entries already end at HANDOFF_REQUESTED
         if path is None:
             raise state.InvalidTransitionError(
                 f"advance: cannot reach {target} from {current} "
