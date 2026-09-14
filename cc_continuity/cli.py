@@ -18,7 +18,7 @@ from typing import Callable
 
 from . import (__version__, checkpoint, config, naming, paths, project,
                state, statusline, validate)
-from .hooks import (common, pre_tool_use, session_end, session_start, task,
+from .hooks import (common, pre_tool_use, session_end, session_start, stop, task,
                     tool_use, user_prompt)
 
 # subcommand -> phase that implements it (PRD §20)
@@ -33,8 +33,7 @@ SUBCOMMAND_PHASES: dict[str, int] = {
     "launch": 7,
 }
 
-# event -> handler (PRD §9). Stop and PreCompact land here in Phase 5
-# (Tasks 7–8).
+# event -> handler (PRD §9). PreCompact lands here with Task 8.
 HOOK_HANDLERS: dict[str, Callable[[common.HookContext], dict | None]] = {
     "SessionStart": session_start.handle,
     "UserPromptSubmit": user_prompt.handle,
@@ -43,6 +42,7 @@ HOOK_HANDLERS: dict[str, Callable[[common.HookContext], dict | None]] = {
     "PostToolUseFailure": tool_use.handle_failure,
     "TaskCreated": task.handle,
     "TaskCompleted": task.handle,
+    "Stop": stop.handle,
     "SessionEnd": session_end.handle,
 }
 
