@@ -117,6 +117,14 @@ _PENDING_PATHS = {
     "WARNED": ("ROTATION_PENDING",),
 }
 
+#: Path to WARNED, by current state (each step is VALID_TRANSITIONS-legal;
+#: BOOTSTRAPPING goes through ACTIVE). Spec §6.2 row 5 (PostToolUse warn
+#: crossing) is the only consumer.
+_WARNED_PATHS = {
+    "BOOTSTRAPPING": ("ACTIVE", "WARNED"),
+    "ACTIVE": ("WARNED",),
+}
+
 
 def advance(key: str, nnn: int, target: str, *,
             ratio: float | None = None) -> tuple[dict, bool]:
@@ -124,24 +132,28 @@ def advance(key: str, nnn: int, target: str, *,
     at a time. Returns ``(record, changed)``; ``changed`` is False when the
     session is already in ``target`` (idempotent no-op).
 
-    ``target`` is ``"ROTATION_PENDING"`` or ``"HANDOFF_REQUESTED"``. For the
-    latter the path is ``checkpoint.HANDOFF_WALK[current]`` (the Phase 4
+    ``target`` is ``"WARNED"``, ``"ROTATION_PENDING"`` or
+    ``"HANDOFF_REQUESTED"``. For the latter the path is
+    ``checkpoint.HANDOFF_WALK[current]`` (the Phase 4
     walk tables, re-used; every non-empty entry already ends at
     HANDOFF_REQUESTED, so nothing is appended). On the step entering
     ROTATION_PENDING the
     fields ``warned=True`` and — when ``ratio`` is not None —
-    ``ratio_at_pending=ratio`` are written. Any unreachable source (unknown
+    ``ratio_at_pending=ratio`` are written; the WARNED step always writes
+    ``warned=True``. Any unreachable source (unknown
     target, backwards move, or an illegal single step) raises
     ``state.InvalidTransitionError``.
     """
-    if target not in ("ROTATION_PENDING", "HANDOFF_REQUESTED"):
+    if target not in ("WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED"):
         raise state.InvalidTransitionError(f"advance: unknown target {target!r}")
     with lock.held(key):
         record = state.load_state(key, nnn)
         current = record["state"]
         if current == target:
             return record, False
-        if target == "ROTATION_PENDING":
+        if target == "WARNED":
+            path = _WARNED_PATHS.get(current)
+        elif target == "ROTATION_PENDING":
             path = _PENDING_PATHS.get(current)
         else:
             walk = checkpoint.HANDOFF_WALK.get(current)
@@ -156,9 +168,9 @@ def advance(key: str, nnn: int, target: str, *,
                 f"(session {nnn:03d})")
         for step in path:
             fields = {}
-            if step == "ROTATION_PENDING":
+            if step in ("WARNED", "ROTATION_PENDING"):
                 fields = {"warned": True}
-                if ratio is not None:
-                    fields["ratio_at_pending"] = ratio
+            if step == "ROTATION_PENDING" and ratio is not None:
+                fields["ratio_at_pending"] = ratio
             record, _ = state._transition_unlocked(key, nnn, step, **fields)
         return record, True
