@@ -105,3 +105,89 @@ def test_is_allowed_tool_matrix(cc_home):
     assert not thresholds.is_allowed_tool("Bash", {"command": ""}, DRAFT)
     assert not thresholds.is_allowed_tool("WebFetch", {"url": "x"}, DRAFT)
     assert not thresholds.is_allowed_tool(None, {}, DRAFT)
+
+
+# ------------------------------------------------------------- advance (Task 3)
+
+import pytest
+
+from cc_continuity import ledger, state
+from hookutil import make_repo, project_key_for
+
+
+def _mk(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    key = project_key_for(repo)
+    state.create_session_state(key, "repo-001", 1, "sid-a")
+    return key
+
+
+def _to(key, *chain):
+    for s in chain:
+        state.transition(key, 1, s)
+
+
+def test_advance_active_to_pending_sets_fields(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    _to(key, "ACTIVE")
+    rec, changed = thresholds.advance(key, 1, "ROTATION_PENDING", ratio=0.62)
+    assert changed is True
+    assert rec["state"] == "ROTATION_PENDING"
+    assert rec["warned"] is True
+    assert rec["ratio_at_pending"] == 0.62
+    ev = ledger.read(paths.session_dir(key, 1))[-1]
+    assert ev == {"type": "state", "from": "ACTIVE", "to": "ROTATION_PENDING",
+                  "fields": {"warned": True, "ratio_at_pending": 0.62},
+                  "ts": ev["ts"]}
+
+
+def test_advance_bootstrap_to_handoff_walks_full_path(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)  # created in BOOTSTRAPPING
+    rec, changed = thresholds.advance(key, 1, "HANDOFF_REQUESTED", ratio=0.73)
+    assert changed is True and rec["state"] == "HANDOFF_REQUESTED"
+    walk = [(e["from"], e["to"]) for e in ledger.read(paths.session_dir(key, 1))
+            if e["type"] == "state"]
+    assert walk == [("BOOTSTRAPPING", "ACTIVE"),
+                    ("ACTIVE", "ROTATION_PENDING"),
+                    ("ROTATION_PENDING", "HANDOFF_REQUESTED")]
+
+
+def test_advance_warned_to_handoff_via_pending(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    _to(key, "ACTIVE", "WARNED")
+    rec, _ = thresholds.advance(key, 1, "HANDOFF_REQUESTED")
+    assert rec["state"] == "HANDOFF_REQUESTED"
+
+
+def test_advance_pending_to_handoff_direct(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    _to(key, "ACTIVE", "ROTATION_PENDING")
+    rec, _ = thresholds.advance(key, 1, "HANDOFF_REQUESTED")
+    assert rec["state"] == "HANDOFF_REQUESTED"
+
+
+def test_advance_idempotent_noop(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    _to(key, "ACTIVE", "ROTATION_PENDING")
+    rec, changed = thresholds.advance(key, 1, "ROTATION_PENDING")
+    assert changed is False and rec["state"] == "ROTATION_PENDING"
+
+
+def test_advance_rejects_bad_targets_and_sources(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    with pytest.raises(state.InvalidTransitionError):
+        thresholds.advance(key, 1, "CHECKPOINT_VERIFIED")
+    _to(key, "ACTIVE", "ROTATION_PENDING", "HANDOFF_REQUESTED")
+    with pytest.raises(state.InvalidTransitionError):
+        thresholds.advance(key, 1, "ROTATION_PENDING")  # backwards: unreachable
+    _to(key, "CHECKPOINT_WRITING")
+    with pytest.raises(state.InvalidTransitionError):
+        thresholds.advance(key, 1, "HANDOFF_REQUESTED")  # CW -> HR illegal
+
+
+def test_advance_ratio_none_keeps_ratio_at_pending(cc_home, tmp_path):
+    key = _mk(cc_home, tmp_path)
+    _to(key, "ACTIVE")
+    thresholds.advance(key, 1, "ROTATION_PENDING", ratio=0.65)
+    thresholds.advance(key, 1, "HANDOFF_REQUESTED")  # ratio=None
+    assert state.load_state(key, 1)["ratio_at_pending"] == 0.65
