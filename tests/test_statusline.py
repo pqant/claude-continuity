@@ -374,3 +374,21 @@ def test_is_stale_older_than_ten_minutes(cc_home):
     assert statusline.is_stale(m) is True
     m2 = {"ts": time.time() - 599}
     assert statusline.is_stale(m2) is False
+
+
+def test_render_segment_rotating_form(cc_home):
+    assert statusline.render_segment(0.7, {"name": "proj-001",
+                                            "state": "ROTATING"}, True) \
+        == "⟳ 70% ROTATING"
+
+
+def test_render_segment_amcl_form(cc_home):
+    assert statusline.render_segment(0.7, {"name": "proj-001",
+                                            "state": "AWAITING_MANUAL_CLEAR"}, True) \
+        == "⟳ 70% AMCL"
+
+
+def test_render_segment_cv_stays_handoff(cc_home):
+    assert statusline.render_segment(0.7, {"name": "proj-001",
+                                            "state": "CHECKPOINT_VERIFIED"}, True) \
+        == "⟳ 70% HANDOFF!"
