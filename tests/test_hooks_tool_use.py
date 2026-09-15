@@ -364,3 +364,40 @@ def test_subagent_payload_skips_threshold_logic(cc_home, capsys, tmp_path):
     entries = [e for e in ledger.read(paths.session_dir(key, nnn))
                if e["type"] == "tool_use"]
     assert entries and entries[-1]["tool"] == "Bash"  # ledger unchanged
+
+
+# ------------------------------------------------- Phase 6: agent_id tagging
+
+def test_subagent_tool_entry_carries_agent_id(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("PostToolUse", payload("PostToolUse", repo,
+                                    tool_name="Read",
+                                    tool_input={"file_path": "a.txt"},
+                                    agent_id="agent-42"))
+    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    assert entry["agent_id"] == "agent-42"
+    assert entry["type"] == "tool_use"
+
+
+def test_main_session_entry_has_no_agent_id(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("PostToolUse", payload("PostToolUse", repo,
+                                    tool_name="Read",
+                                    tool_input={"file_path": "a.txt"}))
+    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    assert "agent_id" not in entry
+
+
+def test_subagent_failure_entry_carries_agent_id(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("PostToolUseFailure", payload("PostToolUseFailure", repo,
+                                           tool_name="Bash",
+                                           tool_input={"command": "pytest"},
+                                           error="Exit code 1\nboom",
+                                           agent_id="agent-7"))
+    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    assert entry["type"] == "tool_failure"
+    assert entry["agent_id"] == "agent-7"

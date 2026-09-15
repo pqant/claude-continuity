@@ -87,3 +87,14 @@ def test_task_completed_subagent_payload_sets_no_flag(cc_home, tmp_path):
     run_hook("TaskCompleted", payload("TaskCompleted", repo, agent_id="sub-1"))
     assert state.load_state(key, nnn)["boundary_pending"] is False
     assert ledger.read(paths.session_dir(key, nnn))[-1]["type"] == "task_completed"
+
+
+def test_subagent_task_entry_carries_agent_id(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("TaskCompleted", payload("TaskCompleted", repo,
+                                      task_id="t1", task_subject="s",
+                                      task_description="d",
+                                      agent_id="agent-9"))
+    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    assert entry["agent_id"] == "agent-9"

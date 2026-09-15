@@ -199,3 +199,16 @@ def test_f14_resume_with_nothing_claimable_is_noop(cc_home, capsys, tmp_path):
                                                prompt=_RESUME))
     assert out == 0
     assert _project_record(repo)["counter"] == 1  # no successor created
+
+
+def test_subagent_prompt_tags_entry_and_skips_state(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    state.update_fields(key, nnn, turn_active=False)
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo,
+                                         prompt="subagent work",
+                                         agent_id="agent-1"))
+    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    assert entry["type"] == "user_prompt"
+    assert entry["agent_id"] == "agent-1"
+    assert state.load_state(key, nnn)["turn_active"] is False  # not main work
