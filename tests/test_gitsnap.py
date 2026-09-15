@@ -92,6 +92,34 @@ def test_snapshot_preserves_staged_index(git_repo):
     assert "stage-me.txt" in _git(git_repo, "ls-tree", "-r", "--name-only", snap["tree"])
 
 
+def test_tree_independent_of_global_gitignore(tmp_path, git_repo, monkeypatch):
+    # Gate 5 finding B: rotation runs under a fake HOME where the user's
+    # ``core.excludesFile`` setting is invisible; claim runs under the real
+    # HOME where it applies. The two sides must compute the identical tree
+    # whatever the global excludes file says. (git 2.55: $HOME/.gitignore
+    # is only the default when explicitly configured, as the developer's
+    # ~/.gitconfig does — hence the per-HOME .gitconfig below.)
+    home_a, home_b = tmp_path / "home-a", tmp_path / "home-b"
+    home_a.mkdir()
+    home_b.mkdir()
+    (home_a / "ignore-a").write_text("*.log\n")
+    (home_a / ".gitconfig").write_text(
+        f"[core]\n\texcludesFile = {home_a / 'ignore-a'}\n")
+    (git_repo / "app.log").write_text("line\n")     # untracked, repo-visible
+
+    monkeypatch.setenv("HOME", str(home_a))
+    tree_a = gitsnap.write_tree(git_repo)
+    monkeypatch.setenv("HOME", str(home_b))
+    tree_b = gitsnap.write_tree(git_repo)
+    assert tree_a == tree_b
+
+    # Pinning the global excludes must NOT swallow repo-level ignores.
+    (git_repo / ".gitignore").write_text("*.log\n")
+    monkeypatch.setenv("HOME", str(home_a))
+    tree_c = gitsnap.write_tree(git_repo)
+    assert tree_c != tree_a
+
+
 def test_write_tree_matches_snapshot_tree(git_repo):
     (git_repo / "x.txt").write_text("x\n")
     tree_direct = gitsnap.write_tree(git_repo)

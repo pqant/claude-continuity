@@ -42,10 +42,17 @@ class GitSnapError(RuntimeError):
 
 def _git(cwd: Path, *args: str, env_extra: dict | None = None,
          check: bool = True) -> tuple[int, str]:
-    """Run git; returns (returncode, stdout). ``check`` raises on rc != 0."""
+    """Run git; returns (returncode, stdout). ``check`` raises on rc != 0.
+
+    ``core.excludesFile`` is pinned to ``/dev/null`` so the tree never
+    depends on the caller's HOME/user config (Gate 5 finding B): rotation
+    (fake HOME) and claim (real HOME) must compute identical trees.
+    Repo ``.gitignore`` and ``$GIT_DIR/info/exclude`` still apply.
+    """
     env = {**os.environ, **_IDENTITY, **(env_extra or {})}
     proc = subprocess.run(
-        ["git", *args], cwd=cwd, env=env, capture_output=True, text=True
+        ["git", "-c", "core.excludesFile=/dev/null", *args],
+        cwd=cwd, env=env, capture_output=True, text=True
     )
     # rstrip only: porcelain output is space-significant (" M path").
     out = proc.stdout.rstrip("\n")

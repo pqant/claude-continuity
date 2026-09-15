@@ -138,8 +138,28 @@ def test_validate_branch_changed_mismatch(cc_home, tmp_path):
     assert any("branch changed" in d for d in details)
 
 
+def test_validate_naa_file_to_be_created_is_exempt(cc_home, tmp_path):
+    # Gate 5 finding A: mid-task rotation — NAA names the file the next
+    # action will CREATE. Absent at snapshot time and at claim time; the
+    # checkpoint must still validate OK.
+    repo, key, nnn = _checkpointed(tmp_path, naa_token="shop/models.py")
+    status, details = validate.validate_checkpoint(
+        _cp_dir(key, nnn), config.load_config(cwd=repo), root=repo)
+    assert status == "OK", details
+
+
 def test_validate_next_atomic_action_file_missing(cc_home, tmp_path):
-    repo, key, nnn = _checkpointed(tmp_path, naa_token="nope/missing.py")
+    # A token PRESENT in the snapshot tree that is deleted afterwards is a
+    # destructive change: MISMATCH (the existence check must not become a
+    # no-op — it still guards files the checkpoint relied on).
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    (repo / "nope").mkdir()
+    (repo / "nope" / "missing.py").write_text("x\n")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _draft("nope/missing.py"), encoding="utf-8")
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo), root=repo)
+    (repo / "nope" / "missing.py").unlink()
     status, details = validate.validate_checkpoint(
         _cp_dir(key, nnn), config.load_config(cwd=repo), root=repo)
     assert status == "MISMATCH"
