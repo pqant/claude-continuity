@@ -165,6 +165,15 @@ def test_try_claim_none_when_nothing_claimable(cc_home, tmp_path):
                                    cfg=config.load_config(cwd=repo)) is None
 
 
+def test_find_claimable_missing_project_returns_none(cc_home, tmp_path):
+    # A project with no project.json yet (first /clear before any
+    # registration) has nothing claimable — not an error (P6-D3).
+    repo = make_repo(tmp_path)
+    key = project.project_key_for_root(project.resolve_root(repo))
+    with lock.held(key):
+        assert bootstrap.find_claimable(key) is None
+
+
 def test_try_claim_long_handoff_shows_path(cc_home, tmp_path):
     repo, key, nnn = _verified(cc_home, tmp_path)
     state.transition(key, nnn, "ROTATING", rotation_id="r1")
