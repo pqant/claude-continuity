@@ -253,3 +253,26 @@ def test_increment_concurrent_writes_stay_consistent(cc_home):
         t.join()
     assert sorted(results) == list(range(1, 81))
     assert state.load_state(KEY, 1)["tool_calls"] == 80
+
+
+def test_cv_to_rotated_allowed_for_claim(cc_home):
+    # P6-D2: a manual /clear right after checkpoint verification (before any
+    # rotation attempt) must be able to close the session directly.
+    state.create_session_state(KEY, "proj-001", 1, "sid-x")
+    for s in ("ACTIVE", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+              "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED"):
+        state.transition(KEY, 1, s)
+    state.transition(KEY, 1, "ROTATED")
+    assert state.load_state(KEY, 1)["state"] == "ROTATED"
+
+
+def test_update_fields_unlocked_under_held_lock(cc_home):
+    state.create_session_state(KEY, "proj-001", 1, "sid-x")
+    with lock.held(KEY):
+        state.update_fields_unlocked(KEY, 1, successor="proj-002")
+    assert state.load_state(KEY, 1)["successor"] == "proj-002"
+
+
+def test_update_fields_unlocked_missing_session_raises(cc_home):
+    with pytest.raises(state.StateNotFoundError):
+        state.update_fields_unlocked(KEY, 99, turn_active=True)

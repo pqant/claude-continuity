@@ -43,7 +43,8 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "HANDOFF_REQUESTED": frozenset({"CHECKPOINT_WRITING", "HANDOFF_FAILED"}),
     "HANDOFF_FAILED": frozenset({"CHECKPOINT_WRITING"}),
     "CHECKPOINT_WRITING": frozenset({"CHECKPOINT_VERIFIED"}),
-    "CHECKPOINT_VERIFIED": frozenset({"ROTATING", "AWAITING_MANUAL_CLEAR"}),
+    "CHECKPOINT_VERIFIED": frozenset({"ROTATING", "AWAITING_MANUAL_CLEAR",
+                                      "ROTATED"}),
     "ROTATING": frozenset({"ROTATED", "CHECKPOINT_VERIFIED"}),
     "AWAITING_MANUAL_CLEAR": frozenset({"ROTATED"}),
     "BOOTSTRAPPING": frozenset({"ACTIVE"}),
@@ -116,11 +117,24 @@ def update_fields(project_key: str, nnn: int, **fields: object) -> dict:
     if not fields:
         return load_state(project_key, nnn)
     with lock.held(project_key):
-        record = load_state(project_key, nnn)
-        record.update(fields)
-        record["updated"] = _now()
-        atomic.atomic_write_json(_state_path(project_key, nnn), record)
-        return record
+        return update_fields_unlocked(project_key, nnn, **fields)
+
+
+def update_fields_unlocked(project_key: str, nnn: int, **fields: object) -> dict:
+    """Locked-field write WITHOUT taking the project lock (caller holds it).
+
+    Same contract as :func:`update_fields` minus the lock — for
+    multi-record operations that already hold the project lock (checkpoint
+    finalization, Phase 6 bootstrap claim). No transition validation, no
+    ledger event. Raises :class:`StateNotFoundError` like :func:`load_state`.
+    """
+    if not fields:
+        return load_state(project_key, nnn)
+    record = load_state(project_key, nnn)
+    record.update(fields)
+    record["updated"] = _now()
+    atomic.atomic_write_json(_state_path(project_key, nnn), record)
+    return record
 
 
 def increment(project_key: str, nnn: int, field: str) -> int:

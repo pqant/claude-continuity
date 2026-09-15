@@ -112,7 +112,7 @@ def is_stale(metric: dict | None, now: float | None = None) -> bool:
 #: States that render as "HANDOFF!" (handoff requested or checkpoint written).
 _HANDOFF_STATES = frozenset({
     "HANDOFF_REQUESTED", "HANDOFF_FAILED", "CHECKPOINT_WRITING",
-    "CHECKPOINT_VERIFIED", "ROTATING", "AWAITING_MANUAL_CLEAR",
+    "CHECKPOINT_VERIFIED",
 })
 
 
@@ -142,7 +142,8 @@ def render_segment(ratio: float | None, record: dict | None,
     """Render our ``⟳ …`` segment (PRD §7).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
-    ``⟳ NN% ok``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% HANDOFF!``.
+    ``⟳ NN% ok``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% ROTATING``,
+    ``⟳ NN% AMCL``, ``⟳ NN% HANDOFF!``.
     The percentage is an int via ceil (never understate: the PRD pairs
     ratio 0.6036 with ``⟳ 61%``); the inner round kills IEEE-754 noise so
     ``0.07`` renders ``7%``, not ``8%``.
@@ -156,6 +157,10 @@ def render_segment(ratio: float | None, record: dict | None,
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
         return f"⟳ {pct}% PENDING→{successor}"
+    if state_name == "ROTATING":
+        return f"⟳ {pct}% ROTATING"
+    if state_name == "AWAITING_MANUAL_CLEAR":
+        return f"⟳ {pct}% AMCL"
     if state_name in _HANDOFF_STATES:
         return f"⟳ {pct}% HANDOFF!"
     return f"⟳ {pct}% ok"
