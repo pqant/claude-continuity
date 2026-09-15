@@ -1,0 +1,116 @@
+"""Bootstrap / claim in the new session (PRD §9 SessionStart, §12, §18).
+
+``try_claim`` (caller holds the project lock) finds the latest session in a
+claimable state (``ROTATING`` / ``AWAITING_MANUAL_CLEAR`` /
+``CHECKPOINT_VERIFIED``, ``successor`` unset — plan P6-D2), creates the
+successor session record (``BOOTSTRAPPING``), marks the old session claimed
+(``successor`` set) and moves it to ``ROTATED`` (terminal), consumes the
+matching checkpoint, runs ``validate_checkpoint`` (PRD §12) and returns the
+C.4 bootstrap text. Called from the ``SessionStart(clear)`` hook and from
+the ``UserPromptSubmit`` ``CONTINUITY RESUME`` fallback (P6-D5).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import atomic, ledger, naming, paths, state, thresholds, validate
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+#: States from which SessionStart(clear) may claim a rotation (P6-D2: CV
+#: included so a manual /clear after checkpoint verification — e.g. after a
+#: failed injection, PRD §18 — still bootstraps).
+CLAIMABLE_STATES = frozenset({
+    "ROTATING", "AWAITING_MANUAL_CLEAR", "CHECKPOINT_VERIFIED",
+})
+
+
+def find_claimable(key: str) -> dict | None:
+    """The latest project session a claim may take over (P6-D2).
+
+    Caller holds the project lock. Returns the state record, or None.
+    Sessions whose state file is missing (crash residue) are skipped.
+    """
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text(encoding="utf-8"))
+    best = None
+    for s in pref.get("sessions") or []:
+        try:
+            rec = state.load_state(key, int(s["nnn"]))
+        except (state.StateNotFoundError, ValueError, KeyError):
+            continue
+        if rec["state"] in CLAIMABLE_STATES and rec.get("successor") is None:
+            best = rec
+    return best
+
+
+def write_started(session_id: str) -> Path:
+    """``runtime/<sid>.started`` marker for the rotator (PRD §14)."""
+    path = paths.runtime_dir() / f"{session_id}.started"
+    atomic.atomic_write_text(path, "started\n")
+    return path
+
+
+def try_claim(key: str, *, new_session_id: str, cfg: dict) -> dict | None:
+    """Claim the latest claimable session for a fresh session (PRD §9).
+
+    Caller holds the project lock. Returns ``None`` when nothing is
+    claimable (idempotent: a second claim sees ``successor`` set). On
+    success returns ``{"old_name", "old_nnn", "new_name", "new_nnn",
+    "validation", "details", "bootstrap_text"}`` and has: created the
+    successor state (BOOTSTRAPPING, predecessor = old name, nnn = old+1 at
+    least), set the old session's ``successor`` and moved it to ROTATED,
+    cleared ``pending_consumption`` on the matching latest_checkpoint,
+    appended one ``session_start`` ledger entry to the successor, and
+    updated project.json (counter / sessions / checkpoint) in one atomic
+    write.
+    """
+    old = find_claimable(key)
+    if old is None:
+        return None
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text(encoding="utf-8"))
+    root = Path(pref["root"])
+    old_nnn = int(old["nnn"])
+    nnn_new = max(int(pref["counter"]), old_nnn) + 1
+    name_new = naming.logical_name(naming.split_name(old["name"])[0], nnn_new)
+    state.create_session_state(key, name_new, nnn_new, new_session_id,
+                               predecessor=old["name"],
+                               initial_state="BOOTSTRAPPING")
+    state.update_fields_unlocked(key, old_nnn, successor=name_new)
+    state._transition_unlocked(key, old_nnn, "ROTATED")
+    cp = pref.get("latest_checkpoint")
+    if isinstance(cp, dict) and cp.get("nnn") == old_nnn \
+            and cp.get("pending_consumption"):
+        cp = dict(cp)
+        cp["pending_consumption"] = False
+        cp["consumed_by"] = name_new
+        pref["latest_checkpoint"] = cp
+    pref["counter"] = nnn_new
+    pref["sessions"].append({"name": name_new, "session_id": new_session_id,
+                             "nnn": nnn_new, "created": _now()})
+    atomic.atomic_write_json(pfile, pref)
+    cp_dir = paths.session_dir(key, old_nnn) / "checkpoint"
+    status, details = validate.validate_checkpoint(cp_dir, cfg, root=root)
+    handoff_file = cp_dir / "handoff.md"
+    try:
+        handoff = handoff_file.read_text(encoding="utf-8")
+    except OSError:
+        handoff = ""
+    text = thresholds.c4_text(
+        new_name=name_new, old_name=old["name"], status=status,
+        details=details, handoff=handoff, handoff_path=str(handoff_file),
+        inline_max=int(cfg.get("inline_handoff_max_chars", 12000)))
+    ledger.append(paths.session_dir(key, nnn_new),
+                  {"type": "session_start", "source": "clear",
+                   "claimed": old["name"], "validation": status})
+    return {"old_name": old["name"], "old_nnn": old_nnn,
+            "new_name": name_new, "new_nnn": nnn_new,
+            "validation": status, "details": details,
+            "bootstrap_text": text}
