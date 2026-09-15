@@ -77,7 +77,8 @@ def test_repeated_startup_same_sid_is_idempotent(cc_home, tmp_path):
     assert len(ledger.read(paths.session_dir(key, 1))) == 1  # one ledger event
 
 
-@pytest.mark.parametrize("source", ["clear", "resume", "compact", "fork"])
+# Phase 6: "clear" now registers (P6-D3) — it is no longer a no-op source.
+@pytest.mark.parametrize("source", ["resume", "compact", "fork"])
 def test_non_startup_sources_do_not_register(cc_home, tmp_path, source):
     repo = make_repo(tmp_path)
     p = fixture_payload("SessionStart", repo, session_id=SID)
@@ -253,3 +254,111 @@ def test_compact_in_active_omits_boundary_sentence(cc_home, capsys, tmp_path):
 def test_compact_unregistered_is_silent(cc_home, capsys, tmp_path):
     repo = make_repo(tmp_path)
     assert _run_compact(capsys, repo) is None
+
+
+# ------------------------------------------------- Phase 6: clear (claim)
+
+#: Nine-heading draft (same shape as tests/test_hooks_stop.py::_valid_draft).
+_DRAFT = "\n".join(f"## {h}\n{b}\n" for h, b in [
+    ("Objective", "Implement the feature end to end in the sandbox repo."),
+    ("Current Task and Exact Stopping Point",
+     "Just finished the edit; the test run has not happened yet."),
+    ("Completed This Session", "- Added the module and its imports."),
+    ("Next Atomic Action",
+     "Run `pytest -q` and fix any failure that appears."),
+    ("Remaining Plan", "1. Tests. 2. Docs."),
+    ("Decisions and Rationale", "Kept stdlib only, per the constraint."),
+    ("Rejected Approaches — Do Not Repeat", "No third-party dependencies."),
+    ("Open Problems, Risks, Questions for the User",
+     "None known at the moment."),
+    ("Runtime Environment Notes", "No running servers or ports."),
+])
+
+
+def _verified_session(repo) -> tuple:
+    """Session 001 in CHECKPOINT_VERIFIED with a real checkpoint (Task 2 pattern)."""
+    from cc_continuity import checkpoint, config, project
+
+    register_session(repo)  # plain startup -> session 001 (ACTIVE)
+    key = project_key_for(repo)
+    nnn = json.loads(
+        (paths.project_dir(key) / "project.json").read_text())["counter"]
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(_DRAFT)
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    return key, nnn
+
+
+def test_clear_claims_rotating_session_and_injects_c4(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                        session_id="sid-new-2", source="clear")) == 0
+    data = _stdout_json(capsys)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("CONTINUITY BOOTSTRAP: you are spike-repo-002, "
+                          "continuing spike-repo-001. VALIDATION: OK")
+    assert "# Handoff cp-001" in ctx
+    assert (paths.runtime_dir() / "sid-new-2.started").is_file()
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"
+    assert rec2["session_id"] == "sid-new-2"
+    assert state.load_state(key, 1)["state"] == "ROTATED"
+    assert _project_record(repo)["latest_checkpoint"]["pending_consumption"] is False
+
+
+def test_clear_claim_mismatch_still_registers_and_injects(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    (repo / "a.txt").write_text("tampered\n")
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    run_hook("SessionStart", payload("SessionStart", repo,
+                                     session_id="sid-new-3", source="clear"))
+    ctx = _stdout_json(capsys)["hookSpecificOutput"]["additionalContext"]
+    assert "VALIDATION: MISMATCH" in ctx
+    assert state.load_state(key, 2)["state"] == "BOOTSTRAPPING"  # model must diagnose
+
+
+def test_clear_without_claim_registers_active(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo))  # 001 ACTIVE
+    run_hook("SessionStart", payload("SessionStart", repo,
+                                     session_id="sid-b", source="clear"))
+    assert _stdout_json(capsys) is None  # no pending cp -> no notice
+    pref = _project_record(repo)
+    assert pref["counter"] == 2
+    rec = state.load_state(project_key_for(repo), 2)
+    assert rec["state"] == "ACTIVE"
+    assert rec["predecessor"] == "spike-repo-001"
+    # P6-D3: the .started marker is for the rotator (claim path only) — a
+    # plain clear must not leave one behind (it could unblock a rotator's
+    # .started wait from an unrelated pane).
+    assert not (paths.runtime_dir() / "sid-b.started").exists()
+
+
+def test_clear_fresh_project_registers_plain(cc_home, capsys, tmp_path):
+    # P6-D3 "clear always registers": a project with no project.json yet
+    # (e.g. a session that started before the hooks existed) must register
+    # normally on /clear, not fail in find_claimable.
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", payload("SessionStart", repo,
+                                     session_id="sid-fresh", source="clear"))
+    assert _stdout_json(capsys) is None
+    pref = _project_record(repo)
+    assert pref["counter"] == 1
+    rec = state.load_state(project_key_for(repo), 1)
+    assert rec["state"] == "ACTIVE"
+    assert rec["session_id"] == "sid-fresh"
+
+
+def test_clear_without_session_id_is_noop(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    register_session(repo)  # 001 exists; the noop must not touch it
+    run_hook("SessionStart", payload("SessionStart", repo,
+                                     session_id=None, source="clear"))
+    assert capsys.readouterr().out == ""
+    pref = _project_record(repo)
+    assert pref["counter"] == 1
+    assert len(pref["sessions"]) == 1

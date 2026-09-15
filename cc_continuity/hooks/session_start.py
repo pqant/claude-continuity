@@ -1,15 +1,19 @@
 """SessionStart hook (PRD §9) — Phase 3: ``startup`` registration;
-Phase 5: initial state (spec D3) + ``compact`` re-injection (spec D1).
+Phase 5: initial state (spec D3) + ``compact`` re-injection (spec D1);
+Phase 6: ``clear`` claim + C.4 bootstrap (P6-D2/D3).
 
 Register the project + session (name from the ``CC_CONTINUITY_NAME`` env
 var set by the Phase 7 wrapper, else the project counter). Plain
 startups register in ACTIVE; with a pending checkpoint (Phase 4
 ``pending_consumption``) the session starts in BOOTSTRAPPING and gets
 the C.5 notice. ``compact`` injects a short post-compaction state block
-(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1);
-``clear`` bootstrap is Phase 6. The ``CC_CONTINUITY_SESSION`` env export
-(S11) happens in the common skeleton for every event that carries
-``CLAUDE_ENV_FILE``.
+(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1).
+``clear`` claims the latest claimable session (ROTATING / AMCL /
+CHECKPOINT_VERIFIED, successor unset) — successor record + C.4
+injection + ``runtime/<sid>.started`` — or registers exactly like a
+plain startup when nothing is claimable (P6-D3). The
+``CC_CONTINUITY_SESSION`` env export (S11) happens in the common
+skeleton for every event that carries ``CLAUDE_ENV_FILE``.
 """
 
 from __future__ import annotations
@@ -18,7 +22,8 @@ import json
 import math
 import os
 
-from .. import checkpoint, ledger, naming, paths, project, state, statusline
+from .. import (bootstrap, checkpoint, ledger, lock, naming, paths, project,
+                state, statusline)
 from .common import HookContext, log_error, session_start_output
 
 
@@ -26,6 +31,8 @@ def handle(ctx: HookContext) -> dict | None:
     source = ctx.payload.get("source")
     if source == "compact":
         return _compact_notice(ctx)
+    if source == "clear":
+        return _clear(ctx)
     if source != "startup":
         return None
     cwd = ctx.payload.get("cwd")
@@ -42,6 +49,40 @@ def handle(ctx: HookContext) -> dict | None:
         return _pending_notice(ctx, key)
     except Exception:
         log_error(f"SessionStart(startup): registration failed for {session_id}")
+        return None
+
+
+def _clear(ctx: HookContext) -> dict | None:
+    """PRD §9 SessionStart/clear: claim a rotation, else plain register.
+
+    Claim (P6-D2/P6-D3): the latest session in ROTATING / AMCL /
+    CHECKPOINT_VERIFIED with ``successor`` unset is claimed under the
+    project lock; the successor is created (BOOTSTRAPPING), the old session
+    closed (ROTATED), the checkpoint consumed, and the C.4 block (protocol +
+    validation result + handoff or path) is injected. ``runtime/<sid>.started``
+    is written for the rotator (PRD §11.6). Without a claimable session the
+    new conversation registers exactly like a plain startup.
+    """
+    cwd = ctx.payload.get("cwd")
+    session_id = ctx.payload.get("session_id")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        root = project.resolve_root(cwd)
+        key = project.project_key_for_root(root)
+        with lock.held(key):
+            res = bootstrap.try_claim(key, new_session_id=session_id,
+                                      cfg=ctx.cfg)
+        if res is not None:
+            bootstrap.write_started(session_id)
+            return session_start_output(res["bootstrap_text"])
+        if ctx.session is None:
+            _register(ctx, key, session_id)
+        return _pending_notice(ctx, key)
+    except Exception:
+        log_error(f"SessionStart(clear): claim failed for {session_id}")
         return None
 
 

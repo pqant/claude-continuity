@@ -35,10 +35,15 @@ def find_claimable(key: str) -> dict | None:
     """The latest project session a claim may take over (P6-D2).
 
     Caller holds the project lock. Returns the state record, or None.
-    Sessions whose state file is missing (crash residue) are skipped.
+    A project with no record yet (first /clear before any registration,
+    P6-D3) and sessions whose state file is missing (crash residue) are
+    skipped.
     """
     pfile = paths.project_dir(key) / "project.json"
-    pref = json.loads(pfile.read_text(encoding="utf-8"))
+    try:
+        pref = json.loads(pfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
     best = None
     for s in pref.get("sessions") or []:
         try:
