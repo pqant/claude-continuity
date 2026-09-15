@@ -20,6 +20,9 @@ def handle(ctx: HookContext) -> dict | None:
         "task_id": ctx.payload.get("task_id"),
         "subject": ctx.payload.get("task_subject"),
     }
+    agent_id = ctx.payload.get("agent_id")
+    if agent_id:
+        entry["agent_id"] = agent_id
     ledger.append(ctx.session_dir, entry)
     if (ctx.event == "TaskCompleted" and not ctx.payload.get("agent_id")
             and state.load_state(ctx.session["project_key"],

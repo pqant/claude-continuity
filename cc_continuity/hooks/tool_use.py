@@ -96,8 +96,12 @@ def handle(ctx: HookContext) -> dict | None:
         return None
     key, nnn = ctx.session["project_key"], int(ctx.session["nnn"])
     sdir = ctx.session_dir
-    ledger.append(sdir, _tool_entry(ctx))
-    if ctx.payload.get("agent_id"):
+    entry = _tool_entry(ctx)
+    agent_id = ctx.payload.get("agent_id")
+    if agent_id:
+        entry["agent_id"] = agent_id
+    ledger.append(sdir, entry)
+    if agent_id:
         return None  # subagent: no Phase 5 logic (spec D5)
     cfg = ctx.cfg
     draft_path = str(sdir / "handoff.draft.md")
@@ -174,5 +178,8 @@ def handle_failure(ctx: HookContext) -> dict | None:
     error = ctx.payload.get("error")
     if isinstance(error, str) and error.strip():
         entry["error_first_line"] = error.strip().splitlines()[0].strip()
+    agent_id = ctx.payload.get("agent_id")
+    if agent_id:
+        entry["agent_id"] = agent_id
     ledger.append(ctx.session_dir, entry)
     return None

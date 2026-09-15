@@ -47,7 +47,15 @@ def handle(ctx: HookContext) -> dict | None:
     sdir = paths.session_dir(key, nnn)
     text = redact.Redactor(ctx.cfg.get("redact_patterns")).redact(
         prompt[:MAX_PROMPT_CHARS])[0]
-    ledger.append(sdir, {"type": "user_prompt", "text": text})
+    entry = {"type": "user_prompt", "text": text}
+    agent_id = ctx.payload.get("agent_id")
+    if agent_id:
+        # Subagent prompt: record it (tagged, so the rotator idle check
+        # ignores it) but never touch main-session state.
+        entry["agent_id"] = agent_id
+        ledger.append(sdir, entry)
+        return None
+    ledger.append(sdir, entry)
     try:
         current = state.load_state(key, nnn)
     except state.StateNotFoundError:
