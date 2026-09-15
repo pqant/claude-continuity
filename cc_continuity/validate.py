@@ -112,12 +112,26 @@ def validate_checkpoint(checkpoint_dir: Path, cfg: dict,
     if not snap.get("degraded"):
         m = _NAA_RE.search(handoff)
         if m:
+            # Mid-task checkpoints name files the action will CREATE — they
+            # cannot exist at claim time (Gate 5 finding A). The existence
+            # requirement applies only to tokens present in the snapshot
+            # tree; without a tree (non-git, git_snapshot off, or a pruned
+            # ref) the legacy strict check remains in force.
+            snap_paths = None
+            if cp_tree:
+                rc, out = _git(root, "ls-tree", "-r", "-z", "--name-only",
+                               cp_tree)
+                if rc == 0:
+                    snap_paths = set(out.split("\0")) - {""}
             missing = []
             for tok in re.findall(r"`([^`\n]+)`", m.group(1)):
                 tok = tok.strip()
                 if (not tok or " " in tok or tok.startswith(("-", "http"))
                         or not re.search(r"[\./]", tok)):
                     continue
+                if snap_paths is not None \
+                        and tok.removeprefix("./") not in snap_paths:
+                    continue  # to be created by the action
                 if not (root / tok).exists():
                     missing.append(tok)
             if missing:
