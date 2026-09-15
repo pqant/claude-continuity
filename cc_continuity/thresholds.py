@@ -174,3 +174,33 @@ def advance(key: str, nnn: int, target: str, *,
                 fields["ratio_at_pending"] = ratio
             record, _ = state._transition_unlocked(key, nnn, step, **fields)
         return record, True
+
+
+def c4_text(*, new_name: str, old_name: str, status: str,
+            details: list, handoff: str, handoff_path: str,
+            inline_max: int) -> str:
+    """Appendix C.4 — the SessionStart(clear) bootstrap block.
+
+    ``details``: validation detail lines (may be empty). ``handoff`` is
+    inlined when non-empty and <= ``inline_max`` chars, otherwise the path
+    is shown instead (PRD §9; S5: 12K inline is safe for the local model).
+    """
+    lines = [f"CONTINUITY BOOTSTRAP: you are {new_name}, continuing "
+             f"{old_name}. VALIDATION: {status}"]
+    lines.extend(details)
+    lines.append(f"Protocol: read the handoff below (or at {handoff_path}) "
+                 "fully; do not redo completed work; start with Next Atomic "
+                 "Action.")
+    lines.append("---")
+    if handoff and len(handoff) <= inline_max:
+        lines.append(handoff.rstrip())
+    else:
+        lines.append(handoff_path)
+    return "\n".join(lines)
+
+
+def c8_text(cp_id: str, handoff_path: str) -> str:
+    """Appendix C.8 — the single-line continuation prompt the rotator types."""
+    return (f"CONTINUITY RESUME {cp_id}: read {handoff_path} completely, "
+            "apply the VALIDATION result, then continue from Next Atomic "
+            "Action. Do not repeat completed work.")
