@@ -122,3 +122,148 @@ def _wait_new_started(before: set) -> bool:
             return True
         time.sleep(POLL_S)
     return False
+
+
+# --- run(): one full rotation (PRD §11 steps 1–9) ------------------------------
+
+
+def _find_successor_rec(key: str, old_name: str) -> dict | None:
+    """State record of the project session whose predecessor is
+    ``old_name`` (the latest such), or None (claim not run yet — F14)."""
+    pref = json.loads((paths.project_dir(key) / "project.json")
+                      .read_text(encoding="utf-8"))
+    for s in reversed(pref.get("sessions") or []):
+        try:
+            rec = state.load_state(key, int(s["nnn"]))
+        except (state.StateNotFoundError, ValueError, KeyError):
+            continue
+        if rec.get("predecessor") == old_name:
+            return rec
+    return None
+
+
+def _successor_name(key: str, nnn: int, old_name: str) -> str:
+    """The name the successor has: the claimed record when the claim already
+    ran, else the naming successor of the old name (F14 path)."""
+    rec = _find_successor_rec(key, old_name)
+    if rec is not None:
+        return rec["name"]
+    return naming.successor_name(old_name)
+
+
+def _handoff_path(key: str, nnn: int) -> str:
+    pref = json.loads((paths.project_dir(key) / "project.json")
+                      .read_text(encoding="utf-8"))
+    cp = pref.get("latest_checkpoint")
+    if isinstance(cp, dict) and cp.get("nnn") == nnn and cp.get("handoff_path"):
+        return cp["handoff_path"]
+    return str(paths.session_dir(key, nnn) / "checkpoint" / "handoff.md")
+
+
+def _clear_pane(pane: str) -> None:
+    """PRD §11.4–5: clear any half-typed line (S9: C-u), then /clear."""
+    _tmux("send-keys", "-t", pane, "C-u")
+    _tmux("send-keys", "-t", pane, "-l", "/clear")
+    _tmux("send-keys", "-t", pane, "Enter")
+
+
+def _verify_resume(key: str, nnn: int, cp_id: str, old_name: str) -> bool:
+    """PRD §11.9 — a ``CONTINUITY RESUME <cp_id>`` prompt must land in the
+    successor session's ledger within ``VERIFY_WAIT_S``."""
+    prefix = f"CONTINUITY RESUME {cp_id}"
+    deadline = time.monotonic() + VERIFY_WAIT_S
+    while time.monotonic() < deadline:
+        succ = _find_successor_rec(key, old_name)
+        if succ is not None:
+            for entry in ledger.read(paths.session_dir(key, int(succ["nnn"]))):
+                if (entry.get("type") == "user_prompt"
+                        and str(entry.get("text", "")).startswith(prefix)):
+                    return True
+        time.sleep(POLL_S)
+    return False
+
+
+def _notify(cfg: dict, slug: str, event: str) -> None:
+    """PRD §11.9/§19 — optional notify_command, project name + state only."""
+    cmd = cfg.get("notify_command")
+    if not cmd:
+        return
+    try:
+        subprocess.run(f"{cmd} {shlex.quote(slug)} {shlex.quote(event)}",
+                       shell=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        log_event(f"rotator: notify failed: {e}")
+
+
+def run(*, key: str, nnn: int, session_id: str, pane: str,
+        rotation_id: str, cfg: dict) -> int:
+    """PRD §11 — one full-auto rotation. Never kills Claude Code, never
+    deletes checkpoints.
+
+    Returns: 0 completed or deferred (idle abort — the next Stop retries),
+    1 failed (``ROTATION_FAILED`` path, PRD §11.9), 2 idempotent exit
+    (rotation lock held by a live rotator, or state/rotation_id mismatch).
+    """
+    rlock = lock.ProjectLock(paths.project_dir(key) / "rotation.lock",
+                             timeout=0)
+    if not rlock.acquire(rotation_id=rotation_id):
+        log_event(f"rotator: ROTATION_LOCK_HELD key={key} — exiting "
+                  "(another rotator is live)")
+        return 2
+    try:
+        # §11.2 — re-read: must be ROTATING with the same rotation_id.
+        rec = state.load_state(key, nnn)
+        if rec["state"] != "ROTATING" or rec.get("rotation_id") != rotation_id:
+            log_event(f"rotator: state {rec['state']!r} / rotation_id "
+                      f"{rec.get('rotation_id')!r} != ROTATING/{rotation_id} "
+                      f"— exiting")
+            return 2
+        pref = json.loads((paths.project_dir(key) / "project.json")
+                          .read_text(encoding="utf-8"))
+        # §11.3 — settle, then idle check.
+        time.sleep(float(cfg.get("settle_ms", 1500)) / 1000.0)
+        if not _idle(key, nnn):
+            state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+            log_event(f"rotator: ROTATION_DEFERRED key={key} nnn={nnn:03d} "
+                      "(activity after Stop — next Stop retries)")
+            return 0
+        cp_id = f"cp-{nnn:03d}"
+        for attempt in (1, 2):  # §11.9: retry steps 3–9 once
+            # §11.6 — remember existing markers BEFORE the keystrokes.
+            before = _started_names()
+            # §11.4–5 — clear half-typed input, then /clear.
+            _clear_pane(pane)
+            if not _wait_new_started(before):
+                log_event("rotator: SESSIONSTART_MISSING — continuing "
+                          "anyway (F14; the continuation prompt is "
+                          "self-sufficient)")
+            # §11.7 — rename to the successor (S10: name survives /clear).
+            name_new = _successor_name(key, nnn, rec["name"])
+            _tmux("send-keys", "-t", pane, "-l", f"/rename {name_new}")
+            _tmux("send-keys", "-t", pane, "Enter")
+            # §11.8 — continuation prompt, byte-exact via paste-buffer.
+            _tmux("set-buffer", "-b", TMUX_BUFFER,
+                  thresholds.c8_text(cp_id, _handoff_path(key, nnn)))
+            _tmux("paste-buffer", "-p", "-d", "-b", TMUX_BUFFER, "-t", pane)
+            _tmux("send-keys", "-t", pane, "Enter")
+            # §11.9 — verify.
+            if _verify_resume(key, nnn, cp_id, rec["name"]):
+                state.transition(key, nnn, "ROTATED")
+                ledger.append(paths.session_dir(key, nnn),
+                              {"type": "rotation_completed",
+                               "successor": name_new})
+                log_event(f"rotator: ROTATION_COMPLETED key={key} {nnn:03d} "
+                          f"-> {name_new}")
+                return 0
+            log_event(f"rotator: attempt {attempt}: no RESUME in successor "
+                      f"ledger — " + ("retrying" if attempt == 1
+                                      else "giving up"))
+        # §11.9 / P6-D7 — final failure: stay claimable, notify, exit 1.
+        state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+        ledger.append(paths.session_dir(key, nnn),
+                      {"type": "rotation_failed"})
+        log_event(f"rotator: ROTATION_FAILED key={key} nnn={nnn:03d}")
+        _notify(cfg, pref.get("slug", ""), "ROTATION_FAILED")
+        return 1
+    finally:
+        rlock.release()
