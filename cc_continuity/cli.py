@@ -26,7 +26,6 @@ SUBCOMMAND_PHASES: dict[str, int] = {
     "install": 7,
     "uninstall": 7,
     "doctor": 7,
-    "launch": 7,
 }
 
 # event -> handler (PRD §9)
@@ -95,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="tmux pane target (TMUX_PANE)")
     p_rot.add_argument("--rotation-id", required=True, dest="rotation_id",
                        help="rotation id written by the Stop hook")
+
+    p_launch = sub.add_parser("launch",
+                              help="zsh wrapper backend (Appendix D)")
+    p_launch.add_argument("claude_args", nargs=argparse.REMAINDER,
+                          help="arguments forwarded to claude")
+
     for name in SUBCOMMAND_PHASES:
         sub.add_parser(name,
                        help=f"implemented in Phase {SUBCOMMAND_PHASES[name]}")
@@ -407,11 +412,27 @@ def cmd_rotate(args: argparse.Namespace) -> int:
                        pane=args.pane, rotation_id=args.rotation_id, cfg=cfg)
 
 
+def cmd_launch(args: argparse.Namespace) -> int:
+    from . import launch
+    argv = list(args.claude_args)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    return launch.run_launch(argv)
+
+
 # ------------------------------------------------------------------- main
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "launch":
+        # launch forwards its args verbatim to claude; argparse would
+        # misread leading-dash args (e.g. `-p`) as cc-continuity options,
+        # so the subcommand is split by hand (cmd_launch strips a leading
+        # `--`, which the zsh wrapper always sends).
+        return cmd_launch(argparse.Namespace(
+            command="launch", claude_args=argv[1:]))
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help(sys.stderr)
@@ -438,6 +459,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_on(args)
     if args.command == "rotate":
         return cmd_rotate(args)
+    if args.command == "launch":
+        return cmd_launch(args)
     phase = SUBCOMMAND_PHASES[args.command]
     print(
         f"cc-continuity {args.command}: not implemented yet (Phase {phase})",

@@ -114,3 +114,149 @@ def test_value_flags_do_not_block():
 def test_name_appended_after_original_args():
     p = _plan(["--model", "qwen3.8-27b"])
     assert p.claude_args == ("--model", "qwen3.8-27b", "-n", "myproj-001")
+
+
+# ------------------------------------------------------------ run_launch
+
+import shutil
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+FAKE_CLAUDE = """#!/bin/sh
+{
+  printf 'argv:'
+  for a in "$@"; do printf ' %s' "$a"; done
+  printf '\\nCC_CONTINUITY_NAME=%s\\nTMUX=%s\\nANTHROPIC_MODEL=%s\\n' \\
+    "$CC_CONTINUITY_NAME" "$TMUX" "$ANTHROPIC_MODEL"
+} > "${FAKE_CLAUDE_OUT:?}"
+exit 0
+"""
+
+FAKE_TMUX = """#!/bin/sh
+printf '%s\\n' "---" "$@" >> "${FAKE_TMUX_LOG:?}"
+exit 0
+"""
+
+
+@pytest.fixture
+def work_env(tmp_path, monkeypatch, cc_home):
+    """Temp HOME, a git repo cwd, fake claude/tmux, forced interactive."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "myproj"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(FAKE_CLAUDE); os.chmod(fake_claude, 0o755)
+    fake_tmux = tmp_path / "fake-tmux"
+    fake_tmux.write_text(FAKE_TMUX); os.chmod(fake_tmux, 0o755)
+    out = tmp_path / "claude.out"
+    log = tmp_path / "tmux.log"
+    env = dict(os.environ)
+    env.update({
+        "CC_CONTINUITY_CLAUDE_BIN": str(fake_claude),
+        "CC_CONTINUITY_TMUX_BIN": str(fake_tmux),
+        "FAKE_CLAUDE_OUT": str(out),
+        "FAKE_TMUX_LOG": str(log),
+        "CC_CONTINUITY_FORCE_INTERACTIVE": "1",
+        "ANTHROPIC_MODEL": "qwen3.8-27b",
+    })
+    env.pop("TMUX", None)
+    env.pop("CC_CONTINUITY_NAME", None)
+    env.pop("CC_CONTINUITY_NO_TMUX", None)
+    return types.SimpleNamespace(home=home, repo=repo, out=out, log=log,
+                                 claude=fake_claude, env=env)
+
+
+def _run_launch(env, *args):
+    e = dict(env.env)
+    e["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return subprocess.run(
+        [sys.executable, "-m", "cc_continuity", "launch", *args],
+        cwd=env.repo, env=e, capture_output=True, text=True, timeout=60)
+
+
+def test_exec_passthrough_print_mode(work_env):
+    r = _run_launch(work_env, "-p", "hello")
+    assert r.returncode == 0
+    assert not work_env.log.exists()          # no tmux call
+    text = work_env.out.read_text(encoding="utf-8")
+    assert text.startswith("argv: -p hello")
+    assert "CC_CONTINUITY_NAME=" in text and text.splitlines()[1] == "CC_CONTINUITY_NAME="
+
+
+def test_exec_passthrough_subcommand(work_env):
+    r = _run_launch(work_env, "mcp", "list")
+    assert r.returncode == 0 and not work_env.log.exists()
+    assert work_env.out.read_text(encoding="utf-8").startswith("argv: mcp list")
+
+
+def test_exec_tmux_mode_creates_and_attaches(work_env):
+    r = _run_launch(work_env)
+    assert r.returncode == 0
+    calls = []
+    for line in work_env.log.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            calls.append([])
+        elif calls:
+            calls[-1].append(line)
+    assert calls[0][0:3] == ["new-session", "-d", "-s"]
+    assert calls[0][3].startswith("cc-myproj-") and len(calls[0][3]) == len("cc-myproj-") + 4
+    assert calls[0][4:6] == ["-c", str(work_env.repo)]
+    cmd = calls[0][6]
+    assert "CC_CONTINUITY_NAME=myproj-001" in cmd
+    assert "ANTHROPIC_MODEL=qwen3.8-27b" in cmd
+    # `claude_bin` is the FAKE claude path (CC_CONTINUITY_CLAUDE_BIN), not a
+    # literal "claude"
+    assert f"command {work_env.claude}" in cmd
+    assert cmd.rstrip().endswith("-n myproj-001")
+    assert calls[1][:2] == ["attach-session", "-t"]
+    assert calls[1][2] == calls[0][3]
+
+
+def test_exec_direct_mode_inside_tmux(work_env):
+    e = dict(work_env.env); e["TMUX"] = "/tmp/tmux-501/default,123,0"
+    env2 = types.SimpleNamespace(**{**vars(work_env), "env": e})
+    r = _run_launch(env2)
+    assert r.returncode == 0 and not work_env.log.exists()
+    text = work_env.out.read_text(encoding="utf-8")
+    assert text.startswith("argv: -n myproj-001")
+    assert text.splitlines()[1] == "CC_CONTINUITY_NAME=myproj-001"
+    assert "TMUX=/tmp/tmux-501/default,123,0" in text
+
+
+def test_exec_tmux_missing_falls_back_to_direct(work_env):
+    e = dict(work_env.env); e["CC_CONTINUITY_TMUX_BIN"] = "/nonexistent/tmux"
+    env2 = types.SimpleNamespace(**{**vars(work_env), "env": e})
+    r = _run_launch(env2)
+    assert r.returncode == 0
+    assert "tmux not found" in r.stderr
+    assert work_env.out.read_text(encoding="utf-8").startswith("argv: -n myproj-001")
+
+
+def test_exec_user_name_flag_not_overridden(work_env):
+    r = _run_launch(work_env, "--name", "special")
+    assert r.returncode == 0
+    calls = []
+    for line in work_env.log.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            calls.append([])
+        elif calls:
+            calls[-1].append(line)
+    cmd = calls[0][-1]  # the command string new-session runs
+    assert "--name special" in cmd
+    assert "CC_CONTINUITY_NAME=" not in cmd
+
+
+def test_exec_disabled_passthrough(work_env):
+    e = dict(work_env.env); e["CC_CONTINUITY"] = "0"
+    env2 = types.SimpleNamespace(**{**vars(work_env), "env": e})
+    r = _run_launch(env2)
+    assert r.returncode == 0 and not work_env.log.exists()
+    assert work_env.out.read_text(encoding="utf-8") == \
+        "argv:\nCC_CONTINUITY_NAME=\nTMUX=\nANTHROPIC_MODEL=qwen3.8-27b\n"
+    # no "-n" appended, no tmux
+    assert "-n" not in work_env.out.read_text(encoding="utf-8")
