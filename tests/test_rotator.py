@@ -374,3 +374,49 @@ def test_run_exits_on_rotation_id_mismatch(cc_home, tmp_path):
     rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
                      pane="%9", rotation_id="different-id", cfg=d["cfg"])
     assert rc == 2
+
+
+# --- run(): failure path (PRD §11.9, §16, §18) ---------------------------------
+
+
+def test_run_failure_retries_once_notifies_and_stays_claimable(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # Dead pane: the fake tmux records keystrokes but no hook ever fires,
+    # so neither SessionStart nor the RESUME prompt ever lands.
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid, cfg = (d["repo"], d["key"], d["nnn"], d["rid"],
+                                dict(d["cfg"]))
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    notify_file = tmp_path / "notify.log"
+    notify_sh = tmp_path / "notify.sh"
+    notify_sh.write_text(f"#!/bin/sh\necho \"$1 $2\" >> {notify_file}\n")
+    os.chmod(notify_sh, 0o755)
+    cfg["notify_command"] = str(notify_sh)
+
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    assert rc == 1
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    entries = ledger.read(paths.session_dir(key, nnn))
+    assert entries[-1] == {**entries[-1], "type": "rotation_failed"}
+    calls = _calls(fake_tmux)
+    clears = [c for c in calls if c == ["send-keys", "-t", "%9",
+                                         "-l", "/clear"]]
+    assert len(clears) == 2  # one retry of steps 3–9, then give up
+    assert notify_file.read_text().strip() == "spike-repo ROTATION_FAILED"
+    log_text = (paths.logs_dir() / "events.log").read_text()
+    assert "ROTATION_FAILED" in log_text
+    assert "SESSIONSTART_MISSING" in log_text
+
+
+def test_run_failure_without_notify_command_does_not_raise(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    d = _rotating(cc_home, tmp_path)
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
+                     pane="%9", rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 1

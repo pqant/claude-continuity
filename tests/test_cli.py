@@ -5,11 +5,13 @@ Phase 2: ``statusline`` + ``status``. Phase 3: ``hook <event>`` + ``history``.
 
 import io
 import json
+import os
 import sys
+import time
 
 import pytest
 
-from cc_continuity import __version__, cli, ledger, paths
+from cc_continuity import __version__, cli, ledger, paths, rotator, state
 
 from hookutil import SID, make_repo, payload, register_session, run_hook
 
@@ -28,7 +30,7 @@ def test_no_command_exits_2_with_help(capsys):
 
 @pytest.mark.parametrize(
     "command",
-    ["rotate", "doctor", "install", "uninstall"],
+    ["doctor", "install", "uninstall"],
 )
 def test_unimplemented_subcommand_reports_phase(command, capsys):
     assert cli.main([command]) == 2
@@ -319,3 +321,76 @@ def test_post_tool_use_noop_when_session_off(cc_home, capsys, tmp_path):
     assert capsys.readouterr().out == ""
     rec = _state.load_state(key, nnn)
     assert rec["state"] == "ACTIVE" and rec["tool_calls"] == 0
+
+
+# --- rotate (Phase 6, PRD §11/§16) ---------------------------------------------
+# Setup copied from tests/test_rotator.py (test modules stay independent).
+
+_FAKE_TMUX = """#!/bin/sh
+printf '%s\\n' "---" "$@" >> "${FAKE_TMUX_LOG:?}"
+exit 0
+"""
+
+
+@pytest.fixture
+def fake_tmux(tmp_path, monkeypatch):
+    bin_path = tmp_path / "fake-tmux"
+    bin_path.write_text(_FAKE_TMUX)
+    os.chmod(bin_path, 0o755)
+    log = tmp_path / "tmux-args.log"
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(bin_path))
+    monkeypatch.setenv("FAKE_TMUX_LOG", str(log))
+    return log
+
+
+_DRAFT = "\n".join(f"## {h}\n{b}\n" for h, b in [
+    ("Objective", "Implement the feature end to end in the sandbox repo."),
+    ("Current Task and Exact Stopping Point",
+     "Just finished the edit; the test run has not happened yet."),
+    ("Completed This Session", "- Added the module and its imports."),
+    ("Next Atomic Action",
+     "Run `pytest -q` and fix any failure that appears."),
+    ("Remaining Plan", "1. Tests. 2. Docs."),
+    ("Decisions and Rationale", "Kept stdlib only, per the constraint."),
+    ("Rejected Approaches — Do Not Repeat", "No third-party dependencies."),
+    ("Open Problems, Risks, Questions for the User",
+     "None known at the moment."),
+    ("Runtime Environment Notes", "No running servers or ports."),
+])
+
+
+def _rotating(cc_home, tmp_path) -> dict:
+    """Session 001 in ROTATING with a real checkpoint (post-Stop shape)."""
+    from cc_continuity import checkpoint, config, project
+
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(_DRAFT)
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    rid = "rid-test"
+    state.update_fields(key, nnn, turn_active=False, last_stop_ts=time.time())
+    state.transition(key, nnn, "ROTATING", rotation_id=rid)
+    cfg = dict(config.DEFAULTS)
+    cfg["settle_ms"] = 0
+    return {"repo": repo, "key": key, "nnn": nnn, "rid": rid, "cfg": cfg,
+            "sid": SID}
+
+
+def test_cli_rotate_runs_rotator(cc_home, tmp_path, fake_tmux, monkeypatch,
+                                 capsys):
+    d = _rotating(cc_home, tmp_path)
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    rc = cli.main(["rotate", "--session", d["sid"], "--pane", "%9",
+                   "--rotation-id", d["rid"]])
+    # dead pane (no hooks) -> full failure path
+    assert rc == 1
+    assert state.load_state(d["key"], d["nnn"])["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_cli_rotate_unknown_session(cc_home, capsys):
+    assert cli.main(["rotate", "--session", "nope", "--pane", "%1",
+                     "--rotation-id", "r"]) == 1
+    assert "No registered session" in capsys.readouterr().err
