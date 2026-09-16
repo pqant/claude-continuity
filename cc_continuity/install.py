@@ -274,3 +274,112 @@ def install(home: Path, *, window: int | None = None,
     cfg["install"] = manifest
     atomic.atomic_write_json(cfg_path, cfg)
     return manifest
+
+
+# -------------------------------------------------------------- uninstall
+
+
+def uninstall(home: Path, *, purge: bool = False) -> None:
+    """Inverse of ``install`` (PRD §17). Manifest-driven when the manifest
+    exists; otherwise falls back to removing only identifiable entries
+    (substring ``cc-continuity`` / marker blocks).
+
+    Order: settings.json → CLAUDE.md → zshrc → skills → symlink → app →
+    config.json → (optional) purge. ``projects/`` and ``logs/`` survive
+    unless ``purge``. Raises ``UninstallError`` before modifying anything
+    when state is unreadable.
+    """
+    home = Path(home)
+    store = home / ".claude-continuity"
+    cfg_path = store / "config.json"
+    cfg: dict = {}
+    if cfg_path.is_file():
+        try:
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as e:
+            raise UninstallError(f"unreadable {cfg_path}: {e}") from e
+        if not isinstance(loaded, dict):
+            raise UninstallError(f"config.json must be a JSON object: {cfg_path}")
+        cfg = loaded
+    manifest = cfg.get("install") or {}
+
+    # 1) settings.json
+    settings_path = home / ".claude" / "settings.json"
+    if settings_path.is_file():
+        raw = settings_path.read_bytes()
+        try:
+            existing = json.loads(raw)
+        except ValueError as e:
+            raise UninstallError(
+                f"invalid JSON in {settings_path}: {e}") from e
+        if not isinstance(existing, dict):
+            raise UninstallError(
+                f"settings.json must be a JSON object: {settings_path}")
+        new = unmerge_settings(existing, manifest)
+        if manifest.get("settings_created") and not new:
+            # the installer created this file and the unmerge emptied it:
+            # remove it instead of leaving a bare "{}" behind
+            settings_path.unlink()
+        else:
+            atomic.atomic_write_text(
+                settings_path,
+                dump_settings(new, manifest.get("settings_format")
+                              or detect_format(raw)))
+
+    # 2) ~/.claude/CLAUDE.md
+    claude_md = home / ".claude" / "CLAUDE.md"
+    if claude_md.is_file():
+        new_text = managed.remove_block(
+            claude_md.read_text(encoding="utf-8"),
+            CLAUDE_MD_BEGIN, CLAUDE_MD_END)
+        if manifest.get("claude_md_created") and not new_text.strip():
+            claude_md.unlink()
+        else:
+            atomic.atomic_write_text(claude_md, new_text)
+
+    # 3) ~/.zshrc (resolved target; a file the installer CREATED is removed
+    #    when the block leaves it empty)
+    zinfo = manifest.get("zshrc") or {}
+    zshrc = home / ".zshrc"
+    if zinfo.get("resolved"):
+        target = Path(zinfo["resolved"])
+    else:
+        target = zshrc.resolve() if zshrc.is_symlink() else zshrc
+    if not target.is_file():  # stale manifest path -> current resolution
+        target = zshrc.resolve() if zshrc.is_symlink() else zshrc
+    if target.is_file():
+        new_text = managed.remove_block(
+            target.read_text(encoding="utf-8"), ZSHRC_BEGIN, ZSHRC_END)
+        if zinfo.get("created") and not new_text.strip():
+            target.unlink()
+            if zshrc.is_symlink():
+                zshrc.unlink()
+        else:
+            atomic.atomic_write_text(target, new_text)
+
+    # 4) skills
+    skills.uninstall_skills(home / ".claude" / "skills")
+
+    # 5) ~/.local/bin symlink — only when it points into our app/
+    link = home / ".local" / "bin" / "cc-continuity"
+    if link.is_symlink() and os.path.realpath(link).startswith(
+            str(store / "app") + os.sep):
+        link.unlink()
+
+    # 6) app copy
+    app = store / "app"
+    if app.is_dir():
+        shutil.rmtree(app)
+
+    # 7) config.json: drop installer keys (keep user keys)
+    cfg.pop("install", None)
+    cfg.pop("chained_statusline", None)
+    if cfg_path.is_file():
+        if cfg:
+            atomic.atomic_write_json(cfg_path, cfg)
+        else:
+            cfg_path.unlink()
+
+    # 8) optional purge
+    if purge and store.exists():
+        shutil.rmtree(store)
