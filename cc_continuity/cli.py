@@ -23,7 +23,6 @@ from .hooks import (common, pre_compact, pre_tool_use, session_end,
 
 # subcommand -> phase that implements it (PRD §20)
 SUBCOMMAND_PHASES: dict[str, int] = {
-    "rotate": 6,
     "install": 7,
     "uninstall": 7,
     "doctor": 7,
@@ -89,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("on",
                    help="re-enable cc-continuity for the current session")
 
+    p_rot = sub.add_parser("rotate", help="rotator (PRD §11)")
+    p_rot.add_argument("--session", required=True,
+                       help="Claude Code session id being rotated")
+    p_rot.add_argument("--pane", required=True,
+                       help="tmux pane target (TMUX_PANE)")
+    p_rot.add_argument("--rotation-id", required=True, dest="rotation_id",
+                       help="rotation id written by the Stop hook")
     for name in SUBCOMMAND_PHASES:
         sub.add_parser(name,
                        help=f"implemented in Phase {SUBCOMMAND_PHASES[name]}")
@@ -378,6 +384,29 @@ def cmd_on(args: argparse.Namespace) -> int:
     return _toggle_off(args, False)
 
 
+def cmd_rotate(args: argparse.Namespace) -> int:
+    """Rotator entry (PRD §11/§16) — spawned detached by the Stop hook."""
+    from . import rotator  # local import: rotator imports hooks.common
+    rec = statusline.find_session_by_id(args.session)
+    if rec is None:
+        print("No registered session for this session id "
+              "(a project registers itself on its first hook).",
+              file=sys.stderr)
+        return 1
+    key = rec["project_key"]
+    nnn = int(rec["nnn"])
+    try:
+        pfile = paths.project_dir(key) / "project.json"
+        root = json.loads(pfile.read_text(encoding="utf-8"))["root"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        print(f"cc-continuity rotate: unreadable project record for {key}",
+              file=sys.stderr)
+        return 1
+    cfg = config.load_config(cwd=root)
+    return rotator.run(key=key, nnn=nnn, session_id=args.session,
+                       pane=args.pane, rotation_id=args.rotation_id, cfg=cfg)
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -407,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_off(args)
     if args.command == "on":
         return cmd_on(args)
+    if args.command == "rotate":
+        return cmd_rotate(args)
     phase = SUBCOMMAND_PHASES[args.command]
     print(
         f"cc-continuity {args.command}: not implemented yet (Phase {phase})",
