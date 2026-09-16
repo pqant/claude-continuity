@@ -7,9 +7,10 @@ PostToolUse) -> finalize or attempt/block; 3 accumulated failed
 attempts -> degrade (HANDOFF_FAILED -> deterministic checkpoint, C.7);
 CHECKPOINT_WRITING -> finalize; CHECKPOINT_VERIFIED -> AMCL without
 re-running finalize; everything else: ``turn_active=False`` +
-``last_stop_ts`` only. After a verified checkpoint the session ALWAYS
-ends in AWAITING_MANUAL_CLEAR with the AMCL systemMessage (spec D2; the
-tmux/ROTATING branch is Phase 6). Subagent payloads (agent_id) are
+``last_stop_ts`` only. After a verified checkpoint the session rotates
+itself when ``$TMUX_PANE`` + ``full_auto`` are set (detached rotator +
+ROTATING, P6-D8); otherwise it ends in AWAITING_MANUAL_CLEAR with the
+AMCL systemMessage (spec D2). Subagent payloads (agent_id) are
 skipped entirely (spec D5). ``stop_hook_active`` is recorded in the
 ledger but NOT used — the attempts counter is authoritative (spec D6).
 """
@@ -17,10 +18,13 @@ ledger but NOT used — the attempts counter is authoritative (spec D6).
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from pathlib import Path
 
-from .. import checkpoint, ledger, paths, state, statusline, thresholds
+from .. import (checkpoint, ledger, paths, rotator, state, statusline,
+                thresholds)
 from .common import HookContext, log_error
 
 AMCL_MESSAGE = "Checkpoint ready. Type /clear to continue automatically."
@@ -31,25 +35,61 @@ def _project_root(key: str) -> Path:
     return Path(json.loads(pfile.read_text(encoding="utf-8"))["root"])
 
 
-def _finalize_and_amcl(ctx: HookContext, key: str, nnn: int) -> dict | None:
+def _finalize(ctx: HookContext, key: str, nnn: int) -> bool:
+    """Finalize the checkpoint (state -> CHECKPOINT_VERIFIED inside).
+    Failure is logged and the stop is allowed; the next Stop retries
+    (finalize re-cleans checkpoint.tmp-* on every run)."""
     try:
         metric = statusline.read_metric(ctx.session["session_id"])
         checkpoint.finalize(key, nnn, cfg=ctx.cfg, root=_project_root(key),
                             metric=metric)
     except checkpoint.CheckpointError as e:
-        # Logged; the stop is allowed; the next Stop retries (finalize
-        # re-cleans checkpoint.tmp-* on every run).
         log_error(f"Stop: checkpoint finalization failed: {e}")
-        return None
-    state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
-    return {"systemMessage": AMCL_MESSAGE}
+        return False
+    return True
+
+
+def _rotate_or_amcl(ctx: HookContext, key: str, nnn: int,
+                    current: str) -> dict | None:
+    """PRD §9 Stop: full-auto ($TMUX_PANE + full_auto) -> detached rotator +
+    ROTATING (P6-D8); else the assisted AWAITING_MANUAL_CLEAR path."""
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if pane and ctx.cfg.get("full_auto", True):
+        rotation_id = str(uuid.uuid4())
+        try:
+            rotator.spawn(ctx.session["session_id"], pane, rotation_id)
+        except rotator.RotatorSpawnError as e:
+            log_error(f"Stop: rotator spawn failed, assisted fallback: {e}")
+        else:
+            if current == "ROTATING":
+                # Orphan recovery re-spawn: already ROTATING, and a
+                # self transition is a no-op — refresh the id directly.
+                state.update_fields(key, nnn, rotation_id=rotation_id)
+            else:
+                try:
+                    state.transition(key, nnn, "ROTATING",
+                                     rotation_id=rotation_id)
+                except state.InvalidTransitionError as e:
+                    # Claim raced us (old session already ROTATED): the
+                    # spawned rotator self-exits on its state re-read
+                    # (PRD §11.2).
+                    log_error(f"Stop: ROTATING transition raced: {e}")
+            return None  # no systemMessage — the pane rotates itself
+    if current == "CHECKPOINT_VERIFIED":
+        state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
+        return {"systemMessage": AMCL_MESSAGE}
+    # ROTATING without tmux/full_auto (env changed mid-session): stay, and
+    # the next Stop retries. No message — the state line shows ROTATING.
+    return None
 
 
 def _degrade(ctx: HookContext, key: str, nnn: int) -> dict | None:
     state.transition(key, nnn, "HANDOFF_FAILED")
     # finalize walks HF -> CW -> CV(degraded) — the draft is missing or
     # invalid here, so the deterministic-only C.7 checkpoint is built.
-    return _finalize_and_amcl(ctx, key, nnn)
+    if not _finalize(ctx, key, nnn):
+        return None
+    return _rotate_or_amcl(ctx, key, nnn, "CHECKPOINT_VERIFIED")
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -82,7 +122,9 @@ def handle(ctx: HookContext) -> dict | None:
                                                cfg)
         if report is not None and report.ok:
             state.transition(key, nnn, "CHECKPOINT_WRITING")
-            return _finalize_and_amcl(ctx, key, nnn)
+            if not _finalize(ctx, key, nnn):
+                return None
+            return _rotate_or_amcl(ctx, key, nnn, "CHECKPOINT_VERIFIED")
         attempts = state.update_fields(key, nnn,
                                        handoff_attempts=rec.get("handoff_attempts", 0) + 1,
                                        ctx_emitted_at=tool_calls)["handoff_attempts"]
@@ -92,8 +134,13 @@ def handle(ctx: HookContext) -> dict | None:
                 else thresholds.c2_text(thresholds.display_ratio(ctx, cfg), draft_path))
         return {"decision": "block", "reason": text}
     if s == "CHECKPOINT_WRITING":
-        return _finalize_and_amcl(ctx, key, nnn)
+        if not _finalize(ctx, key, nnn):
+            return None
+        return _rotate_or_amcl(ctx, key, nnn, "CHECKPOINT_VERIFIED")
     if s == "CHECKPOINT_VERIFIED":
-        state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
-        return {"systemMessage": AMCL_MESSAGE}
+        return _rotate_or_amcl(ctx, key, nnn, "CHECKPOINT_VERIFIED")
+    if s == "ROTATING":
+        # Orphan recovery (PRD §18 "retry on next Stop"): spawn again — the
+        # rotation lock guarantees at most one live rotator.
+        return _rotate_or_amcl(ctx, key, nnn, "ROTATING")
     return None
