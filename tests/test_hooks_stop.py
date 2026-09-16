@@ -11,7 +11,8 @@ Finalize failure is swallowed (errors.log, state kept).
 import json
 
 from cc_continuity import checkpoint, ledger, paths, state
-from hookutil import (make_repo, payload, register_session, run_hook,
+from cc_continuity.hooks import stop
+from hookutil import (SID, make_repo, payload, register_session, run_hook,
                       stdout_json, walk_to)
 
 AMCL = "Checkpoint ready. Type /clear to continue automatically."
@@ -151,3 +152,140 @@ def test_finalize_failure_is_swallowed(cc_home, capsys, tmp_path, monkeypatch):
     assert state.load_state(key, nnn)["state"] == "CHECKPOINT_WRITING"
     err = cc_home / "logs" / "errors.log"
     assert err.is_file() and "checkpoint finalization failed" in err.read_text()
+
+
+# --- full-auto ROTATING branch (PRD §9 Stop, P6-D8) ---------------------------
+
+
+def _verified_stop_setup(cc_home, tmp_path, s="CHECKPOINT_VERIFIED") -> dict:
+    from cc_continuity import config, project
+
+    repo = make_repo(tmp_path)
+    if s == "CHECKPOINT_WRITING":
+        key, nnn = register_session(repo)
+        walk_to(key, nnn, "CHECKPOINT_WRITING")
+        (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+            _valid_draft())
+        return {"repo": repo, "key": key, "nnn": nnn}
+    if s == "HANDOFF_REQUESTED":
+        key, nnn = register_session(repo)
+        walk_to(key, nnn, "HANDOFF_REQUESTED")
+        return {"repo": repo, "key": key, "nnn": nnn}
+    # CHECKPOINT_VERIFIED: real checkpoint (draft + finalize)
+    key, nnn = register_session(repo)
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft())
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    return {"repo": repo, "key": key, "nnn": nnn}
+
+
+def test_verified_stop_full_auto_spawns_rotator(cc_home, capsys, tmp_path,
+                                                 monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    spawns = []
+    monkeypatch.setattr(stop.rotator, "spawn",
+                        lambda sid, pane, rid: (spawns.append((sid, pane, rid))
+                                                 or 777))
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) is None  # no systemMessage: pane rotates itself
+    rec = state.load_state(d["key"], d["nnn"])
+    assert rec["state"] == "ROTATING"
+    assert rec["rotation_id"]
+    assert len(spawns) == 1
+    assert spawns[0][0] == SID and spawns[0][1] == "%42"
+
+
+def test_cw_stop_full_auto_finalizes_then_rotates(cc_home, capsys, tmp_path,
+                                                   monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path, s="CHECKPOINT_WRITING")
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    spawns = []
+    monkeypatch.setattr(stop.rotator, "spawn",
+                        lambda sid, pane, rid: (spawns.append((sid, pane, rid))
+                                                 or 777))
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert state.load_state(d["key"], d["nnn"])["state"] == "ROTATING"
+    assert len(spawns) == 1
+
+
+def test_degraded_stop_full_auto_rotates(cc_home, capsys, tmp_path, monkeypatch):
+    # 3 failed attempts -> degraded checkpoint -> still rotates (C.7 handoff)
+    d = _verified_stop_setup(cc_home, tmp_path, s="HANDOFF_REQUESTED")
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    spawns = []
+    monkeypatch.setattr(stop.rotator, "spawn",
+                        lambda sid, pane, rid: (spawns.append((sid, pane, rid))
+                                                 or 777))
+    for _ in range(3):  # each Stop: attempt++ -> 3rd degrades + rotates
+        run_hook("Stop", payload("Stop", d["repo"]))
+    assert state.load_state(d["key"], d["nnn"])["state"] == "ROTATING"
+    assert state.load_state(d["key"], d["nnn"])["degraded"] is True
+    assert len(spawns) == 1
+
+
+def test_full_auto_disabled_keeps_amcl(cc_home, capsys, tmp_path, monkeypatch,
+                                        tmp_path_factory):
+    d = _verified_stop_setup(cc_home, tmp_path)
+    (d["repo"] / ".claude").mkdir(exist_ok=True)
+    (d["repo"] / ".claude" / "continuity.json").write_text(
+        json.dumps({"full_auto": False}))
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) == {"systemMessage": AMCL}
+    assert state.load_state(d["key"], d["nnn"])["state"] == \
+        "AWAITING_MANUAL_CLEAR"
+
+
+def test_rotating_stop_respawns(cc_home, capsys, tmp_path, monkeypatch):
+    # Orphan recovery: state is ROTATING (e.g. rotator crashed) and a Stop
+    # arrives again -> spawn again; the rotation lock kills the duplicate.
+    d = _verified_stop_setup(cc_home, tmp_path)
+    state.transition(d["key"], d["nnn"], "ROTATING", rotation_id="old-rid")
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    spawns = []
+    monkeypatch.setattr(stop.rotator, "spawn",
+                        lambda sid, pane, rid: (spawns.append((sid, pane, rid))
+                                                 or 777))
+    run_hook("Stop", payload("Stop", d["repo"]))
+    rec = state.load_state(d["key"], d["nnn"])
+    assert rec["state"] == "ROTATING"
+    assert rec["rotation_id"] != "old-rid"  # fresh id for the retry
+    assert len(spawns) == 1
+
+
+def test_spawn_failure_falls_back_to_amcl(cc_home, capsys, tmp_path, monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+
+    def boom(sid, pane, rid):
+        raise stop.rotator.RotatorSpawnError("no exec")
+
+    monkeypatch.setattr(stop.rotator, "spawn", boom)
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) == {"systemMessage": AMCL}
+    assert state.load_state(d["key"], d["nnn"])["state"] == \
+        "AWAITING_MANUAL_CLEAR"
+
+
+def test_rotating_transition_race_is_swallowed(cc_home, capsys, tmp_path, monkeypatch):
+    # Claim raced the Stop to ROTATED between the load and the transition:
+    # the hook must not crash (the spawned rotator self-exits on re-read).
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    monkeypatch.setattr(stop.rotator, "spawn", lambda s, p, r: 1)
+
+    real_transition = stop.state.transition
+
+    def racing_transition(key, nnn, new_state, **fields):
+        if new_state == "ROTATING":
+            raise stop.state.InvalidTransitionError("raced")
+        return real_transition(key, nnn, new_state, **fields)
+
+    monkeypatch.setattr(stop.state, "transition", racing_transition)
+    out = run_hook("Stop", payload("Stop", d["repo"]))
+    assert out == 0
+    assert capsys.readouterr().out == ""
+    assert "raced" in (paths.logs_dir() / "errors.log").read_text()
