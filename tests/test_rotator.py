@@ -13,7 +13,7 @@ import pytest
 
 from cc_continuity import bootstrap, ledger, lock, paths, rotator, state
 
-from hookutil import (SID, make_repo, register_session, run_hook,
+from hookutil import (SID, make_repo, payload, register_session, run_hook,
                       set_metric, walk_to)
 
 FAKE_TMUX = """#!/bin/sh
@@ -38,7 +38,9 @@ def fake_tmux(tmp_path, monkeypatch):
 
 
 def _calls(log) -> list[list[str]]:
-    """Parse the fake-tmux log into a list of argv lists."""
+    """Parse the fake-tmux log into a list of argv lists (no calls: no log)."""
+    if not log.is_file():
+        return []
     out, cur = [], None
     for line in log.read_text(encoding="utf-8").splitlines():
         if line == "---":
@@ -167,3 +169,208 @@ def test_spawn_raises_when_popen_fails(cc_home, monkeypatch):
     monkeypatch.setattr(rotator.subprocess, "Popen", boom)
     with pytest.raises(rotator.RotatorSpawnError):
         rotator.spawn("sid", "%1", "r")
+
+
+# --- run(): full happy path (PRD §11 steps 1–9, success) ----------------------
+
+
+def _rotating(cc_home, tmp_path) -> dict:
+    """Session 001 in ROTATING with a real checkpoint (the post-Stop shape:
+    the Stop hook sets turn_active/last_stop_ts before the ROTATING move)."""
+    from cc_continuity import checkpoint, config, project
+
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _DRAFT)  # same nine-heading body as tests/test_hooks_stop.py
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    rid = "rid-test"
+    state.update_fields(key, nnn, turn_active=False, last_stop_ts=time.time())
+    state.transition(key, nnn, "ROTATING", rotation_id=rid)
+    cfg = dict(config.DEFAULTS)
+    cfg["settle_ms"] = 0
+    return {"repo": repo, "key": key, "nnn": nnn, "rid": rid, "cfg": cfg,
+            "sid": SID}
+
+
+_DRAFT = "\n".join(f"## {h}\n{b}\n" for h, b in [
+    ("Objective", "Implement the feature end to end in the sandbox repo."),
+    ("Current Task and Exact Stopping Point",
+     "Just finished the edit; the test run has not happened yet."),
+    ("Completed This Session", "- Added the module and its imports."),
+    ("Next Atomic Action",
+     "Run `pytest -q` and fix any failure that appears."),
+    ("Remaining Plan", "1. Tests. 2. Docs."),
+    ("Decisions and Rationale", "Kept stdlib only, per the constraint."),
+    ("Rejected Approaches — Do Not Repeat", "No third-party dependencies."),
+    ("Open Problems, Risks, Questions for the User",
+     "None known at the moment."),
+    ("Runtime Environment Notes", "No running servers or ports."),
+])
+
+_NEW_SID = "99999999-8888-7777-6666-555555555555"
+
+
+def _shrink_waits(monkeypatch):
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 5.0)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 5.0)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+
+
+def _world_thread(world_fn):
+    import threading
+    t = threading.Thread(target=world_fn, daemon=True)
+    t.start()
+    return t
+
+
+def test_run_happy_path_full_chain(fake_tmux, cc_home, tmp_path, monkeypatch):
+    # The pane "model" reacts to the keystrokes by running the REAL hooks
+    # in-process: /clear -> SessionStart(clear) claim, paste -> UserPromptSubmit.
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid, cfg = d["repo"], d["key"], d["nnn"], d["rid"], d["cfg"]
+    _shrink_waits(monkeypatch)
+
+    def world():
+        time.sleep(0.2)  # let /clear land first
+        run_hook("SessionStart", payload("SessionStart", repo,
+                                         session_id=_NEW_SID, source="clear"))
+        time.sleep(0.2)
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", repo, session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, 1)["state"] == "ROTATED"
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "ACTIVE"  # claim BOOTSTRAPPING + RESUME -> ACTIVE
+    assert rec2["session_id"] == _NEW_SID
+    events = [l for l in (paths.logs_dir() / "events.log")
+              .read_text().splitlines() if "ROTATION_COMPLETED" in l]
+    assert events
+    calls = _calls(fake_tmux)
+    joined = [" ".join(c) for c in calls]
+    order = [joined.index("send-keys -t %9 C-u"),
+             joined.index("send-keys -t %9 -l /clear"),
+             joined.index("send-keys -t %9 Enter"),
+             joined.index("send-keys -t %9 -l /rename spike-repo-002"),
+             joined.index("paste-buffer -p -d -b ccc -t %9")]
+    assert order == sorted(order)
+    buf = next(c for c in calls if c[:2] == ["set-buffer", "-b"])
+    assert buf[3].startswith(f"CONTINUITY RESUME cp-{nnn:03d}: read ")
+    assert (paths.runtime_dir() / f"{_NEW_SID}.started").is_file()
+
+
+def test_run_f14_no_sessionstart_still_succeeds(fake_tmux, cc_home, tmp_path,
+                                                 monkeypatch):
+    # Only the RESUME paste lands (SessionStart(clear) never fired): the
+    # UserPromptSubmit F14 fallback performs the claim (P6-D5).
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid, cfg = d["repo"], d["key"], d["nnn"], d["rid"], d["cfg"]
+    _shrink_waits(monkeypatch)
+
+    def world():
+        time.sleep(2.0)  # no SessionStart; let the .started wait expire
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", repo, session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 1.0)
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    t.join(timeout=10)
+    assert rc == 0
+    log_text = (paths.logs_dir() / "events.log").read_text()
+    assert "SESSIONSTART_MISSING" in log_text
+    assert state.load_state(key, 1)["state"] == "ROTATED"
+    assert state.load_state(key, 2)["state"] == "ACTIVE"
+
+
+def test_run_defers_when_activity_after_stop(fake_tmux, cc_home, tmp_path):
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    time.sleep(0.01)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "user_prompt", "text": "user keeps typing"})
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 0  # defer is not an error
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    assert _calls(fake_tmux) == []  # no keystrokes at all
+    assert "ROTATION_DEFERRED" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_run_exits_when_rotation_lock_held(cc_home, tmp_path):
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    holder = lock.ProjectLock(paths.project_dir(key) / "rotation.lock",
+                              timeout=0)
+    assert holder.acquire(rotation_id="other-rotator")
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    holder.release()
+    assert rc == 2
+    assert state.load_state(key, nnn)["state"] == "ROTATING"  # untouched
+
+
+def test_run_takes_over_stale_rotation_lock(fake_tmux, cc_home, tmp_path,
+                                             monkeypatch):
+    d = _rotating(cc_home, tmp_path)
+    key, nnn, rid, cfg = d["key"], d["nnn"], d["rid"], d["cfg"]
+    dead = subprocess.Popen(["true"]).pid
+    subprocess.run(["true"])  # ensure the pid is dead
+    lpath = paths.project_dir(key) / "rotation.lock"
+    lpath.parent.mkdir(parents=True, exist_ok=True)
+    lpath.write_text(json.dumps({"pid": dead, "ts": time.time() - 300,
+                                 "rotation_id": "dead-rotator"}))
+    _shrink_waits(monkeypatch)
+
+    def world():
+        time.sleep(0.2)
+        run_hook("SessionStart", payload("SessionStart", d["repo"],
+                                         session_id=_NEW_SID, source="clear"))
+        time.sleep(0.2)
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", d["repo"], session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    t.join(timeout=10)
+    assert rc == 0  # stale lock taken over, rotation completed
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+
+
+def test_run_exits_when_state_not_rotating(cc_home, tmp_path):
+    from cc_continuity import checkpoint, config, project
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(_DRAFT)
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    # still CHECKPOINT_VERIFIED — the Stop hook never moved it
+    cfg = dict(config.DEFAULTS); cfg["settle_ms"] = 0
+    rc = rotator.run(key=key, nnn=nnn, session_id=SID, pane="%9",
+                     rotation_id="rid-x", cfg=cfg)
+    assert rc == 2
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_run_exits_on_rotation_id_mismatch(cc_home, tmp_path):
+    d = _rotating(cc_home, tmp_path)
+    rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
+                     pane="%9", rotation_id="different-id", cfg=d["cfg"])
+    assert rc == 2
