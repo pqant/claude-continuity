@@ -28,17 +28,6 @@ def test_no_command_exits_2_with_help(capsys):
     assert "usage" in capsys.readouterr().err.lower()
 
 
-@pytest.mark.parametrize(
-    "command",
-    ["doctor", "install", "uninstall"],
-)
-def test_unimplemented_subcommand_reports_phase(command, capsys):
-    assert cli.main([command]) == 2
-    err = capsys.readouterr().err
-    assert command in err
-    assert "Phase" in err
-
-
 # -------------------------------------------------------------------- hook
 
 
