@@ -30,8 +30,8 @@ import time
 from pathlib import Path
 
 from . import __version__, atomic, config, managed, skills
-from .settings_merge import (detect_format, dump_settings, merge_settings,
-                             unmerge_settings)
+from .settings_merge import (ACW_VALUE, detect_format, dump_settings,
+                             merge_settings, unmerge_settings)
 
 MIN_CLAUDE = (2, 1, 209)  # Phase 0 verified floor (VERIFICATION.md)
 
@@ -167,6 +167,36 @@ def make_symlink(link: Path, target: Path) -> None:
 # ----------------------------------------------------------------- install
 
 
+def _carry_over_manifest(manifest: dict, prev: dict, win: int) -> None:
+    """Reinstall (F-G7-2): carry the user-original values the previous
+    install recorded for the fields THIS merge saw as unchanged.
+
+    ``merge_settings`` only records what the current merge changed, so a
+    second install over an already-merged file would record "nothing
+    changed" (status_line_changed=False, env_prev = our own values,
+    empty allow/dirs lists) and uninstall could no longer restore the
+    user's originals — breaking the Gate 7 byte-for-byte criterion.
+    A field is carried over only when the new merge saw our own value
+    there (i.e. the user did not edit it between installs); a fresh user
+    edit always wins over the old manifest.
+    """
+    if not manifest.get("status_line_changed") and \
+            prev.get("status_line_changed"):
+        manifest["status_line_changed"] = True
+        manifest["previous_status_line"] = prev.get("previous_status_line")
+    ours = {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(win),
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": ACW_VALUE}
+    prev_env = prev.get("env_prev") or {}
+    env_prev = manifest.get("env_prev") or {}
+    for key, our_value in ours.items():
+        if env_prev.get(key) == our_value and key in prev_env:
+            env_prev[key] = prev_env[key]
+    for field in ("allow_added", "dirs_added"):
+        old = list(prev.get(field) or [])
+        manifest[field] = old + [x for x in (manifest.get(field) or [])
+                                 if x not in old]
+
+
 def install(home: Path, *, window: int | None = None,
             runner=subprocess.run) -> dict:
     """Run the full install (PRD §17 steps 1–7 minus doctor/usage text).
@@ -268,6 +298,9 @@ def install(home: Path, *, window: int | None = None,
             pass  # corrupt user config: start from defaults; doctor flags it
     if window is not None:
         cfg["window_tokens"] = int(window)
+    prev_manifest = cfg.get("install")
+    if isinstance(prev_manifest, dict) and prev_manifest:
+        _carry_over_manifest(manifest, prev_manifest, win)
     chained = (manifest.get("previous_status_line") or {}).get("command")
     if chained:
         cfg["chained_statusline"] = chained
@@ -361,9 +394,11 @@ def uninstall(home: Path, *, purge: bool = False) -> None:
     skills.uninstall_skills(home / ".claude" / "skills")
 
     # 5) ~/.local/bin symlink — only when it points into our app/
+    #    (realpath on BOTH sides: a symlinked component in the home path,
+    #     e.g. macOS /tmp -> /private/tmp, would otherwise mismatch — F-G7-1)
     link = home / ".local" / "bin" / "cc-continuity"
     if link.is_symlink() and os.path.realpath(link).startswith(
-            str(store / "app") + os.sep):
+            os.path.realpath(str(store / "app")) + os.sep):
         link.unlink()
 
     # 6) app copy

@@ -92,7 +92,7 @@ def run_doctor(home: Path, runner=subprocess.run,
     link = home / ".local" / "bin" / "cc-continuity"
     link_ok = (link.is_symlink() and launcher.is_file()
                and os.path.realpath(link).startswith(
-                   str(store / "app") + os.sep))
+                   os.path.realpath(str(store / "app")) + os.sep))
     add("symlink", link_ok, str(link))
 
     # 6: config.json

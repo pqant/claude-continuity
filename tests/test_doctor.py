@@ -20,6 +20,22 @@ def fake_home(tmp_path, monkeypatch, cc_home):
     return home
 
 
+@pytest.fixture
+def aliased_home(tmp_path, monkeypatch, cc_home):
+    """Home under a symlinked directory component: raw path != realpath
+    (the macOS /tmp -> /private/tmp shape that broke Gate 7, F-G7-1)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    home = alias / "home"
+    home.mkdir()
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CC_CONTINUITY_HOME", str(home / ".claude-continuity"))
+    return home
+
+
 def _which_ok(name):
     return {
         "tmux": "/usr/bin/tmux", "zsh": "/bin/zsh",
@@ -38,6 +54,17 @@ def test_installed_home_all_green(fake_home):
     assert {"python", "tmux", "zsh", "claude", "app", "symlink", "config",
             "settings-hooks", "statusline", "claude-md", "zshrc", "skills",
             "stale-locks", "tmp-residue", "errors-log"} <= names
+
+
+def test_symlink_check_ok_with_symlinked_path_component(aliased_home):
+    """F-G7-1 regression: home path with a symlinked component must not
+    break the realpath-vs-prefix comparison (raw /alias/ vs resolved)."""
+    h = aliased_home
+    install.install(h, window=262144, runner=FakeRun())
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    assert all(c.ok for c in checks), [c for c in checks if not c.ok]
+    assert os.path.realpath(str(h / ".local" / "bin" / "cc-continuity")) \
+        != str(h / ".local" / "bin" / "cc-continuity")  # alias is real
 
 
 def test_fresh_home_reports_red(fake_home):
