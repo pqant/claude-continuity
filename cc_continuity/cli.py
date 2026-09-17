@@ -3,8 +3,9 @@
 Phase 2 implements ``statusline`` (PRD §7) and ``status [--json]``;
 Phase 3 implements ``hook <event>`` (PRD §9) and ``history``.
 Phase 4 implements ``checkpoint`` / ``validate`` / ``validate-draft``
-(PRD §10/§12). The remaining subcommands still report which phase
-implements them.
+(PRD §10/§12); Phase 6 implements ``rotate`` (PRD §11).
+Phase 7 implements ``install`` / ``uninstall`` / ``doctor`` (PRD §17)
+and ``launch`` (the zsh wrapper backend, Appendix D).
 """
 
 from __future__ import annotations
@@ -20,13 +21,6 @@ from . import (__version__, checkpoint, config, naming, paths, project,
                state, statusline, thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
                     session_start, stop, task, tool_use, user_prompt)
-
-# subcommand -> phase that implements it (PRD §20)
-SUBCOMMAND_PHASES: dict[str, int] = {
-    "install": 7,
-    "uninstall": 7,
-    "doctor": 7,
-}
 
 # event -> handler (PRD §9)
 HOOK_HANDLERS: dict[str, Callable[[common.HookContext], dict | None]] = {
@@ -95,14 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_rot.add_argument("--rotation-id", required=True, dest="rotation_id",
                        help="rotation id written by the Stop hook")
 
+    p_inst = sub.add_parser("install",
+                            help="install cc-continuity (PRD §17)")
+    p_inst.add_argument("--window", type=int, default=None,
+                        help="context window tokens "
+                             "(default: keep current / 262144)")
+    p_un = sub.add_parser("uninstall",
+                          help="remove cc-continuity (PRD §17)")
+    p_un.add_argument("--purge", action="store_true",
+                      help="also delete ~/.claude-continuity (incl. projects)")
+    p_doc = sub.add_parser("doctor", help="health checks (PRD §16)")
+    p_doc.add_argument("--json", action="store_true",
+                       help="machine-readable output")
+
     p_launch = sub.add_parser("launch",
                               help="zsh wrapper backend (Appendix D)")
     p_launch.add_argument("claude_args", nargs=argparse.REMAINDER,
                           help="arguments forwarded to claude")
-
-    for name in SUBCOMMAND_PHASES:
-        sub.add_parser(name,
-                       help=f"implemented in Phase {SUBCOMMAND_PHASES[name]}")
     return parser
 
 
@@ -420,6 +423,65 @@ def cmd_launch(args: argparse.Namespace) -> int:
     return launch.run_launch(argv)
 
 
+# ------------------------------------------------------------ Phase 7 cmds
+
+
+USAGE_SUMMARY = """\
+Daily use:
+  cd ~/anything
+  claude                       # auto-tmux, named <project>-NNN
+  watch the status line: ⟳ NN% ok → PENDING → rotation by itself
+In-session skills:
+  /continuity-status  /continuity-checkpoint  /continuity-rotate
+  /continuity-off     /continuity-on          /continuity-history
+Disable for one repo: .claude/continuity.json {"enabled": false}
+Disable for one launch: CC_CONTINUITY=0 claude
+Skip tmux for one launch: CC_CONTINUITY_NO_TMUX=1 claude (assisted mode)
+Uninstall: cc-continuity uninstall
+"""
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    from . import install  # local import keeps cli import light
+    try:
+        install.install(Path.home(), window=args.window)
+    except install.InstallError as e:
+        print(f"cc-continuity install: {e}", file=sys.stderr)
+        return 1
+    print("cc-continuity installed.")
+    for line in USAGE_SUMMARY.splitlines():
+        print("  " + line)
+    print("\ndoctor:")
+    from . import doctor
+    checks = doctor.run_doctor(Path.home())
+    print(doctor.render(checks))
+    return 0 if all(c.ok for c in checks) else 1
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    from . import install
+    try:
+        install.uninstall(Path.home(), purge=args.purge)
+    except install.UninstallError as e:
+        print(f"cc-continuity uninstall: {e}", file=sys.stderr)
+        return 1
+    print("cc-continuity uninstalled"
+          + (" (store purged)." if args.purge
+             else " (store kept: ~/.claude-continuity/projects)."))
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from . import doctor
+    checks = doctor.run_doctor(Path.home())
+    if args.json:
+        import dataclasses
+        print(json.dumps([dataclasses.asdict(c) for c in checks], indent=2))
+    else:
+        print(doctor.render(checks))
+    return 0 if all(c.ok for c in checks) else 1
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -461,11 +523,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_rotate(args)
     if args.command == "launch":
         return cmd_launch(args)
-    phase = SUBCOMMAND_PHASES[args.command]
-    print(
-        f"cc-continuity {args.command}: not implemented yet (Phase {phase})",
-        file=sys.stderr,
-    )
+    if args.command == "install":
+        return cmd_install(args)
+    if args.command == "uninstall":
+        return cmd_uninstall(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
     return 2
 
 
