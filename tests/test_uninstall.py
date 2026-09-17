@@ -20,6 +20,22 @@ def fake_home(tmp_path, monkeypatch, cc_home):
 
 
 @pytest.fixture
+def aliased_home(tmp_path, monkeypatch, cc_home):
+    """Home under a symlinked directory component: raw path != realpath
+    (the macOS /tmp -> /private/tmp shape that broke Gate 7, F-G7-1)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    home = alias / "home"
+    home.mkdir()
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CC_CONTINUITY_HOME", str(home / ".claude-continuity"))
+    return home
+
+
+@pytest.fixture
 def seeded_home(fake_home):
     """Realistic pre-install state (the Gate 7 shape)."""
     h = fake_home
@@ -66,6 +82,48 @@ def test_byte_for_byte_roundtrip_on_seeded_home(seeded_home):
     # skills: the six gone, foreign ones survive
     names = {p.name for p in (h / ".claude" / "skills").iterdir()}
     assert names == {"graphify"}
+
+
+def test_reinstall_then_uninstall_restores_settings_byte_for_byte(seeded_home):
+    """F-G7-2 regression — the Gate 7 flow itself: install ×2 then
+    uninstall must restore settings.json byte-for-byte. The second
+    install's manifest must carry over the first install's recorded user
+    originals (statusLine, env_prev, allow_added, dirs_added)."""
+    h = seeded_home
+    before = (h / ".claude" / "settings.json").read_bytes()
+    install.install(h, window=262144, runner=FakeRun())
+    install.install(h, window=262144, runner=FakeRun())
+    install.uninstall(h)
+    after = (h / ".claude" / "settings.json").read_bytes()
+    assert after == before
+    s = json.loads(after)
+    assert s["statusLine"]["command"] == "~/.claude/bin/claude-hud-launch.sh"
+    assert "permissions" not in s
+
+
+def test_reinstall_with_window_change_preserves_user_env_value(seeded_home):
+    """F-G7-2 general case: user MAX_CONTEXT=262144 + --window 40000 on
+    both installs; uninstall must restore the user's 262144 (not 40000)
+    and drop the installer-written ACW key."""
+    h = seeded_home
+    install.install(h, window=40000, runner=FakeRun())
+    install.install(h, window=40000, runner=FakeRun())
+    install.uninstall(h)
+    s = json.loads((h / ".claude" / "settings.json").read_text("utf-8"))
+    assert s["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144"
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in s["env"]
+
+
+def test_uninstall_removes_symlink_with_symlinked_path_component(aliased_home):
+    """F-G7-1 regression: uninstall must still recognize (and remove) our
+    ~/.local/bin symlink when the home path contains a symlinked
+    component — same realpath-vs-prefix fix as the doctor check."""
+    h = aliased_home
+    install.install(h, window=262144, runner=FakeRun())
+    link = h / ".local" / "bin" / "cc-continuity"
+    assert link.is_symlink()
+    install.uninstall(h)
+    assert not link.is_symlink()
 
 
 def test_created_files_removed_when_no_user_content(fake_home):
