@@ -28,7 +28,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import atomic, config, naming, paths
+from . import atomic, config, ledger, naming, paths
 
 #: Hooks treat a metric older than this as unknown (PRD §7, METRIC_STALE).
 STALE_SECONDS = 600
@@ -138,7 +138,7 @@ def find_session_by_id(session_id: str | None) -> dict | None:
 
 
 def render_segment(ratio: float | None, record: dict | None,
-                   enabled: bool) -> str:
+                   enabled: bool, blocked: str | None = None) -> str:
     """Render our ``⟳ …`` segment (PRD §7).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
@@ -147,23 +147,27 @@ def render_segment(ratio: float | None, record: dict | None,
     The percentage is an int via ceil (never understate: the PRD pairs
     ratio 0.6036 with ``⟳ 61%``); the inner round kills IEEE-754 noise so
     ``0.07`` renders ``7%``, not ``8%``.
+    ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
+    needs_human ledger entry is unconsumed — visible on any later attach
+    (spec §7 risk note).
     """
+    suffix = f" ⛔ BLOCKED" if blocked else ""
     if not enabled or (record is not None and record.get("off")):
         return "⟳ off"
     if ratio is None:
-        return "⟳ …"
+        return "⟳ …" + suffix
     pct = math.ceil(round(ratio * 100, 6))
     state_name = (record or {}).get("state", "ACTIVE")
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
-        return f"⟳ {pct}% PENDING→{successor}"
+        return f"⟳ {pct}% PENDING→{successor}" + suffix
     if state_name == "ROTATING":
-        return f"⟳ {pct}% ROTATING"
+        return f"⟳ {pct}% ROTATING" + suffix
     if state_name == "AWAITING_MANUAL_CLEAR":
-        return f"⟳ {pct}% AMCL"
+        return f"⟳ {pct}% AMCL" + suffix
     if state_name in _HANDOFF_STATES:
-        return f"⟳ {pct}% HANDOFF!"
-    return f"⟳ {pct}% ok"
+        return f"⟳ {pct}% HANDOFF!" + suffix
+    return f"⟳ {pct}% ok" + suffix
 
 
 # ---------------------------------------------------------------- chaining
@@ -228,6 +232,14 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             record = find_session_by_id(payload.get("session_id"))
 
     ratio = metric["ratio"] if metric is not None else None
-    segment = render_segment(ratio, record, enabled)
+    blocked = None
+    if record is not None:
+        try:
+            blocked = ledger.blocked_reason(
+                paths.session_dir(record["project_key"],
+                                  int(record["nnn"])))
+        except (OSError, ValueError):
+            blocked = None
+    segment = render_segment(ratio, record, enabled, blocked=blocked)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)
