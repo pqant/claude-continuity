@@ -140,3 +140,72 @@ def test_render_and_json_shape(fake_home):
     for c in checks:
         d = dataclasses.asdict(c)
         assert {"name", "ok", "detail", "warning"} <= set(d)
+
+
+class NotifyRun(FakeRun):
+    """FakeRun that also plays the notify curl call."""
+    def __init__(self, rc=0):
+        super().__init__()
+        self.rc = rc
+        self.notify_cmd = None
+    def __call__(self, cmd, **kw):
+        if isinstance(cmd, list) and cmd and cmd[0] == "curl":
+            self.notify_cmd = cmd
+            class R: pass
+            r = R(); r.stdout = ""; r.stderr = ""; r.returncode = self.rc
+            return r
+        return super().__call__(cmd, **kw)
+
+
+def _enable_notify(home):
+    cfg_path = home / ".claude-continuity" / "config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg.update({"notify_enabled": True,
+                "notify_endpoint": "https://ntfy.sh/example-topic"})
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+
+def test_doctor_curl_check(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    by = {c.name: c for c in
+          doctor.run_doctor(fake_home, runner=FakeRun(),
+                            which=lambda n: "/usr/bin/fake")}
+    assert by["curl"].ok is True
+    by = {c.name: c for c in
+          doctor.run_doctor(fake_home, runner=FakeRun(),
+                            which=lambda n:
+                                None if n == "curl" else "/usr/bin/fake")}
+    assert by["curl"].ok is False
+    assert by["curl"].detail == "not on PATH"
+
+
+def test_doctor_notify_not_configured_is_not_a_failure(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    by = {c.name: c for c in
+          doctor.run_doctor(fake_home, runner=FakeRun(),
+                            which=lambda n: "/usr/bin/fake")}
+    assert by["notify"].ok is True
+    assert by["notify"].detail == "not configured (disabled)"
+
+
+def test_doctor_notify_sends_test_message_when_configured(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    _enable_notify(fake_home)
+    fake = NotifyRun()
+    by = {c.name: c for c in
+          doctor.run_doctor(fake_home, runner=fake,
+                            which=lambda n: "/usr/bin/fake")}
+    assert by["notify"].ok is True
+    assert by["notify"].detail == "https://ntfy.sh/example-topic"
+    assert fake.notify_cmd is not None
+    assert "Title: 🔔 cc-continuity test" in fake.notify_cmd
+
+
+def test_doctor_notify_failed_test_send_is_not_ok(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    _enable_notify(fake_home)
+    by = {c.name: c for c in
+          doctor.run_doctor(fake_home, runner=NotifyRun(rc=7),
+                            which=lambda n: "/usr/bin/fake")}
+    assert by["notify"].ok is False
+    assert "test send failed" in by["notify"].detail

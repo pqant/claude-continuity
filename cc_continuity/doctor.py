@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import managed, skills
+from . import __version__, managed, notify, skills
 from .install import (CLAUDE_MD_BEGIN, CLAUDE_MD_END, MIN_CLAUDE,
                       ZSHRC_BEGIN, ZSHRC_END, parse_version)
 from .lock import pid_alive
@@ -101,6 +101,23 @@ def run_doctor(home: Path, runner=subprocess.run,
     cfg_ok = isinstance(cfg, dict) and \
         isinstance(cfg.get("window_tokens"), int)
     add("config", cfg_ok, str(cfg_path))
+
+    # 6b: curl (P9-P11 — notify needs it; install refuses without it)
+    curl = which("curl")
+    add("curl", curl is not None, curl or "not on PATH")
+
+    # 6c: notify (P9-D3): configured → one test message, ✓/✗ by the curl
+    #     exit; unset → "not configured (disabled)" (never a failure)
+    ep = (cfg or {}).get("notify_endpoint")
+    if not ((cfg or {}).get("notify_enabled") and ep):
+        add("notify", True, "not configured (disabled)")
+    else:
+        ok = notify.send(str(ep), "🔔 cc-continuity test",
+                         f"{notify.host()} cc-continuity {__version__}",
+                         "default", event="notify-test", wait=True,
+                         runner=runner)
+        add("notify", ok,
+            ep if ok else f"{ep} — test send failed (see errors.log)")
 
     # 7-8: settings hooks + statusLine
     settings = _safe_json(home / ".claude" / "settings.json")
