@@ -372,7 +372,9 @@ def cmd_request_rotation(args: argparse.Namespace) -> int:
     rec = state.load_state(key, nnn)
     s = rec["state"]
     if s in ("BOOTSTRAPPING", "ACTIVE", "WARNED"):
-        rec, _ = thresholds.advance(key, nnn, "ROTATION_PENDING", ratio=ratio)
+        cfg = config.load_config()
+        rec, _ = thresholds.advance(key, nnn, "ROTATION_PENDING",
+                                    ratio=ratio, cfg=cfg)
         print(f"Rotation pending: {rec['name']} -> "
               f"{naming.successor_name(rec['name'])}")
     elif s == "ROTATION_PENDING":

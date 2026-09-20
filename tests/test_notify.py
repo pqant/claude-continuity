@@ -175,3 +175,42 @@ def test_send_wait_false_is_detached_popen(cc_home, monkeypatch):
     (cmd, kw) = fake.popen_calls[0]
     assert cmd[:3] == ["curl", "-s", "-m"]
     assert kw["start_new_session"] is True
+
+
+def _mk_session(key: str, nnn: int, monkeypatch=None) -> None:
+    from cc_continuity import state as st
+    st.create_session_state(key, f"proj-{key}-{nnn:03d}", nnn,
+                            f"sid-{key}", initial_state="ACTIVE")
+
+
+def test_advance_fires_row2_then_row3(cc_home, monkeypatch):
+    from cc_continuity import thresholds
+    _mk_session("k1", 1)
+    fired = []
+    monkeypatch.setattr(notify, "safe_send",
+                        lambda cfg, event, **kw: fired.append(event) or True)
+    thresholds.advance("k1", 1, "WARNED", ratio=0.5, cfg=_cfg())
+    thresholds.advance("k1", 1, "HANDOFF_REQUESTED", ratio=0.65, cfg=_cfg())
+    assert fired == ["warned", "rotation_pending"]
+
+
+def test_advance_midwalk_still_fires_pending(cc_home, monkeypatch):
+    """P9-P3: a direct walk to HANDOFF_REQUESTED passes THROUGH
+    ROTATION_PENDING — row 3 must fire even though no caller asked for it."""
+    from cc_continuity import thresholds
+    _mk_session("k2", 1)
+    fired = []
+    monkeypatch.setattr(notify, "safe_send",
+                        lambda cfg, event, **kw: fired.append(event) or True)
+    thresholds.advance("k2", 1, "HANDOFF_REQUESTED", ratio=0.75, cfg=_cfg())
+    assert fired == ["rotation_pending"]
+
+
+def test_advance_without_cfg_is_silent(cc_home, monkeypatch):
+    from cc_continuity import thresholds
+    _mk_session("k3", 1)
+    fired = []
+    monkeypatch.setattr(notify, "safe_send",
+                        lambda cfg, event, **kw: fired.append(event) or True)
+    thresholds.advance("k3", 1, "ROTATION_PENDING", ratio=0.65)
+    assert fired == []

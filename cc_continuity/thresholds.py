@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import re
 
-from . import checkpoint, lock, state, statusline
+from . import checkpoint, lock, notify, state, statusline
 from .hooks.common import HookContext, log_event
 
 #: PRD §9 PreToolUse allowlist: Bash commands that stay allowed at the
@@ -127,7 +127,8 @@ _WARNED_PATHS = {
 
 
 def advance(key: str, nnn: int, target: str, *,
-            ratio: float | None = None) -> tuple[dict, bool]:
+            ratio: float | None = None,
+            cfg: dict | None = None) -> tuple[dict, bool]:
     """Walk the current state to ``target`` (PRD §8), one locked transition
     at a time. Returns ``(record, changed)``; ``changed`` is False when the
     session is already in ``target`` (idempotent no-op).
@@ -143,6 +144,10 @@ def advance(key: str, nnn: int, target: str, *,
     ``warned=True``. Any unreachable source (unknown
     target, backwards move, or an illegal single step) raises
     ``state.InvalidTransitionError``.
+
+    ``cfg`` — when given, the walk fires the spec §5 row 2/3
+    pushes on the steps entering WARNED / ROTATION_PENDING
+    (``notify.on_state_enter``); ``None`` keeps the call silent.
     """
     if target not in ("WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED"):
         raise state.InvalidTransitionError(f"advance: unknown target {target!r}")
@@ -173,6 +178,7 @@ def advance(key: str, nnn: int, target: str, *,
             if step == "ROTATION_PENDING" and ratio is not None:
                 fields["ratio_at_pending"] = ratio
             record, _ = state._transition_unlocked(key, nnn, step, **fields)
+            notify.on_state_enter(cfg, key, nnn, step, ratio=ratio)
         return record, True
 
 

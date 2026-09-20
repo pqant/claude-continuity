@@ -111,7 +111,8 @@ def handle(ctx: HookContext) -> dict | None:
     s = rec["state"]
     emitted: str | None = None
     if s == "ROTATION_PENDING" and rec.get("boundary_pending"):
-        rec, changed = thresholds.advance(key, nnn, "HANDOFF_REQUESTED")
+        rec, changed = thresholds.advance(key, nnn, "HANDOFF_REQUESTED",
+                                          cfg=cfg)
         if changed:
             state.update_fields(key, nnn, boundary_pending=False,
                                 ctx_emitted_at=tool_calls)
@@ -120,26 +121,27 @@ def handle(ctx: HookContext) -> dict | None:
     elif (s in _ROTATE_FROM and ratio is not None
           and ratio >= cfg["hard_ratio"]):
         rec, changed = thresholds.advance(key, nnn, "HANDOFF_REQUESTED",
-                                          ratio=ratio)
+                                          ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
             emitted = thresholds.c2_text(ratio, draft_path)
     elif (s in {"BOOTSTRAPPING", "ACTIVE"} and ratio is not None
           and ratio >= cfg["rotate_ratio"]):
         rec, changed = thresholds.advance(key, nnn, "ROTATION_PENDING",
-                                          ratio=ratio)
+                                          ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
             emitted = thresholds.c2_text(ratio, draft_path)
     elif s == "WARNED" and ratio is not None and ratio >= cfg["rotate_ratio"]:
         rec, changed = thresholds.advance(key, nnn, "ROTATION_PENDING",
-                                          ratio=ratio)
+                                          ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
             emitted = thresholds.c2_text(ratio, draft_path)
     elif (s in {"BOOTSTRAPPING", "ACTIVE"} and ratio is not None
           and ratio >= cfg["warn_ratio"]):
-        rec, changed = thresholds.advance(key, nnn, "WARNED")
+        rec, changed = thresholds.advance(key, nnn, "WARNED",
+                                          ratio=ratio, cfg=cfg)
         if changed:
             emitted = thresholds.c1_text(ratio, cfg["window_tokens"])
     elif s == "HANDOFF_REQUESTED":
