@@ -106,3 +106,20 @@ def test_invalid_project_json_raises_config_error(cc_home, tmp_path):
     (proj / ".claude" / "continuity.json").write_text("nope")
     with pytest.raises(config.ConfigError):
         config.load_config(cwd=proj)
+
+
+def test_defaults_have_phase9_keys():
+    assert config.DEFAULTS["notify_endpoint"] == ""
+    assert config.DEFAULTS["notify_enabled"] is False
+    assert config.DEFAULTS["unattended"] is False
+
+
+def test_load_config_merges_notify_and_unattended(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({
+        "notify_enabled": True,
+        "notify_endpoint": "https://ntfy.sh/example-topic",
+        "unattended": True}), encoding="utf-8")
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["notify_enabled"] is True
+    assert cfg["notify_endpoint"] == "https://ntfy.sh/example-topic"
+    assert cfg["unattended"] is True
