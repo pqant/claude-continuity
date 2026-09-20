@@ -94,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_inst.add_argument("--window", type=int, default=None,
                         help="context window tokens "
                              "(default: keep current / 262144)")
+    p_inst.add_argument("--ntfy", default=None,
+                        help="ntfy endpoint URL (or 'off' to disable; "
+                             "prompts on a TTY when omitted)")
     p_un = sub.add_parser("uninstall",
                           help="remove cc-continuity (PRD §17)")
     p_un.add_argument("--purge", action="store_true",
@@ -101,6 +104,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc = sub.add_parser("doctor", help="health checks (PRD §16)")
     p_doc.add_argument("--json", action="store_true",
                        help="machine-readable output")
+
+    p_cfg = sub.add_parser("configure",
+                           help="update the config after install (Phase 9)")
+    p_cfg.add_argument("--ntfy", default=None,
+                       help="ntfy endpoint URL (or 'off' to disable)")
+    p_cfg.add_argument("--unattended", action="store_true",
+                       help="set config.json unattended=true (loud: the "
+                            "agent then runs without per-action approval — "
+                            "see README)")
 
     p_launch = sub.add_parser("launch",
                               help="zsh wrapper backend (Appendix D)")
@@ -444,7 +456,9 @@ Uninstall: cc-continuity uninstall
 def cmd_install(args: argparse.Namespace) -> int:
     from . import install  # local import keeps cli import light
     try:
-        install.install(Path.home(), window=args.window)
+        ntfy = install.resolve_ntfy(
+            args.ntfy, is_tty=sys.stdin.isatty() and sys.stdout.isatty())
+        install.install(Path.home(), window=args.window, ntfy=ntfy)
     except install.InstallError as e:
         print(f"cc-continuity install: {e}", file=sys.stderr)
         return 1
@@ -456,6 +470,47 @@ def cmd_install(args: argparse.Namespace) -> int:
     checks = doctor.run_doctor(Path.home())
     print(doctor.render(checks))
     return 0 if all(c.ok for c in checks) else 1
+
+
+def cmd_configure(args: argparse.Namespace) -> int:
+    """P9-D2: post-install config changes — no reinstall needed."""
+    from . import atomic, install, paths
+    cfg_path = paths.config_path()
+    cfg: dict = {}
+    if cfg_path.is_file():
+        try:
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as e:
+            print(f"cc-continuity configure: unreadable {cfg_path}: {e}",
+                  file=sys.stderr)
+            return 1
+        if not isinstance(loaded, dict):
+            print(f"cc-continuity configure: {cfg_path} must be a JSON "
+                  "object", file=sys.stderr)
+            return 1
+        cfg = loaded
+    changed = []
+    if args.ntfy is not None:
+        try:
+            endpoint = ("" if args.ntfy.strip().lower() == "off"
+                        else install.validate_endpoint(args.ntfy))
+        except install.InstallError as e:
+            print(f"cc-continuity configure: {e}", file=sys.stderr)
+            return 1
+        cfg["notify_endpoint"] = endpoint
+        cfg["notify_enabled"] = bool(endpoint)
+        changed.append("notify_endpoint=" + (endpoint or "(off)"))
+    if args.unattended:
+        cfg["unattended"] = True
+        changed.append("unattended=true")
+    if not changed:
+        print("cc-continuity configure: nothing to change (pass --ntfy "
+              "<url|off> and/or --unattended)", file=sys.stderr)
+        return 1
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic.atomic_write_json(cfg_path, cfg)
+    print("cc-continuity configured: " + ", ".join(changed))
+    return 0
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -525,6 +580,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_launch(args)
     if args.command == "install":
         return cmd_install(args)
+    if args.command == "configure":
+        return cmd_configure(args)
     if args.command == "uninstall":
         return cmd_uninstall(args)
     if args.command == "doctor":
