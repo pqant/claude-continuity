@@ -4,6 +4,8 @@ PRD §9: ledger entry with reason; if reason == ``clear`` while state is
 ``ROTATING``, log it (successor confirmation happens at SessionStart, Phase 6).
 """
 
+import json
+
 from cc_continuity import ledger, paths, state
 
 from hookutil import fixture_payload, make_repo, payload, register_session, run_hook
@@ -52,3 +54,22 @@ def test_unregistered_session_is_silently_ignored(cc_home, tmp_path):
     assert run_hook("SessionEnd", p) == 0
     key = project.project_key_for_root(project.resolve_root(repo))
     assert not (paths.project_dir(key) / "sessions").is_dir()
+
+
+def test_session_end_pushes_row10(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    (cc_home / "config.json").write_text(json.dumps({
+        "notify_enabled": True,
+        "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+    register_session(repo)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, body)) or True)
+    p = fixture_payload("SessionEnd", repo)
+    p["reason"] = "clear"
+    assert run_hook("SessionEnd", p) == 0
+    assert sent == [("■ cc-continuity: session ended",
+                     "proj=spike-repo 001 reason=clear")]

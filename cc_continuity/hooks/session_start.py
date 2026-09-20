@@ -22,9 +22,9 @@ import json
 import math
 import os
 
-from .. import (bootstrap, checkpoint, ledger, lock, naming, paths, project,
-                state, statusline)
-from .common import HookContext, log_error, session_start_output
+from .. import (bootstrap, checkpoint, ledger, lock, naming, notify, paths,
+                project, state, statusline)
+from .common import HookContext, log_error, notify_claimed, session_start_output
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -77,6 +77,7 @@ def _clear(ctx: HookContext) -> dict | None:
                                       cfg=ctx.cfg)
         if res is not None:
             bootstrap.write_started(session_id)
+            notify_claimed(ctx.cfg, key, res)
             return session_start_output(res["bootstrap_text"])
         if ctx.session is None:
             _register(ctx, key, session_id)
@@ -98,6 +99,9 @@ def _register(ctx: HookContext, key: str, session_id: str) -> None:
     ledger.append(paths.session_dir(key, nnn),
                   {"type": "session_start", "source": "startup",
                    "name": name, "nnn": nnn})
+    notify.safe_send(ctx.cfg, "session_started",
+                     slug=notify.project_slug(key), nnn=nnn, name=name,
+                     host=notify.host())
 
 
 def _decide_name(key: str, slug: str) -> tuple[str, int]:

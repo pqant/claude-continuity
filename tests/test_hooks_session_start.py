@@ -362,3 +362,37 @@ def test_clear_without_session_id_is_noop(cc_home, capsys, tmp_path):
     pref = _project_record(repo)
     assert pref["counter"] == 1
     assert len(pref["sessions"]) == 1
+
+
+def test_startup_registration_pushes_session_started(cc_home, tmp_path,
+                                                     monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    (cc_home / "config.json").write_text(json.dumps({
+        "notify_enabled": True,
+        "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (ep, title, body, prio)) or True)
+    assert run_hook("SessionStart",
+                    fixture_payload("SessionStart", repo)) == 0
+    assert len(sent) == 1
+    ep, title, body, prio = sent[0]
+    assert ep == "https://ntfy.sh/example-topic"
+    assert title == "▶ cc-continuity: session started"
+    assert prio == "default"
+    assert body.startswith("proj=spike-repo 001 (spike-repo-001) host=")
+
+
+def test_startup_registration_silent_when_notify_disabled(cc_home, tmp_path,
+                                                          monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda *a, **kw: sent.append(a) or True)
+    assert run_hook("SessionStart",
+                    fixture_payload("SessionStart", repo)) == 0
+    assert sent == []
