@@ -383,3 +383,34 @@ def test_cli_rotate_unknown_session(cc_home, capsys):
     assert cli.main(["rotate", "--session", "nope", "--pane", "%1",
                      "--rotation-id", "r"]) == 1
     assert "No registered session" in capsys.readouterr().err
+
+
+def test_configure_ntfy_roundtrip(cc_home):
+    assert cli.main(["configure", "--ntfy",
+                     "https://ntfy.sh/example-topic"]) == 0
+    cfg = json.loads((cc_home / "config.json").read_text(encoding="utf-8"))
+    assert cfg["notify_endpoint"] == "https://ntfy.sh/example-topic"
+    assert cfg["notify_enabled"] is True
+    assert cli.main(["configure", "--ntfy", "off"]) == 0
+    cfg = json.loads((cc_home / "config.json").read_text(encoding="utf-8"))
+    assert cfg["notify_endpoint"] == ""
+    assert cfg["notify_enabled"] is False
+
+
+def test_configure_unattended_and_combined(cc_home):
+    assert cli.main(["configure", "--ntfy", "https://ntfy.sh/t",
+                     "--unattended"]) == 0
+    cfg = json.loads((cc_home / "config.json").read_text(encoding="utf-8"))
+    assert cfg["unattended"] is True
+    assert cfg["notify_enabled"] is True
+
+
+def test_configure_invalid_endpoint_writes_nothing(cc_home, capsys):
+    assert cli.main(["configure", "--ntfy", "nope"]) == 1
+    assert not (cc_home / "config.json").exists()
+    assert "invalid ntfy endpoint" in capsys.readouterr().err
+
+
+def test_configure_without_flags_is_error(cc_home, capsys):
+    assert cli.main(["configure"]) == 1
+    assert "nothing to change" in capsys.readouterr().err

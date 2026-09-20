@@ -102,6 +102,39 @@ def parse_version(text: str) -> tuple[int, int, int] | None:
     return tuple(int(x) for x in m.groups()) if m else None
 
 
+def validate_endpoint(url: str) -> str:
+    """P9-P10: the endpoint must be a full http(s):// URL. Returns the
+    stripped URL; raises ``InstallError`` otherwise."""
+    url = (url or "").strip()
+    if url.lower().startswith(("http://", "https://")):
+        return url
+    raise InstallError(
+        f"invalid ntfy endpoint {url!r} — expected a full http(s):// URL "
+        "(e.g. https://ntfy.sh/<topic>) or 'off'")
+
+
+def resolve_ntfy(explicit: str | None, *, is_tty: bool,
+                 prompt=input) -> str | None:
+    """P9-D2: the notify endpoint at install time.
+
+    ``explicit`` (the --ntfy flag) wins: ``off``/empty → disabled
+    (``""``), else validated. Without the flag, a TTY prompts
+    ``ntfy endpoint? (e.g. https://ntfy.sh/<topic> — Enter = off)``;
+    Enter → disabled, non-empty → validated. Non-TTY without the flag →
+    ``None`` (existing config value untouched).
+    """
+    if explicit is not None:
+        explicit = explicit.strip()
+        if explicit.lower() == "off" or explicit == "":
+            return ""
+        return validate_endpoint(explicit)
+    if not is_tty:
+        return None
+    answer = (prompt("ntfy endpoint? (e.g. https://ntfy.sh/<topic> "
+                     "— Enter = off) ") or "").strip()
+    return "" if not answer else validate_endpoint(answer)
+
+
 def check_prerequisites(home: Path,
                         runner=subprocess.run) -> list[str]:
     """Return human-readable missing items; [] means all prerequisites OK."""
@@ -112,6 +145,8 @@ def check_prerequisites(home: Path,
         missing.append("tmux on PATH")
     if shutil.which("zsh") is None:
         missing.append("zsh on PATH")
+    if shutil.which("curl") is None:
+        missing.append("curl on PATH")
     claude = shutil.which("claude")
     if claude is None:
         missing.append("claude CLI on PATH")
@@ -198,13 +233,16 @@ def _carry_over_manifest(manifest: dict, prev: dict, win: int) -> None:
 
 
 def install(home: Path, *, window: int | None = None,
-            runner=subprocess.run) -> dict:
+            ntfy: str | None = None, runner=subprocess.run) -> dict:
     """Run the full install (PRD §17 steps 1–7 minus doctor/usage text).
 
     ``home`` is the user's HOME (the CLI passes ``Path.home()``).
     Returns the install manifest (also stored in ``config.json["install"]``).
     Raises ``InstallError`` before any user file is modified when a
     prerequisite is missing or a file is unreadable.
+
+    ``ntfy``: resolved notify endpoint (``resolve_ntfy``) —
+    ``None`` leaves the existing value untouched, ``''`` disables.
     """
     home = Path(home)
     missing = check_prerequisites(home, runner=runner)
@@ -298,6 +336,9 @@ def install(home: Path, *, window: int | None = None,
             pass  # corrupt user config: start from defaults; doctor flags it
     if window is not None:
         cfg["window_tokens"] = int(window)
+    if ntfy is not None:
+        cfg["notify_endpoint"] = ntfy
+        cfg["notify_enabled"] = bool(ntfy)
     prev_manifest = cfg.get("install")
     if isinstance(prev_manifest, dict) and prev_manifest:
         _carry_over_manifest(manifest, prev_manifest, win)

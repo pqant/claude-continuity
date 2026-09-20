@@ -216,3 +216,66 @@ def test_symlink_repointed_when_target_changed(fake_home):
     assert link.is_symlink()
     assert link.resolve() == (fake_home / ".claude-continuity" / "app"
                               / "bin" / "cc-continuity").resolve()
+
+
+def test_prerequisites_flag_missing_curl(fake_home, monkeypatch):
+    monkeypatch.setattr(install.shutil, "which",
+                        lambda n: None if n == "curl" else "/usr/bin/fake")
+    missing = install.check_prerequisites(fake_home, runner=FakeRun())
+    assert "curl on PATH" in missing
+
+
+def test_resolve_ntfy_flag_off_and_empty_disable():
+    assert install.resolve_ntfy("off", is_tty=False) == ""
+    assert install.resolve_ntfy("", is_tty=False) == ""
+
+
+def test_resolve_ntfy_flag_url_validated():
+    assert install.resolve_ntfy(
+        "https://ntfy.sh/example-topic", is_tty=False
+    ) == "https://ntfy.sh/example-topic"
+    assert install.resolve_ntfy(
+        "http://192.168.1.10:2001/topic", is_tty=False
+    ) == "http://192.168.1.10:2001/topic"
+    with pytest.raises(install.InstallError):
+        install.resolve_ntfy("ntfy.sh/no-scheme", is_tty=False)
+
+
+def test_resolve_ntfy_nontty_without_flag_untouched():
+    assert install.resolve_ntfy(None, is_tty=False) is None
+
+
+def test_resolve_ntfy_tty_prompt():
+    assert install.resolve_ntfy(None, is_tty=True,
+                                prompt=lambda *_: "") == ""
+    assert install.resolve_ntfy(None, is_tty=True,
+                                prompt=lambda *_: "https://ntfy.sh/t") == \
+        "https://ntfy.sh/t"
+    with pytest.raises(install.InstallError):
+        install.resolve_ntfy(None, is_tty=True, prompt=lambda *_: "bad url")
+
+
+def test_install_ntfy_flag_writes_config(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun(),
+                    ntfy="https://ntfy.sh/example-topic")
+    cfg = json.loads((fake_home / ".claude-continuity" / "config.json")
+                     .read_text(encoding="utf-8"))
+    assert cfg["notify_endpoint"] == "https://ntfy.sh/example-topic"
+    assert cfg["notify_enabled"] is True
+
+
+def test_install_ntfy_empty_disables(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun(), ntfy="")
+    cfg = json.loads((fake_home / ".claude-continuity" / "config.json")
+                     .read_text(encoding="utf-8"))
+    assert cfg["notify_endpoint"] == ""
+    assert cfg["notify_enabled"] is False
+
+
+def test_install_ntfy_none_keeps_previous_value(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun(),
+                    ntfy="https://ntfy.sh/first")
+    install.install(fake_home, window=262144, runner=FakeRun())
+    cfg = json.loads((fake_home / ".claude-continuity" / "config.json")
+                     .read_text(encoding="utf-8"))
+    assert cfg["notify_endpoint"] == "https://ntfy.sh/first"
