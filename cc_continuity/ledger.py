@@ -46,3 +46,22 @@ def read(session_dir: str | Path) -> list[dict]:
         if line.strip():
             out.append(json.loads(line))
     return out
+
+
+def blocked_reason(session_dir: str | Path) -> str | None:
+    """P9-P5: reason of the latest UNCONSUMED ``needs_human`` entry, or
+    None. A later main-session ``user_prompt`` entry (no ``agent_id``)
+    consumes the block; subagent prompts do not. Never raises — a
+    missing/corrupt ledger reads as unblocked."""
+    try:
+        entries = read(session_dir)
+    except (OSError, ValueError):
+        return None
+    blocked = None
+    for entry in entries:
+        t = entry.get("type")
+        if t == "needs_human":
+            blocked = entry.get("reason")
+        elif t == "user_prompt" and not entry.get("agent_id"):
+            blocked = None
+    return blocked

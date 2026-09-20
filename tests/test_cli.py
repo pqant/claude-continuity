@@ -414,3 +414,65 @@ def test_configure_invalid_endpoint_writes_nothing(cc_home, capsys):
 def test_configure_without_flags_is_error(cc_home, capsys):
     assert cli.main(["configure"]) == 1
     assert "nothing to change" in capsys.readouterr().err
+
+
+def test_signal_needs_human_pushes_and_records(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+    key, nnn = register_session(repo)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body, kw.get("wait"))) or True)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)  # primary resolution
+    monkeypatch.chdir(repo)
+    assert cli.main(["signal", "needs-human", "drop production db?"]) == 0
+    assert len(sent) == 1
+    title, prio, body, wait = sent[0]
+    assert title == "🛑 cc-continuity: BLOCKED — waiting for you"
+    assert prio == "urgent"
+    assert f"proj=spike-repo {nnn:03d} reason=drop production db?" in body
+    assert wait is True  # CLI path: wait=True (P9-P4)
+    last = ledger.read(paths.session_dir(key, nnn))[-1]
+    last.pop("ts")  # ledger.append always adds ts
+    assert last == {"type": "needs_human",
+                    "reason": "drop production db?"}
+
+
+def test_signal_done_pushes_and_records(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+    key, nnn = register_session(repo)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, body)) or True)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)  # primary resolution
+    monkeypatch.chdir(repo)
+    assert cli.main(["signal", "done", "all 14 tasks green"]) == 0
+    assert sent == [("✅ cc-continuity: task complete",
+                     "proj=spike-repo summary=all 14 tasks green")]
+    last = ledger.read(paths.session_dir(key, nnn))[-1]
+    last.pop("ts")  # ledger.append always adds ts
+    assert last == {"type": "task_done", "summary": "all 14 tasks green"}
+
+
+def test_signal_without_session_exits_1_no_push(cc_home, tmp_path,
+                                                monkeypatch, capsys):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda *a, **kw: sent.append(1) or True)
+    monkeypatch.chdir(repo)
+    assert cli.main(["signal", "done", "x"]) == 1
+    assert "No registered session" in capsys.readouterr().err
+    assert sent == []

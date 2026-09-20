@@ -120,7 +120,8 @@ def handle(ctx: HookContext) -> dict | None:
             return _degrade(ctx, key, nnn)
         return {"decision": "block",
                 "reason": thresholds.c2_text(thresholds.display_ratio(ctx, cfg),
-                                             draft_path)}
+                                             draft_path,
+                                             blocked=ledger.blocked_reason(sdir))}
     if s == "HANDOFF_REQUESTED":
         draft = sdir / "handoff.draft.md"
         report = None
@@ -138,7 +139,8 @@ def handle(ctx: HookContext) -> dict | None:
         if attempts >= 3:
             return _degrade(ctx, key, nnn)
         text = (thresholds.c6_text(report.problems, draft_path) if report is not None
-                else thresholds.c2_text(thresholds.display_ratio(ctx, cfg), draft_path))
+                else thresholds.c2_text(thresholds.display_ratio(ctx, cfg), draft_path,
+                                        blocked=ledger.blocked_reason(sdir)))
         return {"decision": "block", "reason": text}
     if s == "CHECKPOINT_WRITING":
         if not _finalize(ctx, key, nnn):

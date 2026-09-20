@@ -201,3 +201,17 @@ def test_advance_ratio_none_keeps_ratio_at_pending(cc_home, tmp_path):
     thresholds.advance(key, 1, "ROTATION_PENDING", ratio=0.65)
     thresholds.advance(key, 1, "HANDOFF_REQUESTED")  # ratio=None
     assert state.load_state(key, 1)["ratio_at_pending"] == 0.65
+
+
+def test_c2_text_blocked_suffix():
+    t = thresholds.c2_text(0.63, DRAFT, blocked="drop the db?")
+    assert ('Add the line "BLOCKED on: drop the db?" to the '
+            '"Current Task and Exact Stopping Point" section.') in t
+    assert "BLOCKED" not in thresholds.c2_text(0.63, DRAFT)
+
+
+def test_c3_text_blocked_suffix():
+    t = thresholds.c3_text(0.75, 0.72, DRAFT, blocked="ambiguous req")
+    assert ('Add the line "BLOCKED on: ambiguous req" to the '
+            '"Current Task and Exact Stopping Point" section.') in t
+    assert "BLOCKED" not in thresholds.c3_text(0.75, 0.72, DRAFT)

@@ -117,27 +117,31 @@ def handle(ctx: HookContext) -> dict | None:
             state.update_fields(key, nnn, boundary_pending=False,
                                 ctx_emitted_at=tool_calls)
             emitted = thresholds.c2_text(thresholds.display_ratio(ctx, cfg),
-                                         draft_path)
+                                         draft_path,
+                                         blocked=ledger.blocked_reason(sdir))
     elif (s in _ROTATE_FROM and ratio is not None
           and ratio >= cfg["hard_ratio"]):
         rec, changed = thresholds.advance(key, nnn, "HANDOFF_REQUESTED",
                                           ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
-            emitted = thresholds.c2_text(ratio, draft_path)
+            emitted = thresholds.c2_text(ratio, draft_path,
+                                         blocked=ledger.blocked_reason(sdir))
     elif (s in {"BOOTSTRAPPING", "ACTIVE"} and ratio is not None
           and ratio >= cfg["rotate_ratio"]):
         rec, changed = thresholds.advance(key, nnn, "ROTATION_PENDING",
                                           ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
-            emitted = thresholds.c2_text(ratio, draft_path)
+            emitted = thresholds.c2_text(ratio, draft_path,
+                                         blocked=ledger.blocked_reason(sdir))
     elif s == "WARNED" and ratio is not None and ratio >= cfg["rotate_ratio"]:
         rec, changed = thresholds.advance(key, nnn, "ROTATION_PENDING",
                                           ratio=ratio, cfg=cfg)
         if changed:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
-            emitted = thresholds.c2_text(ratio, draft_path)
+            emitted = thresholds.c2_text(ratio, draft_path,
+                                         blocked=ledger.blocked_reason(sdir))
     elif (s in {"BOOTSTRAPPING", "ACTIVE"} and ratio is not None
           and ratio >= cfg["warn_ratio"]):
         rec, changed = thresholds.advance(key, nnn, "WARNED",
@@ -148,7 +152,8 @@ def handle(ctx: HookContext) -> dict | None:
         if tool_calls - (rec.get("ctx_emitted_at") or 0) >= 5:
             state.update_fields(key, nnn, ctx_emitted_at=tool_calls)
             emitted = thresholds.c2_text(thresholds.display_ratio(ctx, cfg),
-                                         draft_path)
+                                         draft_path,
+                                         blocked=ledger.blocked_reason(sdir))
     # boundary flag for the NEXT event — only when still pending after any
     # walk this event performed (spec D4: the boundary event itself is silent)
     if rec["state"] == "ROTATION_PENDING" and _is_boundary_signal(ctx):
