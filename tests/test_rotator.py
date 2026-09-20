@@ -420,3 +420,65 @@ def test_run_failure_without_notify_command_does_not_raise(
     rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
                      pane="%9", rotation_id=d["rid"], cfg=d["cfg"])
     assert rc == 1
+
+
+def test_run_happy_path_pushes_row5(fake_tmux, cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid = d["repo"], d["key"], d["nnn"], d["rid"]
+    cfg = dict(d["cfg"], notify_enabled=True,
+               notify_endpoint="https://ntfy.sh/example-topic")
+    _shrink_waits(monkeypatch)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+
+    def world():
+        time.sleep(0.2)  # let /clear land first
+        run_hook("SessionStart", payload("SessionStart", repo,
+                                         session_id=_NEW_SID, source="clear"))
+        time.sleep(0.2)
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", repo, session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    t.join(timeout=10)
+    assert rc == 0
+    rows5 = [(p, b) for (tt, p, b) in sent
+             if tt == "🔄 cc-continuity: rotation complete"]
+    assert len(rows5) == 1
+    prio, body = rows5[0]
+    assert prio == "high"
+    assert f"proj=spike-repo {nnn:03d}→{nnn + 1:03d} ratio " in body
+    assert "resumed: " in body
+
+
+def test_run_final_failure_pushes_row8_once(fake_tmux, cc_home, tmp_path,
+                                            monkeypatch):
+    from cc_continuity import notify
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid = d["repo"], d["key"], d["nnn"], d["rid"]
+    cfg = dict(d["cfg"], notify_enabled=True,
+               notify_endpoint="https://ntfy.sh/example-topic")
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    assert rc == 1
+    rows8 = [(p, b) for (tt, p, b) in sent
+             if tt == "✗ cc-continuity: rotation failed"]
+    assert len(rows8) == 1  # both failed attempts -> still ONE push (dedup)
+    prio, body = rows8[0]
+    assert prio == "urgent"
+    assert "detail=no RESUME in successor ledger after 2 attempts" in body

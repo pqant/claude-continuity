@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import ledger, lock, naming, paths, state, thresholds
+from . import ledger, lock, naming, notify, paths, state, statusline, thresholds
 from .hooks.common import log_event
 
 #: PRD §11 wait windows (seconds). Module constants so tests can shrink
@@ -254,6 +254,22 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
                                "successor": name_new})
                 log_event(f"rotator: ROTATION_COMPLETED key={key} {nnn:03d} "
                           f"-> {name_new}")
+                succ = _find_successor_rec(key, rec["name"])
+                r1 = None
+                sid_new = (succ or {}).get("session_id")
+                if sid_new:
+                    m_new = statusline.read_metric(sid_new)
+                    if not statusline.is_stale(m_new):
+                        r1 = m_new.get("ratio")
+                # Phase 9 — spec §5 row 5 (high priority)
+                notify.safe_send(cfg, "rotation_complete",
+                                 slug=notify.project_slug(key), nnn=nnn,
+                                 nnn_new=int(succ["nnn"]) if succ
+                                 else nnn + 1,
+                                 r0=rec.get("ratio_at_pending"),
+                                 r1=r1,
+                                 naa=notify.naa_snippet(
+                                     _handoff_path(key, nnn)))
                 return 0
             log_event(f"rotator: attempt {attempt}: no RESUME in successor "
                       f"ledger — " + ("retrying" if attempt == 1
@@ -264,6 +280,14 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
                       {"type": "rotation_failed"})
         log_event(f"rotator: ROTATION_FAILED key={key} nnn={nnn:03d}")
         _notify(cfg, pref.get("slug", ""), "ROTATION_FAILED")
+        # Phase 9 — spec §5 row 8 (the legacy notify_command call above
+        # stays; both mechanisms can be active)
+        notify.safe_send(cfg, "error",
+                         slug=notify.project_slug(key), nnn=nnn,
+                         dedup_key=f"rotation_failed:{rotation_id}",
+                         what="rotation",
+                         detail="no RESUME in successor ledger after 2 "
+                                "attempts")
         return 1
     finally:
         rlock.release()
