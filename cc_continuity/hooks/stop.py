@@ -105,7 +105,7 @@ def handle(ctx: HookContext) -> dict | None:
     s = rec["state"]
     tool_calls = rec.get("tool_calls", 0)
     if s == "ROTATION_PENDING":
-        rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED")
+        rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED", cfg=cfg)
         attempts = state.update_fields(key, nnn,
                                        handoff_attempts=rec.get("handoff_attempts", 0) + 1,
                                        ctx_emitted_at=tool_calls)["handoff_attempts"]

@@ -39,7 +39,7 @@ def handle(ctx: HookContext) -> dict | None:
         ratio = thresholds.read_ratio(ctx)
         if ratio is not None and ratio >= cfg["hard_ratio"]:
             rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED",
-                                        ratio=ratio)
+                                        ratio=ratio, cfg=cfg)
             s = rec["state"]
     if s in DENY_C3:
         reason = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path)
