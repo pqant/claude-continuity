@@ -13,7 +13,7 @@ Subagent payloads (agent_id) are skipped entirely (spec D5).
 
 from __future__ import annotations
 
-from .. import state, thresholds
+from .. import ledger, state, thresholds
 from .common import HookContext
 
 PRE_HANDOFF = frozenset({"BOOTSTRAPPING", "ACTIVE", "WARNED",
@@ -42,7 +42,8 @@ def handle(ctx: HookContext) -> dict | None:
                                         ratio=ratio, cfg=cfg)
             s = rec["state"]
     if s in DENY_C3:
-        reason = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path)
+        reason = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path,
+                                    blocked=ledger.blocked_reason(ctx.session_dir))
     elif s in DENY_C9:
         reason = thresholds.c9_text()
     else:

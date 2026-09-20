@@ -52,3 +52,32 @@ def test_concurrent_appends_all_lines_present(tmp_path):
     assert len(entries) == n_threads * n_each
     seen = {(e["tid"], e["i"]) for e in entries}
     assert len(seen) == n_threads * n_each  # no lost or duplicated entries
+
+
+def test_blocked_reason_forward_scan(tmp_path):
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    assert ledger.blocked_reason(sdir) is None
+    ledger.append(sdir, {"type": "needs_human", "reason": "drop the db?"})
+    assert ledger.blocked_reason(sdir) == "drop the db?"
+    ledger.append(sdir, {"type": "user_prompt", "text": "ok",
+                         "agent_id": "sub-1"})  # subagent: does NOT consume
+    assert ledger.blocked_reason(sdir) == "drop the db?"
+    ledger.append(sdir, {"type": "user_prompt", "text": "ok"})
+    assert ledger.blocked_reason(sdir) is None
+
+
+def test_blocked_reason_last_unconsumed_wins(tmp_path):
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    ledger.append(sdir, {"type": "needs_human", "reason": "first"})
+    ledger.append(sdir, {"type": "user_prompt", "text": "ok"})
+    ledger.append(sdir, {"type": "needs_human", "reason": "second"})
+    assert ledger.blocked_reason(sdir) == "second"
+
+
+def test_blocked_reason_survives_corrupt_ledger(tmp_path):
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    (sdir / "ledger.jsonl").write_text("{not json\n", encoding="utf-8")
+    assert ledger.blocked_reason(sdir) is None

@@ -279,3 +279,10 @@ def test_install_ntfy_none_keeps_previous_value(fake_home):
     cfg = json.loads((fake_home / ".claude-continuity" / "config.json")
                      .read_text(encoding="utf-8"))
     assert cfg["notify_endpoint"] == "https://ntfy.sh/first"
+
+
+def test_managed_block_has_signal_guidance(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    text = (fake_home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "cc-continuity signal needs-human" in text
+    assert "cc-continuity signal done" in text

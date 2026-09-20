@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from . import (__version__, checkpoint, config, naming, paths, project,
-               state, statusline, thresholds, validate)
+from . import (__version__, checkpoint, config, ledger, naming, paths,
+               project, state, statusline, thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
                     session_start, stop, task, tool_use, user_prompt)
 
@@ -113,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="set config.json unattended=true (loud: the "
                             "agent then runs without per-action approval — "
                             "see README)")
+
+    p_sig = sub.add_parser("signal",
+                           help="agent signal: needs-human / done (Phase 9)")
+    p_sig.add_argument("kind", choices=["needs-human", "done"])
+    p_sig.add_argument("text",
+                       help="reason (needs-human) or summary (done)")
 
     p_launch = sub.add_parser("launch",
                               help="zsh wrapper backend (Appendix D)")
@@ -384,6 +390,44 @@ def cmd_request_rotation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_signal(args: argparse.Namespace) -> int:
+    """P9-D5 / spec §5 rows 7+9 — an agent signal with a push.
+
+    ``needs-human``: urgent push + ``needs_human`` ledger entry (the C.2/
+    C.3 texts and the status line then show the block; the model ends its
+    turn and waits for the user to remote in). ``done``: default push +
+    ``task_done`` ledger entry. NOT a state-machine state (P9-D5). No
+    registered session -> stderr + exit 1, no push.
+    """
+    from . import notify
+    root = project.resolve_root(Path.cwd())
+    key = project.project_key_for_root(root)
+    record, _ = _resolve_session(root, key)
+    if record is None:
+        print("No registered session for this project "
+              "(a project registers itself on its first hook).",
+              file=sys.stderr)
+        return 1
+    nnn = int(record["nnn"])
+    slug = notify.project_slug(key)
+    cfg = config.load_config()
+    if args.kind == "needs-human":
+        sent = notify.safe_send(cfg, "needs_human", slug=slug, nnn=nnn,
+                                reason=args.text, host=notify.host(),
+                                wait=True)
+        entry, label = {"type": "needs_human", "reason": args.text}, "blocked"
+    else:
+        sent = notify.safe_send(cfg, "task_done", slug=slug, nnn=nnn,
+                                summary=args.text, wait=True)
+        entry, label = {"type": "task_done", "summary": args.text}, \
+            "task complete"
+    ledger.append(paths.session_dir(key, nnn), entry)
+    print(f"cc-continuity: {label}"
+          + (" — push sent" if sent else
+             " — push not sent (disabled or failed; see errors.log)"))
+    return 0
+
+
 def _toggle_off(args: argparse.Namespace, flag: bool) -> int:
     root = project.resolve_root(Path.cwd())
     key = project.project_key_for_root(root)
@@ -572,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_checkpoint(args)
     if args.command == "request-rotation":
         return cmd_request_rotation(args)
+    if args.command == "signal":
+        return cmd_signal(args)
     if args.command == "off":
         return cmd_off(args)
     if args.command == "on":

@@ -51,6 +51,13 @@ This machine runs cc-continuity. Long work is continued across sessions automati
   anything), never redo "Completed This Session", start from "Next Atomic Action".
   First line of your reply: "Continuing from cp-<NNN> (<new session name>)."
 - Never edit files under ~/.claude-continuity except the handoff.draft.md you are told to write.
+- If you are truly blocked on a human — a destructive or irreversible
+  operation, an ambiguous requirement, or the same fix failing 3 times in
+  a row — run `cc-continuity signal needs-human "<short reason>"` and end
+  your turn: a push goes to the user's phone and they remote in and reply
+  in this session. Do not guess in those three cases.
+- When the session's goal is complete, run `cc-continuity signal done
+  "<one-line summary>"` to send the completion push.
 """
 
 ZSHRC_BEGIN = "# >>> cc-continuity >>>"

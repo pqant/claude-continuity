@@ -77,22 +77,34 @@ def c1_text(ratio: float, window: int) -> str:
             "large new subtask without first reaching a clean stopping point.")
 
 
-def c2_text(ratio: float, draft_path: str) -> str:
+def _blocked_suffix(blocked: str | None) -> str:
+    """P9-D5/P9-P5: instruction line when a needs_human entry is
+    unconsumed — the handoff must tell the successor what is blocked."""
+    if not blocked:
+        return ""
+    return (f' Add the line "BLOCKED on: {blocked}" to the '
+            f'"Current Task and Exact Stopping Point" section.')
+
+
+def c2_text(ratio: float, draft_path: str,
+            blocked: str | None = None) -> str:
     headings = ", ".join(checkpoint.TEMPLATE_HEADINGS)
     return (f"CONTINUITY: context at {pct_of(ratio)}%. Rotation pending. "
             f"Finish only the step you are in (at most: complete the current "
             f"edit and run its quick check). Then write the handoff to "
             f"{draft_path} using exactly these headings: {headings}. Only "
             "write what you know that git/logs cannot show. Then end your "
-            "turn.")
+            "turn." + _blocked_suffix(blocked))
 
 
-def c3_text(ratio: float | None, hard_ratio: float, draft_path: str) -> str:
+def c3_text(ratio: float | None, hard_ratio: float, draft_path: str,
+            blocked: str | None = None) -> str:
     shown = ratio if ratio is not None else hard_ratio
     return (f"CONTINUITY: context at {pct_of(shown)}% (hard limit). Tool "
             f"blocked. Write the handoff now to {draft_path} with the "
             "required headings, then end your turn. Allowed now: Write/Edit "
-            "of that file, Read/Glob/Grep, git status/diff/log/show.")
+            "of that file, Read/Glob/Grep, git status/diff/log/show."
+            + _blocked_suffix(blocked))
 
 
 def c6_text(problems: list, draft_path: str) -> str:
