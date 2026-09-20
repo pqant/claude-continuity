@@ -478,7 +478,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     argv = list(args.claude_args)
     if argv and argv[0] == "--":
         argv = argv[1:]
-    return launch.run_launch(argv)
+    return launch.run_launch(argv, unattended=args.unattended)
 
 
 # ------------------------------------------------------------ Phase 7 cmds
@@ -594,8 +594,12 @@ def main(argv: list[str] | None = None) -> int:
         # misread leading-dash args (e.g. `-p`) as cc-continuity options,
         # so the subcommand is split by hand (cmd_launch strips a leading
         # `--`, which the zsh wrapper always sends).
+        rest = argv[1:]
+        unattended = "--unattended" in rest
+        if unattended:
+            rest = [a for a in rest if a != "--unattended"]
         return cmd_launch(argparse.Namespace(
-            command="launch", claude_args=argv[1:]))
+            command="launch", claude_args=rest, unattended=unattended))
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help(sys.stderr)

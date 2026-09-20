@@ -143,8 +143,17 @@ def _exec_claude(claude_bin: str, args: tuple, name: str | None) -> int:
     return 1  # unreachable
 
 
-def run_launch(argv: list[str], *, cwd: str | Path | None = None) -> int:
-    """Execute the launch plan (PRD §6.4, Appendix D). Returns exit code."""
+def run_launch(argv: list[str], *, cwd: str | Path | None = None,
+               unattended: bool = False) -> int:
+    """Execute the launch plan (PRD §6.4, Appendix D). Returns exit code.
+
+    ``unattended`` (P9-D6): from ``launch --unattended``. Effective =
+    flag OR ``config.json["unattended"]`` (P9-P7 — a rotation is a
+    /clear in the same process, so the project setting carries the whole
+    chain). When effective, spawned (tmux/direct) sessions run claude
+    with ``--dangerously-skip-permissions``; passthrough is never
+    modified (it is the user's own explicit claude invocation).
+    """
     cwd = Path(cwd) if cwd is not None else Path.cwd()
     cfg = config.load_config(cwd=cwd)
     plan = plan_launch(
@@ -155,19 +164,23 @@ def run_launch(argv: list[str], *, cwd: str | Path | None = None) -> int:
         disabled=not config.is_enabled(cfg),
         no_tmux=bool(os.environ.get("CC_CONTINUITY_NO_TMUX")),
     )
+    claude_args = plan.claude_args
+    if plan.mode in ("tmux", "direct") and (
+            unattended or bool(cfg.get("unattended", False))):
+        claude_args = claude_args + ("--dangerously-skip-permissions",)
     tmux_bin = _tmux_bin()
     claude_bin = _claude_bin()
     if plan.mode in ("passthrough", "direct"):
-        return _exec_claude(claude_bin, plan.claude_args, plan.name)
+        return _exec_claude(claude_bin, claude_args, plan.name)
     # tmux mode
     if shutil.which(tmux_bin) is None:
         print("cc-continuity: tmux not found — falling back to direct launch",
               file=sys.stderr)
-        return _exec_claude(claude_bin, plan.claude_args, plan.name)
+        return _exec_claude(claude_bin, claude_args, plan.name)
     prefix = _env_prefix(plan.name)
     cmd = " ".join(
         ["env", *prefix, "command", claude_bin,
-         *[shlex.quote(a) for a in plan.claude_args]])
+         *[shlex.quote(a) for a in claude_args]])
     r = subprocess.run(
         [tmux_bin, "new-session", "-d", "-s", plan.tmux_session,
          "-c", str(cwd), cmd],

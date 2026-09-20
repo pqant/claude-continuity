@@ -260,3 +260,51 @@ def test_exec_disabled_passthrough(work_env):
         "argv:\nCC_CONTINUITY_NAME=\nTMUX=\nANTHROPIC_MODEL=qwen3.8-27b\n"
     # no "-n" appended, no tmux
     assert "-n" not in work_env.out.read_text(encoding="utf-8")
+
+
+# ------------------------------------------------- Phase 9: --unattended
+
+
+def test_unattended_flag_tmux_mode(work_env):
+    r = _run_launch(work_env, "--unattended")
+    assert r.returncode == 0
+    log = work_env.log.read_text(encoding="utf-8")
+    assert "--dangerously-skip-permissions" in log
+    assert work_env.out.exists() is False  # tmux mode: claude not exec'd here
+
+
+def test_unattended_flag_direct_mode(work_env):
+    e = dict(work_env.env, TMUX="/tmp/fake-sock,42,0")
+    e["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    r = subprocess.run(
+        [sys.executable, "-m", "cc_continuity", "launch", "--unattended"],
+        cwd=work_env.repo, env=e, capture_output=True, text=True,
+        timeout=60)
+    assert r.returncode == 0
+    assert "--dangerously-skip-permissions" in \
+        work_env.out.read_text(encoding="utf-8")
+
+
+def test_unattended_config_inherited_without_flag(work_env, cc_home):
+    (cc_home / "config.json").write_text(
+        json.dumps({"unattended": True}), encoding="utf-8")
+    r = _run_launch(work_env)
+    assert r.returncode == 0
+    assert "--dangerously-skip-permissions" in \
+        work_env.log.read_text(encoding="utf-8")
+
+
+def test_unattended_passthrough_untouched(work_env):
+    r = _run_launch(work_env, "--unattended", "-p", "hello")
+    assert r.returncode == 0
+    text = work_env.out.read_text(encoding="utf-8")
+    assert text.startswith("argv: -p hello")
+    assert "--dangerously-skip-permissions" not in text
+    assert not work_env.log.exists()
+
+
+def test_default_launch_not_unattended(work_env):
+    r = _run_launch(work_env)
+    assert r.returncode == 0
+    assert "--dangerously-skip-permissions" not in \
+        work_env.log.read_text(encoding="utf-8")
