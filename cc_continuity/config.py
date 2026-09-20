@@ -44,6 +44,9 @@ DEFAULTS: dict = {
     "handoff_max_words": 2500,
     "inline_handoff_max_chars": 12000,
     "notify_command": None,
+    "notify_endpoint": "",
+    "notify_enabled": False,
+    "unattended": False,
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",
