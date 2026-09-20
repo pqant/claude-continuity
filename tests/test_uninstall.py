@@ -46,7 +46,8 @@ def seeded_home(fake_home):
         "statusLine": {"type": "command",
                        "command": "~/.claude/bin/claude-hud-launch.sh"},
         "hooks": {"Stop": [{"matcher": "", "hooks": [
-            {"type": "command", "command": "curl -s https://ntfy.sh/x"}]}]},
+            {"type": "command",
+             "command": "curl -s https://ntfy.sh/example-topic"}]}]},
     }
     (h / ".claude" / "settings.json").write_text(
         json.dumps(seed_settings, indent=2, ensure_ascii=False) + "\n",

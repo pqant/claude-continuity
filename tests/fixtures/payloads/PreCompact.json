@@ -11,7 +11,7 @@
  "payload": {
   "session_id": "306e9086-9fcc-4ba1-872c-5a75bed80cff",
   "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.t2haMJITR9/.claude/projects/-Users-eralp-arid-claude-continuity/306e9086-9fcc-4ba1-872c-5a75bed80cff.jsonl",
-  "cwd": "$HOME/arid/claude-continuity",
+  "cwd": "/repo",
   "prompt_id": "77813aa1-0029-4bb9-811f-df59173b4510",
   "hook_event_name": "PreCompact",
   "trigger": "auto",

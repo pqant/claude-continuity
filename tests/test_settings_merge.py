@@ -4,7 +4,7 @@ import json
 
 from cc_continuity import settings_merge as sm
 
-NTFY = "curl -s https://ntfy.sh/my-topic"
+NTFY = "curl -s https://ntfy.sh/example-topic"
 LAUNCHER = "/Users/test/.local/bin/cc-continuity"
 HUD = {"type": "command", "command": "~/.claude/bin/claude-hud-launch.sh"}
 
