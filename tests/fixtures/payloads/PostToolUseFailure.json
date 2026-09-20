@@ -10,7 +10,7 @@
  "payload": {
   "session_id": "c4f5a323-72d6-47f4-8369-35cb274e9e68",
   "transcript_path": "/var/folders/cl/nyqyl2hs7nb8h28r91bsw5xr0000gn/T/tmp.i1TR25LO34/.claude/projects/-Users-eralp-arid-claude-continuity--sandbox-spike-repo/c4f5a323-72d6-47f4-8369-35cb274e9e68.jsonl",
-  "cwd": "$HOME/arid/claude-continuity/.sandbox/spike-repo",
+  "cwd": "/repo/.sandbox/spike-repo",
   "prompt_id": "490bc359-a461-477e-9b8d-2250b40b0e40",
   "permission_mode": "default",
   "effort": {

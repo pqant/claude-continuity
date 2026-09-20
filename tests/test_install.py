@@ -93,13 +93,13 @@ def test_realistic_seed_preserves_user_entries(fake_home):
         "statusLine": {"type": "command",
                        "command": "~/.claude/bin/claude-hud-launch.sh"},
         "hooks": {"Stop": [{"matcher": "", "hooks": [
-            {"type": "command", "command": "curl -s https://ntfy.sh/x"}]}]},
+            {"type": "command", "command": "curl -s https://ntfy.sh/example-topic"}]}]},
     }
     (h / ".claude" / "settings.json").write_text(
         json.dumps(seed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     manifest = install.install(h, window=262144, runner=FakeRun())
     s = _settings(h)
-    assert s["hooks"]["Stop"][0]["hooks"][0]["command"] == "curl -s https://ntfy.sh/x"
+    assert s["hooks"]["Stop"][0]["hooks"][0]["command"] == "curl -s https://ntfy.sh/example-topic"
     assert s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "95"
     assert manifest["previous_status_line"]["command"] == \
         "~/.claude/bin/claude-hud-launch.sh"
@@ -235,8 +235,8 @@ def test_resolve_ntfy_flag_url_validated():
         "https://ntfy.sh/example-topic", is_tty=False
     ) == "https://ntfy.sh/example-topic"
     assert install.resolve_ntfy(
-        "http://192.168.1.10:2001/topic", is_tty=False
-    ) == "http://192.168.1.10:2001/topic"
+        "http://127.0.0.1:2001/topic", is_tty=False
+    ) == "http://127.0.0.1:2001/topic"
     with pytest.raises(install.InstallError):
         install.resolve_ntfy("ntfy.sh/no-scheme", is_tty=False)
 
