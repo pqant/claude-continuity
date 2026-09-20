@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import atomic, gitsnap, ledger, lock, naming, paths, redact, state
+from . import atomic, gitsnap, ledger, lock, naming, notify, paths, redact, state
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -542,4 +542,13 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
         state._transition_unlocked(key, nnn, "CHECKPOINT_VERIFIED",
                                    degraded=degraded)
         _set_latest_checkpoint(key, nnn, snapshot, final)
+    # Phase 9 — spec §5 rows 4/8 (P9-D7: push must never break finalize)
+    slug = notify.project_slug(key)
+    if degraded:
+        notify.safe_send(cfg, "error", slug=slug, nnn=nnn,
+                         dedup_key=f"degraded:cp-{nnn:03d}",
+                         what="checkpoint",
+                         detail="degraded — handoff draft missing/invalid")
+    else:
+        notify.safe_send(cfg, "handoff_verified", slug=slug, nnn=nnn)
     return snapshot["checkpoint"], degraded

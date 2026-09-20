@@ -289,3 +289,65 @@ def test_rotating_transition_race_is_swallowed(cc_home, capsys, tmp_path, monkey
     assert out == 0
     assert capsys.readouterr().out == ""
     assert "raced" in (paths.logs_dir() / "errors.log").read_text()
+
+
+def test_stop_finalize_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo, key, nnn = _setup(cc_home, tmp_path, "HANDOFF_REQUESTED")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+
+    def boom(*a, **kw):
+        raise checkpoint.CheckpointError("verify: checksum mismatch")
+    monkeypatch.setattr(checkpoint, "finalize", boom)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+    run_hook("Stop", payload("Stop", repo))
+    assert len(sent) == 1
+    title, prio, body = sent[0]
+    assert title == "✗ cc-continuity: checkpoint finalization failed"
+    assert prio == "urgent"
+    assert (f"proj=spike-repo {nnn:03d} "
+            "detail=verify: checksum mismatch") in body
+
+
+def test_stop_spawn_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify, rotator
+    repo, key, nnn = _setup(cc_home, tmp_path, "HANDOFF_REQUESTED")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+
+    def fake_finalize(*a, **kw):
+        # the real finalize walks CW -> CV internally; the stub must too,
+        # or the AMCL fallback below transitions from the wrong state
+        state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+        return ("cp-001", False)
+    monkeypatch.setattr(checkpoint, "finalize", fake_finalize)
+
+    def bad_spawn(*a, **kw):
+        raise rotator.RotatorSpawnError("tmux: command not found")
+    monkeypatch.setattr(rotator, "spawn", bad_spawn)
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+    run_hook("Stop", payload("Stop", repo))
+    rows8 = [(t, p, b) for (t, p, b) in sent
+             if t == "✗ cc-continuity: rotator spawn failed"]
+    assert len(rows8) == 1
+    assert rows8[0][1] == "urgent"
+    assert "detail=tmux: command not found" in rows8[0][2]
+    # spawn failure still falls back to assisted AMCL (P9-D7: push never
+    # breaks the loop)
+    assert state.load_state(key, nnn)["state"] == "AWAITING_MANUAL_CLEAR"

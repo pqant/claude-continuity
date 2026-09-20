@@ -744,3 +744,48 @@ def test_kill_during_checkpoint_never_leaves_partial_state(cc_home, tmp_path):
     # NOTE: a kill in the microsecond window between the state write and the
     # pointer write leaves (VERIFIED, ptr=None) — a permitted PRD-order
     # outcome, deliberately not asserted against here.
+
+
+def test_finalize_verified_pushes_row4(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    cfg = dict(_cfg_for(repo), notify_enabled=True,
+               notify_endpoint="https://ntfy.sh/example-topic")
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=cfg, root=repo)
+    assert degraded is False
+    assert sent == [("✓ cc-continuity: handoff written & verified",
+                     "default",
+                     f"proj=spike-repo {nnn:03d} cp-{nnn:03d} sha256 OK")]
+
+
+def test_finalize_degraded_pushes_row8(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo, key, nnn = _registered(tmp_path)  # no draft -> degraded
+    cfg = dict(_cfg_for(repo), notify_enabled=True,
+               notify_endpoint="https://ntfy.sh/example-topic")
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, prio, body)) or True)
+    cp_id, degraded = checkpoint.finalize(key, nnn, cfg=cfg, root=repo)
+    assert degraded is True
+    assert len(sent) == 1
+    title, prio, body = sent[0]
+    assert title == "✗ cc-continuity: checkpoint failed"
+    assert prio == "urgent"
+    assert f"proj=spike-repo {nnn:03d} detail=degraded" in body
+    assert body.endswith("/errors.log")
+
+
+def test_finalize_silent_when_notify_disabled(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda *a, **kw: sent.append(a) or True)
+    checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo)
+    assert sent == []

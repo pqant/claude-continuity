@@ -209,8 +209,14 @@ def build_message(event: str, *, slug: str, nnn: int,
              f"host={fields['host']} — remote in and reply in session {p}")
     elif event == "error":
         t, pr = f"✗ cc-continuity: {fields['what']} failed", "urgent"
-        b = (f"proj={slug} {p} detail={_clip(fields['detail'], 60)} — see "
-             f"{paths.continuity_home() / 'errors.log'}")
+        prefix = (f"proj={slug} {p} "
+                  f"detail={_clip(fields['detail'], 60)} — see ")
+        see = str(paths.continuity_home() / "errors.log")
+        if len(prefix) + len(see) > 200:
+            # a long store path (e.g. macOS TMPDIR in tests) would break the
+            # 200-char body cap: ellipsize the HEAD, keep the tail visible
+            see = "…" + see[len(see) - (200 - len(prefix) - 1):]
+        b = prefix + see
     elif event == "task_done":
         t, pr = "✅ cc-continuity: task complete", "default"
         b = f"proj={slug} summary={_clip(fields['summary'], 80)}"
