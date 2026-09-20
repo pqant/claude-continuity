@@ -392,3 +392,43 @@ def test_render_segment_cv_stays_handoff(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
                                             "state": "CHECKPOINT_VERIFIED"}, True) \
         == "⟳ 70% HANDOFF!"
+
+
+# ------------------------------------------------- Phase 9: ⛔ BLOCKED
+
+
+def test_render_segment_blocked_suffix():
+    rec = {"state": "ACTIVE", "name": "spike-repo-001"}
+    assert statusline.render_segment(0.5, rec, True) == "⟳ 50% ok"
+    assert statusline.render_segment(0.5, rec, True,
+                                     blocked="drop db?") == \
+        "⟳ 50% ok ⛔ BLOCKED"
+    assert statusline.render_segment(None, rec, True,
+                                     blocked="x") == "⟳ … ⛔ BLOCKED"
+    assert statusline.render_segment(0.5, rec, False,
+                                     blocked="x") == "⟳ off"
+
+
+def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
+    from cc_continuity import ledger
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "needs_human", "reason": "drop db?"})
+    payload = {
+        "session_id": SID,
+        "cwd": str(repo),
+        "context_window": {
+            "context_window_size": 262144,
+            "current_usage": {
+                "input_tokens": 131072,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+        },
+    }
+    line = statusline.run(json.dumps(payload).encode("utf-8"),
+                          config.DEFAULTS)
+    assert "⟳ 50% ok ⛔ BLOCKED" in line
