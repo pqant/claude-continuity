@@ -19,7 +19,7 @@ import re
 
 from .. import (atomic, bootstrap, ledger, lock, paths, project, redact,
                 state)
-from .common import HookContext, log_error
+from .common import HookContext, log_error, notify_claimed
 
 MAX_PROMPT_CHARS = 2000  # PRD §9, verbatim
 _RESUME_PREFIX = "CONTINUITY RESUME"
@@ -84,6 +84,7 @@ def _fallback_claim(ctx: HookContext, prompt: str) -> dict | None:
         if res is None:
             return None
         bootstrap.write_started(session_id)
+        notify_claimed(ctx.cfg, key, res)
         return state.load_state(key, res["new_nnn"])
     except Exception:
         log_error(f"UserPromptSubmit: RESUME claim failed for {session_id}")

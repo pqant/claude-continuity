@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .. import config, paths, statusline
+from .. import config, notify, paths, statusline
 
 Handler = Callable[["HookContext"], dict | None]
 
@@ -79,6 +79,18 @@ def session_start_output(additional_context: str) -> dict:
         "hookEventName": "SessionStart",
         "additionalContext": additional_context,
     }}
+
+
+def notify_claimed(cfg: dict, key: str, res: dict) -> None:
+    """spec §5 rows 1+6 — a claim succeeded: the successor registered
+    (session_started) and, when VALIDATION is OK, resumed from the
+    predecessor's NAA (resumed). Never raises (safe_send)."""
+    nnn = int(res["new_nnn"])
+    slug = notify.project_slug(key)
+    notify.safe_send(cfg, "session_started", slug=slug, nnn=nnn,
+                     name=res["new_name"], host=notify.host())
+    if res.get("validation") == "OK":
+        notify.safe_send(cfg, "resumed", slug=slug, nnn=nnn)
 
 
 def _parse_payload(event: str, text: str) -> dict | None:

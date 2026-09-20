@@ -224,3 +224,19 @@ def test_log_error_never_raises_on_missing_logs_dir(cc_home):
     (cc_home / "logs").rmdir()
     common.log_error("synthetic context")  # must not raise, must recreate
     assert (cc_home / "logs" / "errors.log").is_file()
+
+
+def test_notify_claimed_rows_1_and_6(cc_home, monkeypatch):
+    from cc_continuity import notify
+    from cc_continuity.hooks import common
+    fired = []
+    monkeypatch.setattr(notify, "safe_send",
+                        lambda cfg, event, **kw: fired.append(event) or True)
+    res = {"new_nnn": 2, "new_name": "spike-repo-002", "validation": "OK"}
+    common.notify_claimed(dict(notify.config.DEFAULTS), "k1", res)
+    assert fired == ["session_started", "resumed"]
+    fired.clear()
+    res = {"new_nnn": 2, "new_name": "spike-repo-002",
+           "validation": "MISMATCH"}
+    common.notify_claimed(dict(notify.config.DEFAULTS), "k1", res)
+    assert fired == ["session_started"]
