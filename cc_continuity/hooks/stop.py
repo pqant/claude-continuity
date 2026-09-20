@@ -23,7 +23,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .. import (checkpoint, ledger, paths, rotator, state, statusline,
+from .. import (checkpoint, ledger, notify, paths, rotator, state, statusline,
                 thresholds)
 from .common import HookContext, log_error
 
@@ -45,6 +45,10 @@ def _finalize(ctx: HookContext, key: str, nnn: int) -> bool:
                             metric=metric)
     except checkpoint.CheckpointError as e:
         log_error(f"Stop: checkpoint finalization failed: {e}")
+        notify.safe_send(ctx.cfg, "error", slug=notify.project_slug(key),
+                         nnn=nnn, dedup_key=f"finalize:{nnn:03d}",
+                         what="checkpoint finalization",
+                         detail=str(e)[:60])
         return False
     return True
 
@@ -60,6 +64,9 @@ def _rotate_or_amcl(ctx: HookContext, key: str, nnn: int,
             rotator.spawn(ctx.session["session_id"], pane, rotation_id)
         except rotator.RotatorSpawnError as e:
             log_error(f"Stop: rotator spawn failed, assisted fallback: {e}")
+            notify.safe_send(ctx.cfg, "error", slug=notify.project_slug(key),
+                             nnn=nnn, dedup_key=f"spawn:{rotation_id}",
+                             what="rotator spawn", detail=str(e)[:60])
         else:
             if current == "ROTATING":
                 # Orphan recovery re-spawn: already ROTATING, and a
