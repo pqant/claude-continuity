@@ -21,8 +21,11 @@ ALLOW_RULES = ("Read(~/.claude-continuity/**)",
                "Edit(~/.claude-continuity/**)",
                "Bash(cc-continuity *)")
 ADDITIONAL_DIRS = ("~/.claude-continuity",)
-ACW_VALUE = "223000"          # S6 best-effort (HANDOFF §6.3)
-ENV_KEYS = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+ENV_KEYS = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
+# NOTE (F-P9-4, 2026-09-21 user decision): CLAUDE_CODE_AUTO_COMPACT_WINDOW
+# is user-owned and never written or removed by the installer — PCT
+# override + ACW together would enable native auto-compact, which the
+# design deliberately avoids (rotation + /clear is the only reset).
 
 
 def our_hook_entry(event: str, launcher: str) -> dict:
@@ -67,7 +70,6 @@ def merge_settings(existing: dict, *, launcher: str, window: int) -> tuple[dict,
     for key in ENV_KEYS:
         manifest["env_prev"][key] = env.get(key)
     env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
-    env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = ACW_VALUE
     perms = s.setdefault("permissions", {})
     allow = perms.get("allow")
     if not isinstance(allow, list):
