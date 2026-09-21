@@ -104,8 +104,9 @@ def test_reinstall_then_uninstall_restores_settings_byte_for_byte(seeded_home):
 
 def test_reinstall_with_window_change_preserves_user_env_value(seeded_home):
     """F-G7-2 general case: user MAX_CONTEXT=262144 + --window 40000 on
-    both installs; uninstall must restore the user's 262144 (not 40000)
-    and drop the installer-written ACW key."""
+    both installs; uninstall must restore the user's 262144 (not 40000).
+    The ACW key is never written by the installer (F-P9-4), so it must
+    simply be absent afterwards."""
     h = seeded_home
     install.install(h, window=40000, runner=FakeRun())
     install.install(h, window=40000, runner=FakeRun())

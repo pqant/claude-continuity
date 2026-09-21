@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 from . import __version__, atomic, config, managed, skills
-from .settings_merge import (ACW_VALUE, detect_format, dump_settings,
+from .settings_merge import (detect_format, dump_settings,
                              merge_settings, unmerge_settings)
 
 MIN_CLAUDE = (2, 1, 209)  # Phase 0 verified floor (VERIFICATION.md)
@@ -226,8 +226,7 @@ def _carry_over_manifest(manifest: dict, prev: dict, win: int) -> None:
             prev.get("status_line_changed"):
         manifest["status_line_changed"] = True
         manifest["previous_status_line"] = prev.get("previous_status_line")
-    ours = {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(win),
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": ACW_VALUE}
+    ours = {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(win)}
     prev_env = prev.get("env_prev") or {}
     env_prev = manifest.get("env_prev") or {}
     for key, our_value in ours.items():

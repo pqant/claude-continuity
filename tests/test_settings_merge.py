@@ -49,15 +49,14 @@ def test_merge_realistic_seed():
     assert s["hooks"]["Stop"][0]["hooks"][0]["command"] == NTFY
     assert s["statusLine"] == {"type": "command", "command": f"{LAUNCHER} statusline"}
     assert s["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144"
-    assert s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "223000"
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in s["env"]  # user-owned (F-P9-4)
     assert s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "95"  # untouched
     assert s["permissions"]["allow"] == list(sm.ALLOW_RULES)
     assert s["permissions"]["additionalDirectories"] == ["~/.claude-continuity"]
     assert s["theme"] == "dark"  # foreign keys survive
     assert m["previous_status_line"] == HUD
     assert m["status_line_changed"] is True
-    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
-                             "CLAUDE_CODE_AUTO_COMPACT_WINDOW": None}
+    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144"}
 
 
 def test_merge_fresh_empty_settings():
@@ -105,7 +104,20 @@ def test_unmerge_fresh_roundtrip_is_empty():
 def test_unmerge_env_prev_none_removes_key():
     merged, m = sm.merge_settings({}, launcher=LAUNCHER, window=262144)
     out = sm.unmerge_settings(merged, m)
-    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in out.get("env", {})
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in out.get("env", {})
+
+
+def test_merge_preserves_user_acw():
+    """F-P9-4 (2026-09-21 user decision): the installer never writes or
+    removes CLAUDE_CODE_AUTO_COMPACT_WINDOW — it is user-owned. PCT
+    override + ACW together would enable native auto-compact, which the
+    design deliberately avoids (rotation + /clear is the only reset)."""
+    orig = {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "30000"}}
+    merged, m = sm.merge_settings(orig, launcher=LAUNCHER, window=262144)
+    assert merged["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "30000"
+    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": None}
+    out = sm.unmerge_settings(merged, m)
+    assert out["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "30000"
 
 
 def test_unmerge_env_prev_value_restored():
