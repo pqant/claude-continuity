@@ -483,26 +483,36 @@ def _rainbow(text: str, band: set = frozenset()) -> str:
 
 
 def test_shimmer_index_math():
-    # 50 ms tick; length 8 -> cycle 28 frames; 10-cell rest each side
-    assert statusline.shimmer_index(0.0, 8) == -10
-    assert statusline.shimmer_index(0.57, 8) == 1   # frame 11
-    assert statusline.shimmer_index(0.62, 8) == 2   # frame 12
-    assert statusline.shimmer_index(0.67, 8) == 3   # frame 13
-    # one full cycle (28 ticks = 1.4 s) lands on the same cell
-    assert statusline.shimmer_index(0.62 + 1.4, 8) == 2
+    # 150 ms tick, NO rest frame (revision 5): glimmer always in [0, length)
+    assert statusline.shimmer_index(0.0, 8) == 0
+    assert statusline.shimmer_index(0.16, 8) == 1
+    assert statusline.shimmer_index(0.31, 8) == 2
+    assert statusline.shimmer_index(0.62, 8) == 4
+    # one full cycle (8 ticks = 1.2 s) lands on the same cell
+    assert statusline.shimmer_index(0.62 + 1.2, 8) == 4
+
+
+def test_shimmer_band_always_visible_no_rest_frame():
+    # revision 5: EVERY render carries the band — the rest frame that left
+    # it off on ~64% of renders was the "shimmering" flicker (2026-09-22)
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    for now in (0.0, 0.05, 0.1, 0.17, 0.4, 1.0, 2.5):
+        out = statusline.render_segment(0.61, rec, True, now=now,
+                                        shimmer=True)
+        assert out.count("\x1b[9") >= 1, now
 
 
 def test_segment_ansi_shimmer_band_three_chars():
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
-    # default = static rainbow (no band) — visually the rest frame
+    # default = static rainbow (no band)
     assert statusline.render_segment(0.61, rec, True, now=0.0) == \
         _rainbow(text)
-    # shimmer on, glimmer=2 -> chars 1..3 (space, '6', '1') in the bright
-    # variant
+    # shimmer on, now=0.62 -> glimmer=4 -> chars 3..5 ('6', '1', '%') in
+    # the bright variant
     assert statusline.render_segment(0.61, rec, True, now=0.62,
                                      shimmer=True) == \
-        _rainbow(text, band={1, 2, 3})
+        _rainbow(text, band={3, 4, 5})
 
 
 def test_segment_ansi_rainbow_is_state_independent():
@@ -725,7 +735,8 @@ def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={1, 2, 3})
+    # revision 5 math: floor(0.62 / 0.15) % 7 = 4 → band = glimmer ± 1
+    assert line == _rainbow("⟳ 9% ok", band={3, 4, 5})
     assert _pane_calls(log) == [["capture-pane", "-p"]]
 
 

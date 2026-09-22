@@ -122,14 +122,22 @@ _HANDOFF_STATES = frozenset({
 #
 # Effect source: ``ultrathink.sh`` (repo root) — the reverse-engineered
 # Claude Code "ultrathink" rainbow shimmer: a 3-char bright band gliding
-# left-to-right over per-char colored text, 50 ms tick, a 10-cell rest
-# before and after each sweep. Here the band is driven by the wall clock
-# instead of a timer, because CC re-runs the status line command itself;
-# every render is the sweep's exact position at that instant.
+# left-to-right over per-char colored text. Here the band is driven by the
+# wall clock instead of a timer, because CC re-runs the status line command
+# itself; every render is the sweep's exact position at that instant.
+# Revision 5 (2026-09-22): the file's 10-cell rest frames are dropped —
+# at the status line's re-render cadence they made the band visible on
+# only ~36% of renders (random on/off "shimmering", user screenshot);
+# the band is now always visible and glides one cell per 150 ms.
 
-#: Shimmer timing (ultrathink.sh): 50 ms tick, 10-cell rest each side.
-SHIMMER_TICK_S = 0.05
-SWEEP_PAD = 10
+#: Shimmer timing (revision 5, 2026-09-22): 150 ms tick — the 50 ms
+#: ultrathink.sh tick sampled at the status line's re-render cadence made
+#: the band jump 2-6 cells per keystroke; 150 ms glides one or two. The
+#: 10-cell SWEEP_PAD rest is GONE (revision 5): a rest frame left the band
+#: off on ~64% of renders — the random on/off "shimmering" the user
+#: screenshotted; the band is now always visible while the keyword is in
+#: the prompt (revision 4's reactive gate is unchanged).
+SHIMMER_TICK_S = 0.15
 SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the bright variant
 
 ANSI_RESET = "\x1b[0m"
@@ -160,15 +168,19 @@ _COLOR_STATIC = "\x1b[90m"         # dim gray
 
 
 def shimmer_index(now: float, length: int) -> int:
-    """Glimmer cell for wall-clock ``now`` (ultrathink.sh math).
+    """Glimmer cell for wall-clock ``now`` (ultrathink.sh math, revision 5).
 
-    ``glimmer = -SWEEP_PAD + floor(now / 50ms) % (length + 2*SWEEP_PAD)`` —
-    the band starts one rest-width left of the text, sweeps one cell per
-    tick, and rests one rest-width past it; a length-8 segment therefore
-    sweeps 0.4 s and rests 1.0 s per cycle.
+    ``glimmer = floor(now / 150ms) % length`` — the band sits on the text
+    at ALL times (no rest frame) and glides one cell per tick, wrapping at
+    the end. The ultrathink.sh rest frames are deliberately dropped: the
+    status line re-renders only on UI events (11-13 s while the model runs,
+    per keystroke while typing), so a rest frame left the band off on ~64%
+    of renders — the random on/off "shimmering" the user screenshotted
+    (2026-09-22). Always-on is the non-straining form: the highlight never
+    disappears and only moves while the user types (revision 4's reactive
+    gate is unchanged).
     """
-    frame = int(now // SHIMMER_TICK_S) % (length + 2 * SWEEP_PAD)
-    return frame - SWEEP_PAD
+    return int(now // SHIMMER_TICK_S) % length
 
 
 def _style(kind: str, text: str, blocked: str | None, now: float,
