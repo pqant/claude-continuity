@@ -456,22 +456,29 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
 
 _RESET = "\x1b[0m"
 _BOLD = "\x1b[1m"
-# (base, shimmer) basic-16 SGR pairs — normal + bright variant (the
-# ultrathink.sh concept, palette chosen for 16-color-client survival)
-_G, _GS = "\x1b[32m", "\x1b[92m"  # green
-_Y, _YS = "\x1b[33m", "\x1b[93m"  # yellow
-_B, _BS = "\x1b[36m", "\x1b[96m"  # cyan
-_V, _VS = "\x1b[35m", "\x1b[95m"  # magenta
-_R, _RS = "\x1b[31m", "\x1b[91m"  # red
+# Per-character rainbow (ultrathink.sh revision 3) — 7 (base, bright)
+# basic-16 SGR pairs, cycled ``i % 7`` across the segment. Mirrors
+# statusline._RAINBOW (the 24-bit revision-1 palette quantized to gray on
+# a 16-color client, so the rainbow is rendered in basic-16).
+_RAINBOW = [
+    ("\x1b[31m", "\x1b[91m"),  # red
+    ("\x1b[33m", "\x1b[93m"),  # yellow (orange)
+    ("\x1b[32m", "\x1b[92m"),  # green
+    ("\x1b[34m", "\x1b[94m"),  # blue
+    ("\x1b[35m", "\x1b[95m"),  # magenta (indigo/violet)
+    ("\x1b[36m", "\x1b[96m"),  # cyan
+    ("\x1b[37m", "\x1b[97m"),  # white
+]
+_R = "\x1b[31m"  # red — the BLOCKED suffix keeps its own span
 
 
-def _colored(text: str, base: str, bright: str | None = None,
-             band: set = frozenset()) -> str:
-    """Per-char escapes (ultrathink.sh loop); ``band`` = shimmer indices."""
-    bright = bright or base
+def _rainbow(text: str, band: set = frozenset()) -> str:
+    """Per-char rainbow escapes (ultrathink.sh loop); ``band`` = the
+    shimmer (bright) indices. Char ``i`` uses ``_RAINBOW[i % 7]``."""
     return _BOLD + "".join(
-        (bright if i in band else base) + ch for i, ch in enumerate(text)) \
-        + _RESET
+        ((_RAINBOW[i % len(_RAINBOW)][1] if i in band
+          else _RAINBOW[i % len(_RAINBOW)][0]) + ch)
+        for i, ch in enumerate(text)) + _RESET
 
 
 def test_shimmer_index_math():
@@ -487,34 +494,37 @@ def test_shimmer_index_math():
 def test_segment_ansi_shimmer_band_three_chars():
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
-    # rest: glimmer parked 10 cells left -> all base
+    # rest: glimmer parked 10 cells left -> every char at its base hue
     assert statusline.render_segment(0.61, rec, True, now=0.0) == \
-        _colored(text, _G)
+        _rainbow(text)
     # glimmer=2 -> chars 1..3 (space, '6', '1') in the bright variant
     assert statusline.render_segment(0.61, rec, True, now=0.62) == \
-        _colored(text, _G, _GS, band={1, 2, 3})
+        _rainbow(text, band={1, 2, 3})
 
 
-def test_segment_ansi_state_colors():
+def test_segment_ansi_rainbow_is_state_independent():
+    # Revision 3: the user wants the ultrathink.sh rainbow, not per-state
+    # hues. Every live state renders the same per-char rainbow; only the
+    # segment text (and thus its length) varies by state.
     cases = [
         (0.63, {"name": "p-001", "state": "ROTATION_PENDING"},
-         "⟳ 63% PENDING→p-002", _Y),
-        (0.7, {"name": "p-001", "state": "ROTATING"}, "⟳ 70% ROTATING", _B),
+         "⟳ 63% PENDING→p-002"),
+        (0.7, {"name": "p-001", "state": "ROTATING"}, "⟳ 70% ROTATING"),
         (0.7, {"name": "p-001", "state": "AWAITING_MANUAL_CLEAR"},
-         "⟳ 70% AMCL", _V),
+         "⟳ 70% AMCL"),
         (0.73, {"name": "p-001", "state": "HANDOFF_REQUESTED"},
-         "⟳ 73% HANDOFF!", _R),
+         "⟳ 73% HANDOFF!"),
     ]
-    for ratio, rec, text, base in cases:
+    for ratio, rec, text in cases:
         assert statusline.render_segment(ratio, rec, True, now=0.0) == \
-            _colored(text, base)
+            _rainbow(text)
 
 
 def test_segment_ansi_blocked_span_own_color():
     rec = {"state": "ACTIVE", "name": "p-001"}
     span = _BOLD + _R + " ⛔ BLOCKED" + _RESET
     assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.0) \
-        == _colored("⟳ 50% ok", _G) + span
+        == _rainbow("⟳ 50% ok") + span
     # the band sweeps the segment only — the BLOCKED span stays put
     assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.62) \
         .endswith(span)
@@ -558,8 +568,8 @@ def test_run_ansi_on_renders_shimmer_segment(cc_home, tmp_path, monkeypatch):
     payload = _payload()
     monkeypatch.setattr(statusline.time, "time", lambda: 0.0)  # rest
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _colored("⟳ 9% ok", _G)
+    assert line == _rainbow("⟳ 9% ok")
     # glimmer=1 -> chars 0..2 ('⟳', ' ', '9') in the bright variant
     monkeypatch.setattr(statusline.time, "time", lambda: 0.55)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _colored("⟳ 9% ok", _G, _GS, band={0, 1, 2})
+    assert line == _rainbow("⟳ 9% ok", band={0, 1, 2})
