@@ -134,18 +134,25 @@ ANSI_RESET = "\x1b[0m"
 ANSI_BOLD = "\x1b[1m"
 
 
-#: (base, shimmer) basic-16 SGR pairs per live segment kind (P11-D2):
-#: normal + BRIGHT variant of the same hue — the ultrathink.sh
-#: base/shimmer concept in a palette that survives 16-color client
-#: down-conversion (24-bit green quantized to GRAY on a 16-color tmux
-#: client — observed 2026-09-22, user screenshot). Static = off/unknown.
-_SHIMMER_COLORS = {
-    "ok":       ("\x1b[32m", "\x1b[92m"),  # green / bright green
-    "pending":  ("\x1b[33m", "\x1b[93m"),  # yellow / bright yellow
-    "rotating": ("\x1b[36m", "\x1b[96m"),  # cyan / bright cyan
-    "amcl":     ("\x1b[35m", "\x1b[95m"),  # magenta / bright magenta
-    "handoff":  ("\x1b[31m", "\x1b[91m"),  # red / bright red
-}
+#: Per-character rainbow (ultrathink.sh, revision 3): 7 (base, shimmer)
+#: basic-16 SGR pairs, cycled ``i % 7`` across the live segment's chars —
+#: the reverse-engineered Claude Code "ultrathink" 7-color rainbow, in a
+#: palette that survives 16-color client down-conversion (the 24-bit
+#: revision-1 palette quantized to GRAY on the user's 16-color tmux
+#: client — observed 2026-09-22, user screenshot). Each pair = normal +
+#: BRIGHT variant of one hue; the 3-char glimmer band renders the bright
+#: variant of that char's own hue. Supersedes the per-state single-hue
+#: colors of revision 2 (user: the segment must be colorful like
+#: ultrathink.sh, not a monochrome pulse).
+_RAINBOW = [
+    ("\x1b[31m", "\x1b[91m"),  # red
+    ("\x1b[33m", "\x1b[93m"),  # yellow (orange)
+    ("\x1b[32m", "\x1b[92m"),  # green
+    ("\x1b[34m", "\x1b[94m"),  # blue
+    ("\x1b[35m", "\x1b[95m"),  # magenta (indigo/violet)
+    ("\x1b[36m", "\x1b[96m"),  # cyan
+    ("\x1b[37m", "\x1b[97m"),  # white
+]
 _BLOCKED_BASE = "\x1b[31m"  # red, own bold span
 _COLOR_STATIC = "\x1b[90m"         # dim gray
 
@@ -163,22 +170,26 @@ def shimmer_index(now: float, length: int) -> int:
 
 
 def _style(kind: str, text: str, blocked: str | None, now: float) -> str:
-    """Wrap one plain segment in ANSI (ultrathink.sh shimmer, P11-D3).
+    """Wrap one plain segment in ANSI (ultrathink.sh rainbow shimmer).
 
-    Live kinds: every char gets its kind's base color; the 3-char band
-    (chars within +/-1 of the glimmer index) gets the brighter shimmer
-    variant — a soft gliding highlight, never a blank frame. Bold, like
-    the original. ``static`` (off/unknown): dim gray, never shimmers. The
-    BLOCKED suffix keeps its own bold-red span, never shimmering.
+    Live kinds (any state): a per-character RAINBOW — char ``i`` gets
+    ``_RAINBOW[i % 7]`` (ultrathink.sh's loop), and the 3-char band (chars
+    within +/-1 of the glimmer index) renders the brighter (bright-16)
+    variant of that char's own hue — a gliding highlight over the rainbow,
+    never a blank frame. Bold, like the original. State is conveyed by the
+    text itself, not by a single hue. ``static`` (off/unknown): dim gray,
+    never shimmers. The BLOCKED suffix keeps its own bold-red span, never
+    shimmering.
     """
     blocked_part = (f"{ANSI_BOLD}{_BLOCKED_BASE}{blocked}{ANSI_RESET}"
                     if blocked else "")
     if kind == "static":
         return _COLOR_STATIC + text + ANSI_RESET + blocked_part
-    base, shimmer = _SHIMMER_COLORS[kind]
     glimmer = shimmer_index(now, len(text))
-    chars = "".join((shimmer if abs(i - glimmer) <= SHIMMER_BAND else base) + ch
-                    for i, ch in enumerate(text))
+    chars = "".join(
+        ((_RAINBOW[i % len(_RAINBOW)][1] if abs(i - glimmer) <= SHIMMER_BAND
+          else _RAINBOW[i % len(_RAINBOW)][0]) + ch)
+        for i, ch in enumerate(text))
     return ANSI_BOLD + chars + ANSI_RESET + blocked_part
 
 
@@ -218,11 +229,12 @@ def render_segment(ratio: float | None, record: dict | None,
     ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
     needs_human ledger entry is unconsumed — visible on any later attach
     (spec §7 risk note).
-    Phase 11: with ``ansi`` (default, config ``statusline_ansi``) live
-    segments are state-colored with the ultrathink.sh shimmer sweep — a
-    3-char bright band gliding across the text, position derived from the
-    wall clock (``now`` injected for tests); ``off``/``…`` are static dim
-    gray. ``ansi=False`` reproduces the legacy plain strings byte-for-byte.
+    Phase 11 (revision 3): with ``ansi`` (default, config
+    ``statusline_ansi``) live segments render the ultrathink.sh
+    per-character rainbow (7 basic-16 hues cycled ``i % 7``) with a 3-char
+    bright band gliding across, position derived from the wall clock
+    (``now`` injected for tests); ``off``/``…`` are static dim gray.
+    ``ansi=False`` reproduces the legacy plain strings byte-for-byte.
     """
     now = time.time() if now is None else now
     blocked_text = f" ⛔ BLOCKED" if blocked else None
