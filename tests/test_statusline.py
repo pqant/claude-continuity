@@ -445,68 +445,85 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
             },
         },
     }
+    # Phase 11: colored by default — pin the contract in plain mode
+    # (the ANSI BLOCKED span is asserted in the Phase 11 block below).
     line = statusline.run(json.dumps(payload).encode("utf-8"),
-                          config.DEFAULTS)
-    # Phase 11: colored by default — assert the plain core and the BLOCKED span.
-    assert "⟳ 50% ok" in line
-    assert "\x1b[1;31m ⛔ BLOCKED\x1b[0m" in line
+                          dict(config.DEFAULTS, statusline_ansi=False))
+    assert line == "⟳ 50% ok ⛔ BLOCKED"
 
 
-# ------------------------------------------------ Phase 11: color + pulse
+# ----------------------------------- Phase 11: color + shimmer sweep
 
-_DIM = "\x1b[2m"
 _RESET = "\x1b[0m"
+_BOLD = "\x1b[1m"
+# 24-bit (base, shimmer) pairs — ultrathink.sh dark-theme palette
+_G, _GS = "\x1b[38;2;145;200;130m", "\x1b[38;2;185;230;180m"  # green
+_Y, _YS = "\x1b[38;2;250;195;95m", "\x1b[38;2;255;225;155m"  # yellow
+_B, _BS = "\x1b[38;2;130;170;220m", "\x1b[38;2;180;205;240m"  # blue
+_V, _VS = "\x1b[38;2;200;130;180m", "\x1b[38;2;230;180;210m"  # violet
+_R, _RS = "\x1b[38;2;235;95;87m", "\x1b[38;2;250;155;147m"   # red
 
 
-def test_pulse_phase_alternates_each_second():
-    assert statusline.pulse_phase(10.0) == 0   # bright
-    assert statusline.pulse_phase(10.999) == 0
-    assert statusline.pulse_phase(11.0) == 1   # dim
-    assert statusline.pulse_phase(11.999) == 1
-    assert statusline.pulse_phase(12.0) == 0
+def _colored(text: str, base: str, bright: str | None = None,
+             band: set = frozenset()) -> str:
+    """Per-char escapes (ultrathink.sh loop); ``band`` = shimmer indices."""
+    bright = bright or base
+    return _BOLD + "".join(
+        (bright if i in band else base) + ch for i, ch in enumerate(text)) \
+        + _RESET
 
 
-def test_segment_ansi_ok_bright_and_dim():
+def test_shimmer_index_math():
+    # 50 ms tick; length 8 -> cycle 28 frames; 10-cell rest each side
+    assert statusline.shimmer_index(0.0, 8) == -10
+    assert statusline.shimmer_index(0.57, 8) == 1   # frame 11
+    assert statusline.shimmer_index(0.62, 8) == 2   # frame 12
+    assert statusline.shimmer_index(0.67, 8) == 3   # frame 13
+    # one full cycle (28 ticks = 1.4 s) lands on the same cell
+    assert statusline.shimmer_index(0.62 + 1.4, 8) == 2
+
+
+def test_segment_ansi_shimmer_band_three_chars():
     rec = {"state": "ACTIVE", "name": "p-001"}
-    assert statusline.render_segment(0.61, rec, True, now=10.0) \
-        == "\x1b[32m⟳ 61% ok" + _RESET
-    # dim phase: softens, never disappears (P11-D3)
-    assert statusline.render_segment(0.61, rec, True, now=11.0) \
-        == _DIM + "\x1b[32m⟳ 61% ok" + _RESET
+    text = "⟳ 61% ok"
+    # rest: glimmer parked 10 cells left -> all base
+    assert statusline.render_segment(0.61, rec, True, now=0.0) == \
+        _colored(text, _G)
+    # glimmer=2 -> chars 1..3 (space, '6', '1') in the bright variant
+    assert statusline.render_segment(0.61, rec, True, now=0.62) == \
+        _colored(text, _G, _GS, band={1, 2, 3})
 
 
 def test_segment_ansi_state_colors():
-    assert statusline.render_segment(
-        0.63, {"name": "p-001", "state": "ROTATION_PENDING"}, True,
-        now=10.0) == "\x1b[33m⟳ 63% PENDING→p-002" + _RESET
-    assert statusline.render_segment(
-        0.7, {"name": "p-001", "state": "ROTATING"}, True,
-        now=10.0) == "\x1b[36m⟳ 70% ROTATING" + _RESET
-    assert statusline.render_segment(
-        0.7, {"name": "p-001", "state": "AWAITING_MANUAL_CLEAR"}, True,
-        now=10.0) == "\x1b[35m⟳ 70% AMCL" + _RESET
-    assert statusline.render_segment(
-        0.73, {"name": "p-001", "state": "HANDOFF_REQUESTED"}, True,
-        now=10.0) == "\x1b[31m⟳ 73% HANDOFF!" + _RESET
-    # dim phase wraps the whole live segment (any state)
-    assert statusline.render_segment(
-        0.7, {"name": "p-001", "state": "ROTATING"}, True,
-        now=11.0) == _DIM + "\x1b[36m⟳ 70% ROTATING" + _RESET
+    cases = [
+        (0.63, {"name": "p-001", "state": "ROTATION_PENDING"},
+         "⟳ 63% PENDING→p-002", _Y),
+        (0.7, {"name": "p-001", "state": "ROTATING"}, "⟳ 70% ROTATING", _B),
+        (0.7, {"name": "p-001", "state": "AWAITING_MANUAL_CLEAR"},
+         "⟳ 70% AMCL", _V),
+        (0.73, {"name": "p-001", "state": "HANDOFF_REQUESTED"},
+         "⟳ 73% HANDOFF!", _R),
+    ]
+    for ratio, rec, text, base in cases:
+        assert statusline.render_segment(ratio, rec, True, now=0.0) == \
+            _colored(text, base)
 
 
 def test_segment_ansi_blocked_span_own_color():
     rec = {"state": "ACTIVE", "name": "p-001"}
-    assert statusline.render_segment(0.5, rec, True, blocked="x", now=10.0) \
-        == "\x1b[32m⟳ 50% ok\x1b[1;31m ⛔ BLOCKED" + _RESET
-    assert statusline.render_segment(0.5, rec, True, blocked="x", now=11.0) \
-        == _DIM + "\x1b[32m⟳ 50% ok\x1b[1;31m ⛔ BLOCKED" + _RESET
+    span = _BOLD + _R + " ⛔ BLOCKED" + _RESET
+    assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.0) \
+        == _colored("⟳ 50% ok", _G) + span
+    # the band sweeps the segment only — the BLOCKED span stays put
+    assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.62) \
+        .endswith(span)
 
 
 def test_segment_ansi_off_and_unknown_are_static_gray():
     off = "\x1b[90m⟳ off" + _RESET
     unknown = "\x1b[90m⟳ …" + _RESET
     rec_off = {"state": "ACTIVE", "name": "p-001", "off": True}
-    for now in (10.0, 11.0):  # both pulse phases identical (static)
+    for now in (0.0, 0.62, 1.0):  # static: never shimmers
         assert statusline.render_segment(0.1, None, False, now=now) == off
         assert statusline.render_segment(0.1, rec_off, True, now=now) == off
         assert statusline.render_segment(None, None, True, now=now) == unknown
@@ -536,11 +553,12 @@ def test_run_ansi_off_renders_legacy_plain_line(cc_home, tmp_path):
     assert line == "⟳ 9% ok"
 
 
-def test_run_ansi_on_renders_colored_segment(cc_home, tmp_path, monkeypatch):
+def test_run_ansi_on_renders_shimmer_segment(cc_home, tmp_path, monkeypatch):
     payload = _payload()
-    monkeypatch.setattr(statusline.time, "time", lambda: 10.0)  # bright
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.0)  # rest
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == "\x1b[32m⟳ 9% ok" + _RESET
-    monkeypatch.setattr(statusline.time, "time", lambda: 11.0)  # dim
+    assert line == _colored("⟳ 9% ok", _G)
+    # glimmer=1 -> chars 0..2 ('⟳', ' ', '9') in the bright variant
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.55)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _DIM + "\x1b[32m⟳ 9% ok" + _RESET
+    assert line == _colored("⟳ 9% ok", _G, _GS, band={0, 1, 2})

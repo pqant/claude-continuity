@@ -6,6 +6,7 @@ SessionStart hook via CLAUDE_ENV_FILE, S11) wins; otherwise the most recent
 """
 
 import json
+import re
 import time
 
 import pytest
@@ -168,7 +169,10 @@ def test_cli_statusline_reads_stdin_and_prints_line(cc_home, tmp_path,
     monkeypatch.chdir(tmp_path)
     assert cli.main(["statusline"]) == 0
     out = capsys.readouterr().out
-    assert "⟳ 61% ok" in out  # ceil(158234/262144*100) = 61
+    # Phase 11: the CLI line is state-colored by default — assert the
+    # contract on the SGR-stripped text (format-agnostic).
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert "⟳ 61% ok" in plain  # ceil(158234/262144*100) = 61
 
 
 def test_cli_statusline_garbage_stdin_exits_zero(cc_home, tmp_path,

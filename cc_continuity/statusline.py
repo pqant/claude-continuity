@@ -116,43 +116,72 @@ _HANDOFF_STATES = frozenset({
 })
 
 
-# ------------------------------------------- Phase 11: color + soft pulse
+# ------------------------------------ Phase 11: color + shimmer sweep
+#
+# Effect source: ``ultrathink.sh`` (repo root) — the reverse-engineered
+# Claude Code "ultrathink" rainbow shimmer: a 3-char bright band gliding
+# left-to-right over per-char colored text, 50 ms tick, a 10-cell rest
+# before and after each sweep. Here the band is driven by the wall clock
+# instead of a timer, because CC re-runs the status line command itself;
+# every render is the sweep's exact position at that instant.
 
-#: Pulse period in seconds per phase (P11-D3): 1 Hz breathing, 50% duty.
-PULSE_PERIOD_S = 1.0
+#: Shimmer timing (ultrathink.sh): 50 ms tick, 10-cell rest each side.
+SHIMMER_TICK_S = 0.05
+SWEEP_PAD = 10
+SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the bright variant
 
 ANSI_RESET = "\x1b[0m"
-ANSI_DIM = "\x1b[2m"
-#: SGR colors per live segment kind (P11-D2); static = off/unknown.
-_LIVE_COLORS = {
-    "ok": "\x1b[32m",         # green
-    "pending": "\x1b[33m",    # yellow
-    "rotating": "\x1b[36m",   # cyan
-    "amcl": "\x1b[35m",       # magenta
-    "handoff": "\x1b[31m",    # red
+ANSI_BOLD = "\x1b[1m"
+
+
+def _rgb(r: int, g: int, b: int) -> str:
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+
+#: (base, shimmer) 24-bit pairs per live segment kind (P11-D2) — lifted
+#: verbatim from the ultrathink.sh dark-theme rainbow palette;
+#: static = off/unknown.
+_SHIMMER_COLORS = {
+    "ok":       (_rgb(145, 200, 130), _rgb(185, 230, 180)),  # green
+    "pending":  (_rgb(250, 195, 95),  _rgb(255, 225, 155)),  # yellow
+    "rotating": (_rgb(130, 170, 220), _rgb(180, 205, 240)),  # blue
+    "amcl":     (_rgb(200, 130, 180), _rgb(230, 180, 210)),  # violet
+    "handoff":  (_rgb(235, 95, 87),   _rgb(250, 155, 147)),  # red
 }
-_COLOR_BLOCKED = "\x1b[1;31m"   # bold red, own span
-_COLOR_STATIC = "\x1b[90m"      # dim gray
+_BLOCKED_BASE = _rgb(235, 95, 87)  # red pair base, own bold span
+_COLOR_STATIC = "\x1b[90m"         # dim gray
 
 
-def pulse_phase(now: float) -> int:
-    """0 = bright, 1 = dim — wall-clock 1 Hz breathing (P11-D3)."""
-    return int(now // PULSE_PERIOD_S) % 2
+def shimmer_index(now: float, length: int) -> int:
+    """Glimmer cell for wall-clock ``now`` (ultrathink.sh math).
 
-
-def _style(kind: str, text: str, blocked: str | None, pulse: int) -> str:
-    """Wrap one plain segment in ANSI (P11-D2/D3).
-
-    Live kinds (``_LIVE_COLORS``): ``[dim] + color + text + [blocked span] +
-    reset`` — the dim (odd phase) softens the whole span but never blanks
-    it. ``static`` (off/unknown): dim gray, never pulses. The BLOCKED
-    suffix keeps its own bold-red span inside the single trailing reset.
+    ``glimmer = -SWEEP_PAD + floor(now / 50ms) % (length + 2*SWEEP_PAD)`` —
+    the band starts one rest-width left of the text, sweeps one cell per
+    tick, and rests one rest-width past it; a length-8 segment therefore
+    sweeps 0.4 s and rests 1.0 s per cycle.
     """
-    blocked_part = f"{_COLOR_BLOCKED}{blocked}" if blocked else ""
+    frame = int(now // SHIMMER_TICK_S) % (length + 2 * SWEEP_PAD)
+    return frame - SWEEP_PAD
+
+
+def _style(kind: str, text: str, blocked: str | None, now: float) -> str:
+    """Wrap one plain segment in ANSI (ultrathink.sh shimmer, P11-D3).
+
+    Live kinds: every char gets its kind's base color; the 3-char band
+    (chars within +/-1 of the glimmer index) gets the brighter shimmer
+    variant — a soft gliding highlight, never a blank frame. Bold, like
+    the original. ``static`` (off/unknown): dim gray, never shimmers. The
+    BLOCKED suffix keeps its own bold-red span, never shimmering.
+    """
+    blocked_part = (f"{ANSI_BOLD}{_BLOCKED_BASE}{blocked}{ANSI_RESET}"
+                    if blocked else "")
     if kind == "static":
-        return _COLOR_STATIC + text + blocked_part + ANSI_RESET
-    return ((ANSI_DIM if pulse else "") + _LIVE_COLORS[kind] + text
-            + blocked_part + ANSI_RESET)
+        return _COLOR_STATIC + text + ANSI_RESET + blocked_part
+    base, shimmer = _SHIMMER_COLORS[kind]
+    glimmer = shimmer_index(now, len(text))
+    chars = "".join((shimmer if abs(i - glimmer) <= SHIMMER_BAND else base) + ch
+                    for i, ch in enumerate(text))
+    return ANSI_BOLD + chars + ANSI_RESET + blocked_part
 
 
 def find_session_by_id(session_id: str | None) -> dict | None:
@@ -192,11 +221,12 @@ def render_segment(ratio: float | None, record: dict | None,
     needs_human ledger entry is unconsumed — visible on any later attach
     (spec §7 risk note).
     Phase 11: with ``ansi`` (default, config ``statusline_ansi``) live
-    segments are state-colored and pulse dim/bright at 1 Hz (``now``
-    injected for tests); ``off``/``…`` are static dim gray. ``ansi=False``
-    reproduces the legacy plain strings byte-for-byte.
+    segments are state-colored with the ultrathink.sh shimmer sweep — a
+    3-char bright band gliding across the text, position derived from the
+    wall clock (``now`` injected for tests); ``off``/``…`` are static dim
+    gray. ``ansi=False`` reproduces the legacy plain strings byte-for-byte.
     """
-    pulse = pulse_phase(time.time() if now is None else now) if ansi else 0
+    now = time.time() if now is None else now
     blocked_text = f" ⛔ BLOCKED" if blocked else None
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
@@ -217,22 +247,22 @@ def render_segment(ratio: float | None, record: dict | None,
         return f"⟳ {pct}% ok" + (blocked_text or "")
 
     if not enabled or (record is not None and record.get("off")):
-        return _style("static", "⟳ off", None, 0)
+        return _style("static", "⟳ off", None, now)
     if ratio is None:
-        return _style("static", "⟳ …", blocked_text, 0)
+        return _style("static", "⟳ …", blocked_text, now)
     pct = math.ceil(round(ratio * 100, 6))
     state_name = (record or {}).get("state", "ACTIVE")
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
         return _style("pending", f"⟳ {pct}% PENDING→{successor}",
-                      blocked_text, pulse)
+                      blocked_text, now)
     if state_name == "ROTATING":
-        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, pulse)
+        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now)
     if state_name == "AWAITING_MANUAL_CLEAR":
-        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, pulse)
+        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now)
     if state_name in _HANDOFF_STATES:
-        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, pulse)
-    return _style("ok", f"⟳ {pct}% ok", blocked_text, pulse)
+        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now)
+    return _style("ok", f"⟳ {pct}% ok", blocked_text, now)
 
 
 # ---------------------------------------------------------------- chaining
