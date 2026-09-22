@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -169,22 +171,30 @@ def shimmer_index(now: float, length: int) -> int:
     return frame - SWEEP_PAD
 
 
-def _style(kind: str, text: str, blocked: str | None, now: float) -> str:
+def _style(kind: str, text: str, blocked: str | None, now: float,
+           *, shimmer: bool = False) -> str:
     """Wrap one plain segment in ANSI (ultrathink.sh rainbow shimmer).
 
     Live kinds (any state): a per-character RAINBOW — char ``i`` gets
-    ``_RAINBOW[i % 7]`` (ultrathink.sh's loop), and the 3-char band (chars
-    within +/-1 of the glimmer index) renders the brighter (bright-16)
-    variant of that char's own hue — a gliding highlight over the rainbow,
-    never a blank frame. Bold, like the original. State is conveyed by the
-    text itself, not by a single hue. ``static`` (off/unknown): dim gray,
-    never shimmers. The BLOCKED suffix keeps its own bold-red span, never
+    ``_RAINBOW[i % 7]`` (ultrathink.sh's loop). With ``shimmer`` (Phase 11
+    rev 4: the prompt contains ``ultrathink``): the 3-char band (chars
+    within +/-1 of the wall-clock glimmer index) renders the brighter
+    (bright-16) variant of that char's own hue — repositioned on every CC
+    re-render (the status line is a static string; it cannot self-animate).
+    Without it: the static rainbow (all base hues — visually the sweep's
+    rest frame). Bold, like the original. State is conveyed by the text
+    itself, not by a single hue. ``static`` (off/unknown): dim gray, never
+    shimmers. The BLOCKED suffix keeps its own bold-red span, never
     shimmering.
     """
     blocked_part = (f"{ANSI_BOLD}{_BLOCKED_BASE}{blocked}{ANSI_RESET}"
                     if blocked else "")
     if kind == "static":
         return _COLOR_STATIC + text + ANSI_RESET + blocked_part
+    if not shimmer:
+        chars = "".join(_RAINBOW[i % len(_RAINBOW)][0] + ch
+                        for i, ch in enumerate(text))
+        return ANSI_BOLD + chars + ANSI_RESET + blocked_part
     glimmer = shimmer_index(now, len(text))
     chars = "".join(
         ((_RAINBOW[i % len(_RAINBOW)][1] if abs(i - glimmer) <= SHIMMER_BAND
@@ -217,7 +227,8 @@ def find_session_by_id(session_id: str | None) -> dict | None:
 def render_segment(ratio: float | None, record: dict | None,
                    enabled: bool, blocked: str | None = None,
                    *, ansi: bool = True,
-                   now: float | None = None) -> str:
+                   now: float | None = None,
+                   shimmer: bool = False) -> str:
     """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
@@ -229,12 +240,14 @@ def render_segment(ratio: float | None, record: dict | None,
     ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
     needs_human ledger entry is unconsumed — visible on any later attach
     (spec §7 risk note).
-    Phase 11 (revision 3): with ``ansi`` (default, config
+    Phase 11 (revision 4): with ``ansi`` (default, config
     ``statusline_ansi``) live segments render the ultrathink.sh
-    per-character rainbow (7 basic-16 hues cycled ``i % 7``) with a 3-char
-    bright band gliding across, position derived from the wall clock
-    (``now`` injected for tests); ``off``/``…`` are static dim gray.
-    ``ansi=False`` reproduces the legacy plain strings byte-for-byte.
+    per-character rainbow (7 basic-16 hues cycled ``i % 7``); ``shimmer``
+    (the prompt contains ``ultrathink`` — Phase 11 rev 4) activates the
+    3-char bright band, position derived from the wall clock (``now``
+    injected for tests), repositioned on every CC re-render. Default:
+    static rainbow. ``off``/``…`` are static dim gray. ``ansi=False``
+    reproduces the legacy plain strings byte-for-byte.
     """
     now = time.time() if now is None else now
     blocked_text = f" ⛔ BLOCKED" if blocked else None
@@ -265,14 +278,70 @@ def render_segment(ratio: float | None, record: dict | None,
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
         return _style("pending", f"⟳ {pct}% PENDING→{successor}",
-                      blocked_text, now)
+                      blocked_text, now, shimmer=shimmer)
     if state_name == "ROTATING":
-        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now)
+        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now,
+                      shimmer=shimmer)
     if state_name == "AWAITING_MANUAL_CLEAR":
-        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now)
+        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now,
+                      shimmer=shimmer)
     if state_name in _HANDOFF_STATES:
-        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now)
-    return _style("ok", f"⟳ {pct}% ok", blocked_text, now)
+        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now,
+                      shimmer=shimmer)
+    return _style("ok", f"⟳ {pct}% ok", blocked_text, now, shimmer=shimmer)
+
+
+# ------------------------ Phase 11 rev 4: reactive shimmer detection
+#
+# The bright band is live only while the pane's input box contains the
+# word "ultrathink" (the user's prompt, as typed — a hook would only fire
+# on submit). Detection reads the pane, never the conversation.
+
+
+#: Word-boundary, case-insensitive — ultrathink.sh's ``/\bultrathink\b/gi``.
+ULTRATHINK_RE = re.compile(r"\bultrathink\b", re.IGNORECASE)
+
+#: CC's input box bottom border is a line of these (verified live, 014).
+_INPUT_BORDER = "─"
+
+
+def _tmux_bin() -> str:
+    return os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
+
+
+def prompt_has_ultrathink(timeout: float = 1.0) -> bool:
+    """True while the pane's input box contains the word ``ultrathink``.
+
+    Phase 11 rev 4: ``tmux capture-pane -p`` on the current pane, then
+    search ONLY the input-box region — the last ``❯``-prefixed line
+    through the next line consisting solely of ``─`` (CC's input box; a
+    wrapped prompt stays inside it). Scrollback never triggers. Every
+    failure path (no ``$TMUX``, spawn error, timeout, non-zero exit)
+    returns False: detection must never break the status line.
+    """
+    if not os.environ.get("TMUX"):
+        return False
+    try:
+        proc = subprocess.run([_tmux_bin(), "capture-pane", "-p"],
+                              capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    lines = proc.stdout.decode("utf-8", "replace").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("❯"):
+            start = i
+    if start is None:
+        return False
+    region = []
+    for line in lines[start:]:
+        region.append(line)
+        stripped = line.strip()
+        if stripped and set(stripped) == {_INPUT_BORDER}:
+            break
+    return bool(ULTRATHINK_RE.search("\n".join(region)))
 
 
 # ---------------------------------------------------------------- chaining
@@ -345,7 +414,14 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                                   int(record["nnn"])))
         except (OSError, ValueError):
             blocked = None
+    ansi = bool(cfg.get("statusline_ansi", True))
+    live = (enabled and ratio is not None
+            and not (record is not None and record.get("off")))
+    # Phase 11 rev 4: bright band only while the prompt (the pane's input
+    # box) contains "ultrathink"; a static/off segment never reads the
+    # pane (short-circuit).
+    shimmer = ansi and live and prompt_has_ultrathink()
     segment = render_segment(ratio, record, enabled, blocked=blocked,
-                             ansi=bool(cfg.get("statusline_ansi", True)))
+                             ansi=ansi, shimmer=shimmer)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)

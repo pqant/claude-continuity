@@ -8,6 +8,7 @@ command (same stdin, 2 s timeout), and appends our segment
 """
 
 import json
+import os
 import subprocess
 import time
 
@@ -494,11 +495,13 @@ def test_shimmer_index_math():
 def test_segment_ansi_shimmer_band_three_chars():
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
-    # rest: glimmer parked 10 cells left -> every char at its base hue
+    # default = static rainbow (no band) — visually the rest frame
     assert statusline.render_segment(0.61, rec, True, now=0.0) == \
         _rainbow(text)
-    # glimmer=2 -> chars 1..3 (space, '6', '1') in the bright variant
-    assert statusline.render_segment(0.61, rec, True, now=0.62) == \
+    # shimmer on, glimmer=2 -> chars 1..3 (space, '6', '1') in the bright
+    # variant
+    assert statusline.render_segment(0.61, rec, True, now=0.62,
+                                     shimmer=True) == \
         _rainbow(text, band={1, 2, 3})
 
 
@@ -564,12 +567,181 @@ def test_run_ansi_off_renders_legacy_plain_line(cc_home, tmp_path):
     assert line == "⟳ 9% ok"
 
 
-def test_run_ansi_on_renders_shimmer_segment(cc_home, tmp_path, monkeypatch):
+def test_run_ansi_on_renders_static_rainbow(cc_home, tmp_path, monkeypatch):
+    # Phase 11 rev 4 default: no band (the shimmer needs "ultrathink" in
+    # the prompt, rev 4 — see the block below).
     payload = _payload()
-    monkeypatch.setattr(statusline.time, "time", lambda: 0.0)  # rest
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.0)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
     assert line == _rainbow("⟳ 9% ok")
-    # glimmer=1 -> chars 0..2 ('⟳', ' ', '9') in the bright variant
+    # wall clock moves, band stays off
     monkeypatch.setattr(statusline.time, "time", lambda: 0.55)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={0, 1, 2})
+    assert line == _rainbow("⟳ 9% ok")
+
+
+# -------------------------------- Phase 11 rev 4: reactive shimmer
+#
+# The bright band appears only while the pane's INPUT BOX (the last
+# ❯-prefixed line through the next all-─ border line) contains the word
+# "ultrathink" — scrollback never triggers. Fake tmux = test_rotator's
+# argv-recording pattern, plus a canned pane file.
+
+FAKE_TMUX_PANE = """#!/bin/sh
+printf '%s\\n' "---" "$@" >> "${FAKE_TMUX_LOG:?}"
+cat "${FAKE_PANE_FILE:?}"
+"""
+
+_BORDER = "─" * 80
+
+# Keyword lives ONLY in scrollback — must never trigger (empty input box).
+_PANE_DECOY = (
+    "user: please run this with ultrathink\n"
+    f"{_BORDER}\n"
+    "❯ \n"
+    f"{_BORDER}\n"
+    "footer line\n"
+)
+
+_PANE_KEYWORD = (
+    "scrollback line without the word\n"
+    f"{_BORDER}\n"
+    "❯ fix the ultrathink flag\n"
+    f"{_BORDER}\n"
+    "footer line\n"
+)
+
+# Wrapped prompt: the keyword sits on the continuation line, inside the box.
+_PANE_WRAPPED = (
+    f"{_BORDER}\n"
+    "❯ a very long prompt that wraps onto the\n"
+    "second line which carries ultrathink\n"
+    f"{_BORDER}\n"
+    "footer line\n"
+)
+
+_PANE_NO_BOX = (
+    "ultrathink ultrathink\n"
+    f"{_BORDER}\n"
+    "footer line\n"
+)
+
+
+@pytest.fixture
+def fake_tmux_pane(tmp_path, monkeypatch):
+    """Fake tmux (``CC_CONTINUITY_TMUX_BIN``) that cats a canned pane file
+    and records argv (test_rotator's ``---``-separated log format).
+    Returns ``(pane_file, log)``; ``$TMUX`` is set."""
+    bin_path = tmp_path / "fake-tmux"
+    bin_path.write_text(FAKE_TMUX_PANE)
+    os.chmod(bin_path, 0o755)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text(_PANE_KEYWORD, encoding="utf-8")
+    log = tmp_path / "tmux-args.log"
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(bin_path))
+    monkeypatch.setenv("FAKE_TMUX_LOG", str(log))
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    monkeypatch.setenv("TMUX", "/tmp/fake,4242,0")
+    return pane_file, log
+
+
+def _set_pane(pane_file, text):
+    pane_file.write_text(text, encoding="utf-8")
+
+
+def _pane_calls(log) -> list:
+    """Parse the fake-tmux log into argv lists (no calls: no log file)."""
+    if not log.is_file():
+        return []
+    out, cur = [], None
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            if cur is not None:
+                out.append(cur)
+            cur = []
+        elif cur is not None:
+            cur.append(line)
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def test_prompt_has_ultrathink_in_input_box(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane  # default pane carries the keyword
+    assert statusline.prompt_has_ultrathink() is True
+    assert _pane_calls(log) == [["capture-pane", "-p"]]
+
+
+def test_prompt_has_ultrathink_wrapped_input(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_WRAPPED)
+    assert statusline.prompt_has_ultrathink() is True
+
+
+def test_prompt_has_ultrathink_case_insensitive(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, f"{_BORDER}\n❯ ULTRATHINK\n{_BORDER}\n")
+    assert statusline.prompt_has_ultrathink() is True
+
+
+def test_prompt_has_ultrathink_word_boundary(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, f"{_BORDER}\n❯ ultrathinker\n{_BORDER}\n")
+    assert statusline.prompt_has_ultrathink() is False
+
+
+def test_prompt_has_ultrathink_ignores_scrollback(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_DECOY)
+    assert statusline.prompt_has_ultrathink() is False
+
+
+def test_prompt_has_ultrathink_no_input_box(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_NO_BOX)
+    assert statusline.prompt_has_ultrathink() is False
+
+
+def test_prompt_has_ultrathink_without_tmux_env(cc_home, monkeypatch,
+                                                fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    monkeypatch.delenv("TMUX")
+    assert statusline.prompt_has_ultrathink() is False
+    assert _pane_calls(log) == []  # tmux never spawned
+
+
+def test_prompt_has_ultrathink_tmux_failure(cc_home, tmp_path, monkeypatch,
+                                            fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    fail_bin = tmp_path / "fail-tmux"
+    fail_bin.write_text("#!/bin/sh\nexit 3\n")
+    os.chmod(fail_bin, 0o755)
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(fail_bin))
+    assert statusline.prompt_has_ultrathink() is False
+
+
+def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
+                                                 fake_tmux_pane):
+    pane, log = fake_tmux_pane  # default pane carries the keyword
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert line == _rainbow("⟳ 9% ok", band={1, 2, 3})
+    assert _pane_calls(log) == [["capture-pane", "-p"]]
+
+
+def test_run_stays_static_when_prompt_clean(cc_home, monkeypatch,
+                                            fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_DECOY)
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert line == _rainbow("⟳ 9% ok")
+
+
+def test_run_disabled_never_reads_pane(cc_home, fake_tmux_pane):
+    # guard: a static/off segment must not even spawn tmux
+    pane, log = fake_tmux_pane
+    line = statusline.run(json.dumps(_payload()).encode(),
+                          _cfg(enabled=False))
+    assert line == "\x1b[90m⟳ off" + _RESET
+    assert _pane_calls(log) == []
