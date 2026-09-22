@@ -134,21 +134,19 @@ ANSI_RESET = "\x1b[0m"
 ANSI_BOLD = "\x1b[1m"
 
 
-def _rgb(r: int, g: int, b: int) -> str:
-    return f"\x1b[38;2;{r};{g};{b}m"
-
-
-#: (base, shimmer) 24-bit pairs per live segment kind (P11-D2) — lifted
-#: verbatim from the ultrathink.sh dark-theme rainbow palette;
-#: static = off/unknown.
+#: (base, shimmer) basic-16 SGR pairs per live segment kind (P11-D2):
+#: normal + BRIGHT variant of the same hue — the ultrathink.sh
+#: base/shimmer concept in a palette that survives 16-color client
+#: down-conversion (24-bit green quantized to GRAY on a 16-color tmux
+#: client — observed 2026-09-22, user screenshot). Static = off/unknown.
 _SHIMMER_COLORS = {
-    "ok":       (_rgb(145, 200, 130), _rgb(185, 230, 180)),  # green
-    "pending":  (_rgb(250, 195, 95),  _rgb(255, 225, 155)),  # yellow
-    "rotating": (_rgb(130, 170, 220), _rgb(180, 205, 240)),  # blue
-    "amcl":     (_rgb(200, 130, 180), _rgb(230, 180, 210)),  # violet
-    "handoff":  (_rgb(235, 95, 87),   _rgb(250, 155, 147)),  # red
+    "ok":       ("\x1b[32m", "\x1b[92m"),  # green / bright green
+    "pending":  ("\x1b[33m", "\x1b[93m"),  # yellow / bright yellow
+    "rotating": ("\x1b[36m", "\x1b[96m"),  # cyan / bright cyan
+    "amcl":     ("\x1b[35m", "\x1b[95m"),  # magenta / bright magenta
+    "handoff":  ("\x1b[31m", "\x1b[91m"),  # red / bright red
 }
-_BLOCKED_BASE = _rgb(235, 95, 87)  # red pair base, own bold span
+_BLOCKED_BASE = "\x1b[31m"  # red, own bold span
 _COLOR_STATIC = "\x1b[90m"         # dim gray
 
 

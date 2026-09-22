@@ -456,12 +456,13 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
 
 _RESET = "\x1b[0m"
 _BOLD = "\x1b[1m"
-# 24-bit (base, shimmer) pairs — ultrathink.sh dark-theme palette
-_G, _GS = "\x1b[38;2;145;200;130m", "\x1b[38;2;185;230;180m"  # green
-_Y, _YS = "\x1b[38;2;250;195;95m", "\x1b[38;2;255;225;155m"  # yellow
-_B, _BS = "\x1b[38;2;130;170;220m", "\x1b[38;2;180;205;240m"  # blue
-_V, _VS = "\x1b[38;2;200;130;180m", "\x1b[38;2;230;180;210m"  # violet
-_R, _RS = "\x1b[38;2;235;95;87m", "\x1b[38;2;250;155;147m"   # red
+# (base, shimmer) basic-16 SGR pairs — normal + bright variant (the
+# ultrathink.sh concept, palette chosen for 16-color-client survival)
+_G, _GS = "\x1b[32m", "\x1b[92m"  # green
+_Y, _YS = "\x1b[33m", "\x1b[93m"  # yellow
+_B, _BS = "\x1b[36m", "\x1b[96m"  # cyan
+_V, _VS = "\x1b[35m", "\x1b[95m"  # magenta
+_R, _RS = "\x1b[31m", "\x1b[91m"  # red
 
 
 def _colored(text: str, base: str, bright: str | None = None,
