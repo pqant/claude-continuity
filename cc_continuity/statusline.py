@@ -116,6 +116,45 @@ _HANDOFF_STATES = frozenset({
 })
 
 
+# ------------------------------------------- Phase 11: color + soft pulse
+
+#: Pulse period in seconds per phase (P11-D3): 1 Hz breathing, 50% duty.
+PULSE_PERIOD_S = 1.0
+
+ANSI_RESET = "\x1b[0m"
+ANSI_DIM = "\x1b[2m"
+#: SGR colors per live segment kind (P11-D2); static = off/unknown.
+_LIVE_COLORS = {
+    "ok": "\x1b[32m",         # green
+    "pending": "\x1b[33m",    # yellow
+    "rotating": "\x1b[36m",   # cyan
+    "amcl": "\x1b[35m",       # magenta
+    "handoff": "\x1b[31m",    # red
+}
+_COLOR_BLOCKED = "\x1b[1;31m"   # bold red, own span
+_COLOR_STATIC = "\x1b[90m"      # dim gray
+
+
+def pulse_phase(now: float) -> int:
+    """0 = bright, 1 = dim — wall-clock 1 Hz breathing (P11-D3)."""
+    return int(now // PULSE_PERIOD_S) % 2
+
+
+def _style(kind: str, text: str, blocked: str | None, pulse: int) -> str:
+    """Wrap one plain segment in ANSI (P11-D2/D3).
+
+    Live kinds (``_LIVE_COLORS``): ``[dim] + color + text + [blocked span] +
+    reset`` — the dim (odd phase) softens the whole span but never blanks
+    it. ``static`` (off/unknown): dim gray, never pulses. The BLOCKED
+    suffix keeps its own bold-red span inside the single trailing reset.
+    """
+    blocked_part = f"{_COLOR_BLOCKED}{blocked}" if blocked else ""
+    if kind == "static":
+        return _COLOR_STATIC + text + blocked_part + ANSI_RESET
+    return ((ANSI_DIM if pulse else "") + _LIVE_COLORS[kind] + text
+            + blocked_part + ANSI_RESET)
+
+
 def find_session_by_id(session_id: str | None) -> dict | None:
     """Scan ``projects/*/sessions/*/state.json`` for a matching session.
 
@@ -138,8 +177,10 @@ def find_session_by_id(session_id: str | None) -> dict | None:
 
 
 def render_segment(ratio: float | None, record: dict | None,
-                   enabled: bool, blocked: str | None = None) -> str:
-    """Render our ``⟳ …`` segment (PRD §7).
+                   enabled: bool, blocked: str | None = None,
+                   *, ansi: bool = True,
+                   now: float | None = None) -> str:
+    """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
     ``⟳ NN% ok``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% ROTATING``,
@@ -150,24 +191,48 @@ def render_segment(ratio: float | None, record: dict | None,
     ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
     needs_human ledger entry is unconsumed — visible on any later attach
     (spec §7 risk note).
+    Phase 11: with ``ansi`` (default, config ``statusline_ansi``) live
+    segments are state-colored and pulse dim/bright at 1 Hz (``now``
+    injected for tests); ``off``/``…`` are static dim gray. ``ansi=False``
+    reproduces the legacy plain strings byte-for-byte.
     """
-    suffix = f" ⛔ BLOCKED" if blocked else ""
+    pulse = pulse_phase(time.time() if now is None else now) if ansi else 0
+    blocked_text = f" ⛔ BLOCKED" if blocked else None
+    if not ansi:
+        if not enabled or (record is not None and record.get("off")):
+            return "⟳ off"
+        if ratio is None:
+            return "⟳ …" + (blocked_text or "")
+        pct = math.ceil(round(ratio * 100, 6))
+        state_name = (record or {}).get("state", "ACTIVE")
+        if state_name == "ROTATION_PENDING":
+            successor = naming.successor_name(record.get("name", ""))
+            return f"⟳ {pct}% PENDING→{successor}" + (blocked_text or "")
+        if state_name == "ROTATING":
+            return f"⟳ {pct}% ROTATING" + (blocked_text or "")
+        if state_name == "AWAITING_MANUAL_CLEAR":
+            return f"⟳ {pct}% AMCL" + (blocked_text or "")
+        if state_name in _HANDOFF_STATES:
+            return f"⟳ {pct}% HANDOFF!" + (blocked_text or "")
+        return f"⟳ {pct}% ok" + (blocked_text or "")
+
     if not enabled or (record is not None and record.get("off")):
-        return "⟳ off"
+        return _style("static", "⟳ off", None, 0)
     if ratio is None:
-        return "⟳ …" + suffix
+        return _style("static", "⟳ …", blocked_text, 0)
     pct = math.ceil(round(ratio * 100, 6))
     state_name = (record or {}).get("state", "ACTIVE")
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
-        return f"⟳ {pct}% PENDING→{successor}" + suffix
+        return _style("pending", f"⟳ {pct}% PENDING→{successor}",
+                      blocked_text, pulse)
     if state_name == "ROTATING":
-        return f"⟳ {pct}% ROTATING" + suffix
+        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, pulse)
     if state_name == "AWAITING_MANUAL_CLEAR":
-        return f"⟳ {pct}% AMCL" + suffix
+        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, pulse)
     if state_name in _HANDOFF_STATES:
-        return f"⟳ {pct}% HANDOFF!" + suffix
-    return f"⟳ {pct}% ok" + suffix
+        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, pulse)
+    return _style("ok", f"⟳ {pct}% ok", blocked_text, pulse)
 
 
 # ---------------------------------------------------------------- chaining
@@ -240,6 +305,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                                   int(record["nnn"])))
         except (OSError, ValueError):
             blocked = None
-    segment = render_segment(ratio, record, enabled, blocked=blocked)
+    segment = render_segment(ratio, record, enabled, blocked=blocked,
+                             ansi=bool(cfg.get("statusline_ansi", True)))
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)

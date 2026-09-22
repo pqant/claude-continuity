@@ -205,30 +205,36 @@ def _cfg(**over):
 
 
 def test_segment_off_when_disabled(cc_home):
-    assert statusline.render_segment(0.1, None, enabled=False) == "⟳ off"
+    assert statusline.render_segment(0.1, None, enabled=False,
+                                     ansi=False) == "⟳ off"
 
 
 def test_segment_off_when_session_flag_set(cc_home):
     rec = _make_session()
     rec["off"] = True
-    assert statusline.render_segment(0.1, rec, enabled=True) == "⟳ off"
+    assert statusline.render_segment(0.1, rec, enabled=True,
+                                     ansi=False) == "⟳ off"
 
 
 def test_segment_unknown_when_no_ratio(cc_home):
-    assert statusline.render_segment(None, None, enabled=True) == "⟳ …"
+    assert statusline.render_segment(None, None, enabled=True,
+                                     ansi=False) == "⟳ …"
 
 
 def test_segment_ok_below_rotate(cc_home):
     rec = _make_session()  # BOOTSTRAPPING
     # ceil, so we never understate (PRD pairs ratio 0.6036 with "⟳ 61%").
-    assert statusline.render_segment(0.6036, rec, enabled=True) == "⟳ 61% ok"
-    assert statusline.render_segment(0.60, rec, enabled=True) == "⟳ 60% ok"
+    assert statusline.render_segment(0.6036, rec, enabled=True,
+                                     ansi=False) == "⟳ 61% ok"
+    assert statusline.render_segment(0.60, rec, enabled=True,
+                                     ansi=False) == "⟳ 60% ok"
 
 
 def test_segment_pending_shows_successor(cc_home):
     rec = _make_session(state_to=["ACTIVE", "WARNED", "ROTATION_PENDING"])
     assert rec["state"] == "ROTATION_PENDING"
-    assert statusline.render_segment(0.63, rec, enabled=True) == "⟳ 63% PENDING→proj-002"
+    assert statusline.render_segment(0.63, rec, enabled=True,
+                                     ansi=False) == "⟳ 63% PENDING→proj-002"
 
 
 def test_segment_handoff_states(cc_home):
@@ -240,7 +246,8 @@ def test_segment_handoff_states(cc_home):
             state.transition(KEY + "-h", 1, s)
         state.transition(KEY + "-h", 1, target)
         rec = state.load_state(KEY + "-h", 1)
-        assert statusline.render_segment(0.73, rec, enabled=True) == "⟳ 73% HANDOFF!"
+        assert statusline.render_segment(0.73, rec, enabled=True,
+                                         ansi=False) == "⟳ 73% HANDOFF!"
 
 
 def test_segment_handoff_checkpoint_states(cc_home):
@@ -250,17 +257,20 @@ def test_segment_handoff_checkpoint_states(cc_home):
               "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED"]:
         state.transition(key, 1, s)
     rec = state.load_state(key, 1)
-    assert statusline.render_segment(0.73, rec, enabled=True) == "⟳ 73% HANDOFF!"
+    assert statusline.render_segment(0.73, rec, enabled=True,
+                                     ansi=False) == "⟳ 73% HANDOFF!"
 
 
 def test_segment_none_record_ok(cc_home):
     # No matching session yet (e.g. before Phase 3 registers it): just ratio+ok.
-    assert statusline.render_segment(0.5, None, enabled=True) == "⟳ 50% ok"
+    assert statusline.render_segment(0.5, None, enabled=True,
+                                     ansi=False) == "⟳ 50% ok"
 
 
 def test_segment_ceil_ignores_float_noise(cc_home):
     # 0.07 * 100 == 7.000000000000001 in IEEE 754 — naive ceil would show 8%.
-    assert statusline.render_segment(0.07, None, enabled=True) == "⟳ 7% ok"
+    assert statusline.render_segment(0.07, None, enabled=True,
+                                     ansi=False) == "⟳ 7% ok"
 
 
 # ---------------------------------------------------------- chaining
@@ -313,7 +323,8 @@ def test_compose_line_appends_segment_after_chained(cc_home):
 
 def test_run_writes_metric_and_renders_segment(cc_home, tmp_path, monkeypatch):
     payload = _payload()
-    line = statusline.run(json.dumps(payload).encode(), _cfg())
+    line = statusline.run(json.dumps(payload).encode(),
+                          _cfg(statusline_ansi=False))
     assert line == "⟳ 9% ok"  # 23170/262144 -> 8.8% -> ceil 9
     m = json.loads(
         (paths.runtime_dir() / f"{payload['session_id']}.json").read_text()
@@ -327,19 +338,21 @@ def test_run_chains_user_statusline(cc_home, tmp_path):
     prev.write_text("#!/bin/sh\nprintf 'hud'\n")
     prev.chmod(0o755)
     payload = _payload()
-    line = statusline.run(json.dumps(payload).encode(), _cfg(chained_statusline=str(prev)))
+    line = statusline.run(json.dumps(payload).encode(),
+                          _cfg(chained_statusline=str(prev), statusline_ansi=False))
     assert line == "hud ⟳ 9% ok"
 
 
 def test_run_disabled_writes_nothing_and_shows_off(cc_home, monkeypatch):
     payload = _payload()
-    line = statusline.run(json.dumps(payload).encode(), _cfg(enabled=False))
+    line = statusline.run(json.dumps(payload).encode(),
+                          _cfg(enabled=False, statusline_ansi=False))
     assert line == "⟳ off"
     assert not (paths.runtime_dir() / f"{payload['session_id']}.json").exists()
 
 
 def test_run_invalid_stdin_does_not_crash(cc_home):
-    line = statusline.run(b"this is not json", _cfg())
+    line = statusline.run(b"this is not json", _cfg(statusline_ansi=False))
     # No metric, no session, ratio unknown.
     assert line == "⟳ …"
 
@@ -378,19 +391,22 @@ def test_is_stale_older_than_ten_minutes(cc_home):
 
 def test_render_segment_rotating_form(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
-                                            "state": "ROTATING"}, True) \
+                                            "state": "ROTATING"}, True,
+                                     ansi=False) \
         == "⟳ 70% ROTATING"
 
 
 def test_render_segment_amcl_form(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
-                                            "state": "AWAITING_MANUAL_CLEAR"}, True) \
+                                            "state": "AWAITING_MANUAL_CLEAR"}, True,
+                                     ansi=False) \
         == "⟳ 70% AMCL"
 
 
 def test_render_segment_cv_stays_handoff(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
-                                            "state": "CHECKPOINT_VERIFIED"}, True) \
+                                            "state": "CHECKPOINT_VERIFIED"}, True,
+                                     ansi=False) \
         == "⟳ 70% HANDOFF!"
 
 
@@ -399,14 +415,14 @@ def test_render_segment_cv_stays_handoff(cc_home):
 
 def test_render_segment_blocked_suffix():
     rec = {"state": "ACTIVE", "name": "spike-repo-001"}
-    assert statusline.render_segment(0.5, rec, True) == "⟳ 50% ok"
+    assert statusline.render_segment(0.5, rec, True, ansi=False) == "⟳ 50% ok"
     assert statusline.render_segment(0.5, rec, True,
-                                     blocked="drop db?") == \
+                                     blocked="drop db?", ansi=False) == \
         "⟳ 50% ok ⛔ BLOCKED"
     assert statusline.render_segment(None, rec, True,
-                                     blocked="x") == "⟳ … ⛔ BLOCKED"
+                                     blocked="x", ansi=False) == "⟳ … ⛔ BLOCKED"
     assert statusline.render_segment(0.5, rec, False,
-                                     blocked="x") == "⟳ off"
+                                     blocked="x", ansi=False) == "⟳ off"
 
 
 def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
@@ -431,4 +447,100 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
     }
     line = statusline.run(json.dumps(payload).encode("utf-8"),
                           config.DEFAULTS)
-    assert "⟳ 50% ok ⛔ BLOCKED" in line
+    # Phase 11: colored by default — assert the plain core and the BLOCKED span.
+    assert "⟳ 50% ok" in line
+    assert "\x1b[1;31m ⛔ BLOCKED\x1b[0m" in line
+
+
+# ------------------------------------------------ Phase 11: color + pulse
+
+_DIM = "\x1b[2m"
+_RESET = "\x1b[0m"
+
+
+def test_pulse_phase_alternates_each_second():
+    assert statusline.pulse_phase(10.0) == 0   # bright
+    assert statusline.pulse_phase(10.999) == 0
+    assert statusline.pulse_phase(11.0) == 1   # dim
+    assert statusline.pulse_phase(11.999) == 1
+    assert statusline.pulse_phase(12.0) == 0
+
+
+def test_segment_ansi_ok_bright_and_dim():
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    assert statusline.render_segment(0.61, rec, True, now=10.0) \
+        == "\x1b[32m⟳ 61% ok" + _RESET
+    # dim phase: softens, never disappears (P11-D3)
+    assert statusline.render_segment(0.61, rec, True, now=11.0) \
+        == _DIM + "\x1b[32m⟳ 61% ok" + _RESET
+
+
+def test_segment_ansi_state_colors():
+    assert statusline.render_segment(
+        0.63, {"name": "p-001", "state": "ROTATION_PENDING"}, True,
+        now=10.0) == "\x1b[33m⟳ 63% PENDING→p-002" + _RESET
+    assert statusline.render_segment(
+        0.7, {"name": "p-001", "state": "ROTATING"}, True,
+        now=10.0) == "\x1b[36m⟳ 70% ROTATING" + _RESET
+    assert statusline.render_segment(
+        0.7, {"name": "p-001", "state": "AWAITING_MANUAL_CLEAR"}, True,
+        now=10.0) == "\x1b[35m⟳ 70% AMCL" + _RESET
+    assert statusline.render_segment(
+        0.73, {"name": "p-001", "state": "HANDOFF_REQUESTED"}, True,
+        now=10.0) == "\x1b[31m⟳ 73% HANDOFF!" + _RESET
+    # dim phase wraps the whole live segment (any state)
+    assert statusline.render_segment(
+        0.7, {"name": "p-001", "state": "ROTATING"}, True,
+        now=11.0) == _DIM + "\x1b[36m⟳ 70% ROTATING" + _RESET
+
+
+def test_segment_ansi_blocked_span_own_color():
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    assert statusline.render_segment(0.5, rec, True, blocked="x", now=10.0) \
+        == "\x1b[32m⟳ 50% ok\x1b[1;31m ⛔ BLOCKED" + _RESET
+    assert statusline.render_segment(0.5, rec, True, blocked="x", now=11.0) \
+        == _DIM + "\x1b[32m⟳ 50% ok\x1b[1;31m ⛔ BLOCKED" + _RESET
+
+
+def test_segment_ansi_off_and_unknown_are_static_gray():
+    off = "\x1b[90m⟳ off" + _RESET
+    unknown = "\x1b[90m⟳ …" + _RESET
+    rec_off = {"state": "ACTIVE", "name": "p-001", "off": True}
+    for now in (10.0, 11.0):  # both pulse phases identical (static)
+        assert statusline.render_segment(0.1, None, False, now=now) == off
+        assert statusline.render_segment(0.1, rec_off, True, now=now) == off
+        assert statusline.render_segment(None, None, True, now=now) == unknown
+
+
+def test_segment_plain_mode_byte_identical_when_ansi_false():
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    assert statusline.render_segment(0.5, rec, True, blocked="x",
+                                     ansi=False) == "⟳ 50% ok ⛔ BLOCKED"
+    assert statusline.render_segment(None, rec, True, blocked="x",
+                                     ansi=False) == "⟳ … ⛔ BLOCKED"
+    assert statusline.render_segment(None, None, True,
+                                     ansi=False) == "⟳ …"
+    # plain mode emits no escape codes
+    assert "\x1b" not in statusline.render_segment(0.5, rec, True,
+                                                   blocked="x", ansi=False)
+
+
+def test_statusline_ansi_default_true():
+    assert config.DEFAULTS["statusline_ansi"] is True
+
+
+def test_run_ansi_off_renders_legacy_plain_line(cc_home, tmp_path):
+    payload = _payload()
+    line = statusline.run(json.dumps(payload).encode(),
+                          _cfg(statusline_ansi=False))
+    assert line == "⟳ 9% ok"
+
+
+def test_run_ansi_on_renders_colored_segment(cc_home, tmp_path, monkeypatch):
+    payload = _payload()
+    monkeypatch.setattr(statusline.time, "time", lambda: 10.0)  # bright
+    line = statusline.run(json.dumps(payload).encode(), _cfg())
+    assert line == "\x1b[32m⟳ 9% ok" + _RESET
+    monkeypatch.setattr(statusline.time, "time", lambda: 11.0)  # dim
+    line = statusline.run(json.dumps(payload).encode(), _cfg())
+    assert line == _DIM + "\x1b[32m⟳ 9% ok" + _RESET

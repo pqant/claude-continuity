@@ -47,6 +47,7 @@ DEFAULTS: dict = {
     "notify_endpoint": "",
     "notify_enabled": False,
     "unattended": False,
+    "statusline_ansi": True,
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",
