@@ -39,10 +39,13 @@ DONE = "DONE"
 # --- pane markers (P10-D6; module constants, not config — YAGNI) -------------
 #: Claude Code prompt glyph — "pane at prompt" = last non-empty line.
 PROMPT_RE = re.compile(r"^\s*❯")
-#: Error strings observed in CC 2.x failure panes (2026-09).
+#: Error strings observed in CC 2.x failure panes (2026-09). The bare
+#: ``error:`` option carries its own boundaries: a trailing ``\b`` inside
+#: the group would never match after the colon (no word boundary follows
+#: a non-word char) and silently drop every bare ``error: …`` line.
 ERROR_TAIL_RE = re.compile(
-    r"(?i)\b(api error|error:|connection (closed|reset|refused)"
-    r"|request timed out|retrying)\b")
+    r"(?i)\b(api error|connection (closed|reset|refused)"
+    r"|request timed out|retrying)\b|\berror\b:")
 
 
 @dataclasses.dataclass
@@ -75,3 +78,75 @@ class HealthState:
             self.down_since = now
             return "down"
         return None
+
+
+# --- pane inspection (P10-D6) -------------------------------------------------
+
+
+def pane_idle(capture: str) -> bool:
+    """True when the pane is AT the prompt (P10-D6 "pane at prompt"):
+    the last non-empty line of the capture matches ``PROMPT_RE`` (the
+    ``❯`` glyph). Trailing blank lines (capture padding) are skipped.
+    """
+    last = None
+    for line in reversed(capture.splitlines()):
+        if line.strip():
+            last = line
+            break
+    return last is not None and bool(PROMPT_RE.match(last))
+
+
+def error_in_tail(capture: str, n: int = 10) -> bool:
+    """True when ``ERROR_TAIL_RE`` matches within the last ``n``
+    NON-PROMPT lines of the capture (P10-D6: an hours-old scrollback
+    error must not trigger; prompt lines are input, not error content).
+    """
+    non_prompt = [ln for ln in capture.splitlines()
+                 if ln.strip() and not PROMPT_RE.match(ln)]
+    return any(ERROR_TAIL_RE.search(ln) for ln in non_prompt[-n:])
+
+
+def classify(rec: dict, last_ts: float | None, capture: str,
+             prev_capture: str | None, now: float, stale_s: float,
+             unchanged_ticks: int = 0) -> str:
+    """P10-D6 liveness matrix (pure; row order per P10-P2).
+
+    ``rec``: the state record (reads ``state``, ``turn_active``).
+    ``last_ts``: ts of the LAST ledger entry of any type (P10-P9: any
+    growth = activity; None = no ledger → stale). ``capture`` /
+    ``prev_capture``: current / previous tick ``capture-pane -p``
+    (prev None = first tick — no change evidence). ``unchanged_ticks``:
+    consecutive ticks after the baseline that saw the SAME capture
+    (P10-P3; FROZEN fires at >= 2). Returns one of the module outcome
+    constants, or the internal ``WAIT`` (row 5 not yet armed).
+    """
+    if rec.get("state") not in ("ACTIVE", "WARNED"):
+        return SKIP  # row 7, checked FIRST — eligibility dominates age
+    if last_ts is not None and now - last_ts <= stale_s:
+        return ALIVE  # row 1
+    if prev_capture is not None and capture != prev_capture:
+        return ALIVE  # row 2 — rendering / tool output
+    if pane_idle(capture):
+        if rec.get("turn_active"):
+            return TURN_DEAD  # row 3 — mid-turn death, Stop never fired
+        if error_in_tail(capture):
+            return STALLED  # row 4 — turn ended in error
+        return IDLE_WAITING  # row 6 — legitimately waiting for the user
+    if unchanged_ticks >= 2:
+        return FROZEN  # row 5 — input closed; detect + push, no nudge
+    return WAIT  # internal: row 5 needs 2 unchanged ticks
+
+
+def pane_pending(capture: str, nudge_text: str) -> bool:
+    """True when the nudge text sits UNsubmitted in the input line: the
+    last non-empty line is a prompt line containing ``nudge_text``
+    (P10-D7.3 — the 11:30 lost-Enter case; the daemon then sends a bare
+    Enter instead of re-typing the text).
+    """
+    last = None
+    for line in reversed(capture.splitlines()):
+        if line.strip():
+            last = line
+            break
+    return (last is not None and bool(PROMPT_RE.match(last))
+            and nudge_text in last)
