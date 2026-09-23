@@ -128,63 +128,68 @@ _HANDOFF_STATES = frozenset({
 # Revision 5 (2026-09-22): the file's 10-cell rest frames are dropped —
 # at the status line's re-render cadence they made the band visible on
 # only ~36% of renders (random on/off "shimmering", user screenshot);
-# the band is now always visible and glides one cell per 150 ms.
+# the band is always visible and glides per tick.
+# Revision 9 (2026-09-23): the effect is ported to its ORIGINAL axis —
+# 24-bit RGB, brighter same-hue band, 50 ms tick (ultrathink.sh,
+# verbatim). Three basic-16 encodings were rejected by the user's eyes
+# (9x bright: theme-eaten; reverse video: "okunmuyor bile"; hue shift:
+# "ne oldugu belirsiz, cooook agir" — a shifted hue on a rainbow has no
+# identity). The 24-bit port is proven on the user's chain: a tmux 3.7b
+# truecolor client emits 38;2 SGR for hex status styles (pty capture
+# 2026-09-23) and the user's eyes read the app's own 24-bit input-box
+# rainbow as "renkli" (the 09-22 "quantized to gray" was the old 0a9b
+# client — different era).
 
-#: Shimmer timing (revision 5, 2026-09-22): 150 ms tick — the 50 ms
-#: ultrathink.sh tick sampled at the status line's re-render cadence made
-#: the band jump 2-6 cells per keystroke; 150 ms glides one or two. The
-#: 10-cell SWEEP_PAD rest is GONE (revision 5): a rest frame left the band
-#: off on ~64% of renders — the random on/off "shimmering" the user
-#: screenshotted; the band is now always visible while the keyword is in
-#: the prompt (revision 4's reactive gate is unchanged).
-SHIMMER_TICK_S = 0.15
+#: Shimmer timing (revision 9): 50 ms tick — the real CC cadence, 3x
+#: faster than the 150 ms the user read as "cooook agir". NO rest frame
+#: (revision 5): a rest would leave the band off on ~64% of renders at
+#: this surface's discrete re-render cadence — the random on/off flicker
+#: the user screenshotted; the band is always visible while the keyword
+#: is in the prompt (revision 4's reactive gate is unchanged).
+SHIMMER_TICK_S = 0.05
 SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the band style
-#: Revision 8 (2026-09-23): the band's hue = own hue + this (mod 7) —
-#: and NOTHING else. The bright-16 variant (91-97) was emitted yet
-#: INVISIBLE on the user's display chain (render log: ut=1 for 2 min, no
-#: band on screen; BRIGHT TEST exonerated tmux; the rainbow's base 31-37
-#: IS visible) → the band differs by COLOR, not brightness: a base hue
-#: shifted 3 never equals the char's own hue nor either neighbour's
-#: static hue. Reverse video (revision 7) is dropped: the inverted 3-char
-#: patch read as corrupted text on the user's display ("okunmuyor bile",
-#: 13:53:5x) — a color patch reads as a highlight, an inverted patch as
-#: breakage.
-SHIMMER_HUE_SHIFT = 3
 
 ANSI_RESET = "\x1b[0m"
 ANSI_BOLD = "\x1b[1m"
 
 
-#: Per-character rainbow (ultrathink.sh, revision 3): 7 (base, shimmer)
-#: basic-16 SGR pairs, cycled ``i % 7`` across the live segment's chars —
-#: the reverse-engineered Claude Code "ultrathink" 7-color rainbow, in a
-#: palette that survives 16-color client down-conversion (the 24-bit
-#: revision-1 palette quantized to GRAY on the user's 16-color tmux
-#: client — observed 2026-09-22, user screenshot). Each pair = normal +
-#: bright variant of one hue; the bright member is NOT used by the band
-#: any more (revision 8: the band is a hue-shifted BASE hue only — the
-#: bright variant was invisible, and reverse video read as corrupted
-#: text, on the user's display chain).
-#: Supersedes the per-state single-hue
-#: colors of revision 2 (user: the segment must be colorful like
-#: ultrathink.sh, not a monochrome pulse).
+#: Per-character rainbow (ultrathink.sh, verbatim, revision 9): 7 BASE
+#: and 7 SHIMMER 24-bit SGR codes, cycled ``i % 7`` across the live
+#: segment's chars — the reverse-engineered Claude Code "ultrathink"
+#: 7-color rainbow. Base = the static per-char hue; SHIMMER = the
+#: BRIGHTER SAME-HUE variant (the band, revision 9: luminance contrast
+#: is the axis the user's display chain actually shows — 9x bright is
+#: theme-eaten, hue shift is identity-less, reverse video reads as
+#: breakage). The 09-22 "24-bit quantized to gray" observation was the
+#: old 0a9b 16-color client; the current chain is proven truecolor
+#: (pty-captured 38;2 SGR from a tmux truecolor client + the user's eyes
+#: on the app's own 24-bit input-box rainbow, 2026-09-23).
 _RAINBOW = [
-    ("\x1b[31m", "\x1b[91m"),  # red
-    ("\x1b[33m", "\x1b[93m"),  # yellow (orange)
-    ("\x1b[32m", "\x1b[92m"),  # green
-    ("\x1b[34m", "\x1b[94m"),  # blue
-    ("\x1b[35m", "\x1b[95m"),  # magenta (indigo/violet)
-    ("\x1b[36m", "\x1b[96m"),  # cyan
-    ("\x1b[37m", "\x1b[97m"),  # white
+    "\x1b[38;2;235;95;87m",   # red
+    "\x1b[38;2;245;139;87m",  # orange
+    "\x1b[38;2;250;195;95m",  # yellow
+    "\x1b[38;2;145;200;130m", # green
+    "\x1b[38;2;130;170;220m", # blue
+    "\x1b[38;2;155;130;200m", # indigo
+    "\x1b[38;2;200;130;180m", # violet
+]
+_SHIMMER = [
+    "\x1b[38;2;250;155;147m",  # red_shimmer
+    "\x1b[38;2;255;185;137m",  # orange_shimmer
+    "\x1b[38;2;255;225;155m",  # yellow_shimmer
+    "\x1b[38;2;185;230;180m",  # green_shimmer
+    "\x1b[38;2;180;205;240m",  # blue_shimmer
+    "\x1b[38;2;195;180;230m",  # indigo_shimmer
+    "\x1b[38;2;230;180;210m",  # violet_shimmer
 ]
 _BLOCKED_BASE = "\x1b[31m"  # red, own bold span
 _COLOR_STATIC = "\x1b[90m"         # dim gray
 
 
 def shimmer_index(now: float, length: int) -> int:
-    """Glimmer cell for wall-clock ``now`` (ultrathink.sh math, revision 5).
+    """Glimmer cell for wall-clock ``now`` (ultrathink.sh math, revision 9).
 
-    ``glimmer = floor(now / 150ms) % length`` — the band sits on the text
+    ``glimmer = floor(now / 50ms) % length`` — the band sits on the text
     at ALL times (no rest frame) and glides one cell per tick, wrapping at
     the end. The ultrathink.sh rest frames are deliberately dropped: the
     status line re-renders only on UI events (11-13 s while the model runs,
@@ -201,15 +206,15 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
            *, shimmer: bool = False) -> str:
     """Wrap one plain segment in ANSI (ultrathink.sh rainbow shimmer).
 
-    Live kinds (any state): a per-character RAINBOW — char ``i`` gets
-    ``_RAINBOW[i % 7]`` (ultrathink.sh's loop). With ``shimmer`` (Phase 11
-    rev 4: the prompt contains ``ultrathink``): the 3-char band (chars
-    within +/-1 of the wall-clock glimmer index) renders the base hue
-    shifted by ``SHIMMER_HUE_SHIFT`` (revision 8 — the bright-16 variant
-    was invisible on the user's display chain; reverse video read as
-    corrupted text, so the band is a COLOR patch only) — repositioned on
-    every CC re-render (the status line is a static string; it cannot
-    self-animate).
+    Live kinds (any state): a per-character 24-bit RAINBOW — char ``i``
+    gets ``_RAINBOW[i % 7]`` (ultrathink.sh's loop, verbatim). With
+    ``shimmer`` (Phase 11 rev 4: the prompt contains ``ultrathink``):
+    the 3-char band (chars within +/-1 of the wall-clock glimmer index)
+    renders ``_SHIMMER[i % 7]`` — the BRIGHTER SAME-HUE variant of the
+    char's own base (revision 9; the real CC axis — luminance contrast.
+    Rejected on this chain: 9x bright theme-eaten, reverse video read as
+    corrupted text, hue shift identity-less) — repositioned on every CC
+    re-render (the status line is a static string; it cannot self-animate).
     Without it: the static rainbow (all base hues — visually the sweep's
     rest frame). Bold, like the original. State is conveyed by the text
     itself, not by a single hue. ``static`` (off/unknown): dim gray, never
@@ -221,15 +226,15 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
     if kind == "static":
         return _COLOR_STATIC + text + ANSI_RESET + blocked_part
     if not shimmer:
-        chars = "".join(_RAINBOW[i % len(_RAINBOW)][0] + ch
+        chars = "".join(_RAINBOW[i % len(_RAINBOW)] + ch
                         for i, ch in enumerate(text))
         return ANSI_BOLD + chars + ANSI_RESET + blocked_part
     glimmer = shimmer_index(now, len(text))
     n = len(_RAINBOW)
     chars = "".join(
-        ((_RAINBOW[(i + SHIMMER_HUE_SHIFT) % n][0]
+        ((_SHIMMER[i % n]
           if abs(i - glimmer) <= SHIMMER_BAND
-          else _RAINBOW[i % n][0]) + ch)
+          else _RAINBOW[i % n]) + ch)
         for i, ch in enumerate(text))
     return ANSI_BOLD + chars + ANSI_RESET + blocked_part
 
@@ -273,9 +278,10 @@ def render_segment(ratio: float | None, record: dict | None,
     (spec §7 risk note).
     Phase 11 (revision 4): with ``ansi`` (default, config
     ``statusline_ansi``) live segments render the ultrathink.sh
-    per-character rainbow (7 basic-16 hues cycled ``i % 7``); ``shimmer``
-    (the prompt contains ``ultrathink`` — Phase 11 rev 4) activates the
-    3-char band (hue-shifted base hue only — revision 8),
+    per-character 24-bit rainbow (7 base hues cycled ``i % 7`` —
+    revision 9); ``shimmer`` (the prompt contains ``ultrathink`` —
+    Phase 11 rev 4) activates the 3-char band (brighter same-hue 24-bit
+    shimmer variant — revision 9),
     position derived from the wall clock (``now`` injected for tests),
     repositioned on every CC re-render. Default: static rainbow.
     ``off``/``…`` are static dim gray. ``ansi=False`` reproduces the
@@ -408,7 +414,10 @@ def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
     """Append this render's diagnostic line; swallow every failure."""
     try:
         if shimmer:
-            visible = re.sub(r"\x1b\[\d+m", "", segment)
+            # [0-9;] — the 24-bit SGR (38;2;R;G;B) carries semicolons;
+            # \d+ alone would keep the escapes in `visible` and skew the
+            # glimmer length (revision 9)
+            visible = re.sub(r"\x1b\[[0-9;]*m", "", segment)
             glim = str(shimmer_index(now, max(len(visible), 1)))
         else:
             glim = "-"
