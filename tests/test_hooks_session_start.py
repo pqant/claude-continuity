@@ -7,6 +7,7 @@ do not register — Phases 5–6 own them.
 """
 
 import json
+import os
 
 import pytest
 
@@ -396,3 +397,67 @@ def test_startup_registration_silent_when_notify_disabled(cc_home, tmp_path,
     assert run_hook("SessionStart",
                     fixture_payload("SessionStart", repo)) == 0
     assert sent == []
+
+
+# --- Phase 10: tmux_session field (P10-D9.1) ---------------------------------
+
+_FAKE_TMUX_NAME = """#!/bin/sh
+if [ "$1" = "display-message" ]; then
+  printf '%s' "cc-spike-repo-0a9b"
+fi
+"""
+
+
+@pytest.fixture
+def fake_tmux_name(tmp_path, monkeypatch):
+    """Fake tmux that answers ``display-message -p`` with a fixed session
+    name. ``$TMUX`` is set (the hook no-ops without it)."""
+    bin_path = tmp_path / "fake-tmux"
+    bin_path.write_text(_FAKE_TMUX_NAME)
+    os.chmod(bin_path, 0o755)
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(bin_path))
+    monkeypatch.setenv("TMUX", "/tmp/fake,4242,0")
+    return bin_path
+
+
+def test_startup_records_tmux_session(cc_home, tmp_path, fake_tmux_name):
+    repo = make_repo(tmp_path)
+    assert run_hook("SessionStart",
+                    fixture_payload("SessionStart", repo)) == 0
+    key = project_key_for(repo)
+    assert state.load_state(key, 1)["tmux_session"] == "cc-spike-repo-0a9b"
+
+
+def test_startup_without_tmux_env_no_field(cc_home, tmp_path, monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    repo = make_repo(tmp_path)
+    assert run_hook("SessionStart",
+                    fixture_payload("SessionStart", repo)) == 0
+    key = project_key_for(repo)
+    assert state.load_state(key, 1).get("tmux_session") is None
+
+
+def test_tmux_failure_is_swallowed(cc_home, tmp_path, monkeypatch):
+    fail = tmp_path / "fail-tmux"
+    fail.write_text("#!/bin/sh\nexit 3\n")
+    os.chmod(fail, 0o755)
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(fail))
+    monkeypatch.setenv("TMUX", "/tmp/fake,4242,0")
+    repo = make_repo(tmp_path)
+    # the hook must still succeed — the field is simply absent
+    assert run_hook("SessionStart",
+                    fixture_payload("SessionStart", repo)) == 0
+    key = project_key_for(repo)
+    assert state.load_state(key, 1).get("tmux_session") is None
+
+
+def test_clear_claim_records_tmux_session(cc_home, tmp_path, fake_tmux_name):
+    repo = make_repo(tmp_path)
+    key, _nnn = _verified_session(repo)
+    state.transition(key, _nnn, "ROTATING", rotation_id="r1")
+    assert run_hook("SessionStart",
+                    payload("SessionStart", repo, session_id="sid-new-2",
+                            source="clear")) == 0
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"
+    assert rec2["tmux_session"] == "cc-spike-repo-0a9b"

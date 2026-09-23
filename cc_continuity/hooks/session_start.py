@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 
 from .. import (bootstrap, checkpoint, ledger, lock, naming, notify, paths,
                 project, state, statusline)
@@ -78,6 +79,7 @@ def _clear(ctx: HookContext) -> dict | None:
         if res is not None:
             bootstrap.write_started(session_id)
             notify_claimed(ctx.cfg, key, res)
+            _record_tmux_session(key, res["new_nnn"])
             return session_start_output(res["bootstrap_text"])
         if ctx.session is None:
             _register(ctx, key, session_id)
@@ -102,6 +104,7 @@ def _register(ctx: HookContext, key: str, session_id: str) -> None:
     notify.safe_send(ctx.cfg, "session_started",
                      slug=notify.project_slug(key), nnn=nnn, name=name,
                      host=notify.host())
+    _record_tmux_session(key, nnn)
 
 
 def _decide_name(key: str, slug: str) -> tuple[str, int]:
@@ -112,6 +115,37 @@ def _decide_name(key: str, slug: str) -> tuple[str, int]:
         return env_name, project.next_counter(key, requested=seq)
     nnn = project.next_counter(key)
     return naming.logical_name(slug, nnn), nnn
+
+
+def _tmux_bin() -> str:
+    return os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
+
+
+def _record_tmux_session(key: str, nnn: int) -> None:
+    """P10-D9.1: record the pane's tmux session name (the watchdog's
+    primary nudge target).
+
+    Only when ``$TMUX`` is set; one fast subprocess (2 s timeout — the
+    hook keeps its ~100 ms budget in the common case); every failure
+    path is swallowed — this must never break the hook (P10-D12).
+    """
+    if not os.environ.get("TMUX"):
+        return
+    try:
+        proc = subprocess.run(
+            [_tmux_bin(), "display-message", "-p", "#{session_name}"],
+            capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if proc.returncode != 0:
+        return
+    name = proc.stdout.decode(errors="replace").strip()
+    if not name:
+        return
+    try:
+        state.update_fields(key, nnn, tmux_session=name)
+    except Exception:
+        pass
 
 
 def _pending_notice(ctx: HookContext, key: str) -> dict | None:
