@@ -514,6 +514,25 @@ def test_shimmer_index_math():
     assert statusline.shimmer_index(0.26 + 0.4, 8) == 5
 
 
+def test_shimmer_advance_constant_speed():
+    # revision 10 (2026-09-23): the band advances SHIMMER_CELLS_PER_S
+    # cells per second of WALL TIME, independent of how often CC
+    # re-renders (discrete UI events: per keystroke, ~2 Hz per streaming
+    # batch, none while idle). A fixed tick sampled per render teleports
+    # 10-20 cells at 2 Hz — the "cok ama cok yavas" crawl (render log
+    # 18:5x: two renders/sec while streaming).
+    # first render: start at 0
+    assert statusline.shimmer_advance(100.0, None) == 0.0
+    # 0.5 s elapsed at 4 cells/s = 2 cells
+    assert statusline.shimmer_advance(100.5, (100.0, 0.0)) == 2.0
+    # wraps: 7 + 0.5s*4 = 9
+    assert statusline.shimmer_advance(101.0, (100.5, 7.0)) == 9.0
+    # zero elapsed: no movement (same render instant / duplicate run)
+    assert statusline.shimmer_advance(100.5, (100.5, 3.25)) == 3.25
+    # negative dt (clock skew): clamped, never rewinds
+    assert statusline.shimmer_advance(99.0, (100.0, 1.0)) == 1.0
+
+
 def test_shimmer_band_always_visible_no_rest_frame():
     # revision 5: EVERY render carries the band — the rest frame that left
     # it off on ~64% of renders was the "shimmering" flicker (2026-09-22)
@@ -814,9 +833,32 @@ def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    # revision 9 math: floor(0.62 / 0.05) % 7 = 5 → band = glimmer ± 1
-    assert line == _rainbow("⟳ 9% ok", band={4, 5, 6})
+    # revision 10: fresh state → sweep starts at cell 0 → band {0,1}
+    # (no wrap: the band is |i−0| ≤ 1 = 2 chars at the left edge)
+    assert line == _rainbow("⟳ 9% ok", band={0, 1})
     assert _pane_calls(log) == [["capture-pane", "-p"]]
+
+
+def test_run_sweep_advances_constant_speed_across_renders(cc_home,
+                                                          monkeypatch,
+                                                          fake_tmux_pane):
+    # revision 10: two renders 500 ms apart → the band moves exactly
+    # 0.5 s * SHIMMER_CELLS_PER_S = 2 cells, no matter that the
+    # renders are a half-second apart (the old fixed-tick math would
+    # have jumped 10 cells = a teleport).
+    pane, log = fake_tmux_pane
+    # binary-exact stamps (0.5/1.0/1.25): 1.12-0.62 = 0.4999…4 in
+    # double and int() of 1.9999… would not move the band
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.5)
+    first = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert first == _rainbow("⟳ 9% ok", band={0, 1})
+    monkeypatch.setattr(statusline.time, "time", lambda: 1.0)
+    second = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert second == _rainbow("⟳ 9% ok", band={1, 2, 3})
+    # and another 250 ms (fractional accumulation: +1 cell)
+    monkeypatch.setattr(statusline.time, "time", lambda: 1.25)
+    third = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert third == _rainbow("⟳ 9% ok", band={2, 3, 4})
 
 
 def test_run_stays_static_when_prompt_clean(cc_home, monkeypatch,
@@ -855,16 +897,16 @@ def test_run_appends_render_log_with_gate_state(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={4, 5, 6})
+    assert line == _rainbow("⟳ 9% ok", band={0, 1})
     lp = _render_log_path(cc_home)
     assert lp.is_file()
     lines = lp.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
-    # now=0.62: floor(0.62/0.05) % 7 = 5 → glim=5
+    # revision 10: fresh state → sweep cell 0
     assert "live=1" in lines[0]
     assert "ansi=1" in lines[0]
     assert "ut=1" in lines[0]
-    assert "glim=5" in lines[0]
+    assert "glim=0" in lines[0]
     assert "box='❯ fix the ultrathink flag'" in lines[0]
 
 
