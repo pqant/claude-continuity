@@ -48,6 +48,12 @@ DEFAULTS: dict = {
     "notify_enabled": False,
     "unattended": False,
     "statusline_ansi": True,
+    "watchdog_enabled": False,
+    "watchdog_health_url": "",
+    "watchdog_interval_s": 300,
+    "watchdog_stale_minutes": 45,
+    "watchdog_max_nudges": 3,
+    "watchdog_nudge_text": "continue",
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",
