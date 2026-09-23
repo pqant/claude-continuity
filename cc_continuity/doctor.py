@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -228,6 +229,39 @@ def run_doctor(home: Path, runner=subprocess.run,
     if store.is_dir():
         mode = os.stat(store).st_mode & 0o777
         add("store-perms", True, oct(mode), warning=mode != 0o700)
+
+    # 18: watchdog (P10-D2): disabled → informational ok; enabled →
+    #     plist present + launchd-loaded + baked binary still exists
+    #     (P10-P8 R5). Never raises (half-installed machine rule).
+    if not (cfg or {}).get("watchdog_enabled", False):
+        add("watchdog", True, "disabled (watchdog_enabled: false)")
+    else:
+        from . import watchdogd  # local: doctor stays import-light
+        plist = watchdogd.plist_path(home)
+        plist_ok = plist.is_file()
+        binary_ok = True
+        if plist_ok:
+            try:
+                pl = plistlib.loads(plist.read_bytes())
+                binary = str(pl["ProgramArguments"][0])
+                binary_ok = os.path.isfile(binary)
+            except (OSError, ValueError, KeyError, IndexError,
+                    plistlib.InvalidFileException):
+                binary_ok = False
+        loaded = watchdogd.status_plist(home, runner=runner) is not None
+        if plist_ok and loaded and binary_ok:
+            add("watchdog", True, "loaded (launchd KeepAlive)")
+        elif not plist_ok:
+            add("watchdog", False,
+                "enabled but not installed — cc-continuity watchdog "
+                "install")
+        elif not binary_ok:
+            add("watchdog", False,
+                "plist binary missing — cc-continuity watchdog install")
+        else:
+            add("watchdog", False,
+                "plist present but not loaded — cc-continuity watchdog "
+                "start")
 
     return out
 
