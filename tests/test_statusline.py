@@ -675,17 +675,18 @@ def test_run_ansi_off_renders_legacy_plain_line(cc_home, tmp_path):
     assert line == "⟳ 9% ok"
 
 
-def test_run_ansi_on_renders_static_rainbow(cc_home, tmp_path, monkeypatch):
-    # Phase 11 rev 4 default: no band (the shimmer needs "ultrathink" in
-    # the prompt, rev 4 — see the block below).
+def test_run_ansi_on_renders_sweeping_rainbow(cc_home, tmp_path,
+                                              monkeypatch):
+    # Revision 11: no word gate — the band sweeps from the first render
+    # on (fresh state → cell 0; 0.55 s later → 0.55*4.0 → cell 2).
     payload = _payload()
     monkeypatch.setattr(statusline.time, "time", lambda: 0.0)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok")
-    # wall clock moves, band stays off
+    assert line == _rainbow("⟳ 9% ok", band={0, 1})
+    # wall clock moves → the band moves with it
     monkeypatch.setattr(statusline.time, "time", lambda: 0.55)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok")
+    assert line == _rainbow("⟳ 9% ok", band={1, 2, 3})
 
 
 # -------------------------------- Phase 11 rev 4: reactive shimmer
@@ -861,13 +862,15 @@ def test_run_sweep_advances_constant_speed_across_renders(cc_home,
     assert third == _rainbow("⟳ 9% ok", band={2, 3, 4})
 
 
-def test_run_stays_static_when_prompt_clean(cc_home, monkeypatch,
-                                            fake_tmux_pane):
+def test_run_bands_even_with_clean_prompt(cc_home, monkeypatch,
+                                          fake_tmux_pane):
+    # revision 11: the word gate is gone — the sweep runs whether or
+    # not "ultrathink" sits in the input box
     pane, log = fake_tmux_pane
     _set_pane(pane, _PANE_DECOY)
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok")
+    assert line == _rainbow("⟳ 9% ok", band={0, 1})
 
 
 def test_run_disabled_never_reads_pane(cc_home, fake_tmux_pane):
@@ -910,14 +913,16 @@ def test_run_appends_render_log_with_gate_state(cc_home, monkeypatch,
     assert "box='❯ fix the ultrathink flag'" in lines[0]
 
 
-def test_run_render_log_static_when_box_clean(cc_home, monkeypatch,
-                                              fake_tmux_pane):
+def test_run_render_log_bands_when_box_clean(cc_home, monkeypatch,
+                                             fake_tmux_pane):
+    # revision 11: box clean → ut=0 (honest gate state) but the sweep
+    # runs anyway → glim is logged
     pane, log = fake_tmux_pane
     _set_pane(pane, _PANE_DECOY)  # keyword only in scrollback
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     statusline.run(json.dumps(_payload()).encode(), _cfg())
     line = _render_log_path(cc_home).read_text(encoding="utf-8").splitlines()[-1]
-    assert "live=1" in line and "ut=0" in line and "glim=-" in line
+    assert "live=1" in line and "ut=0" in line and "glim=0" in line
 
 
 def test_run_render_log_disabled_never_spawns(cc_home, fake_tmux_pane):

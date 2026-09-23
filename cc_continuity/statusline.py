@@ -344,9 +344,10 @@ def render_segment(ratio: float | None, record: dict | None,
     Phase 11 (revision 4): with ``ansi`` (default, config
     ``statusline_ansi``) live segments render the ultrathink.sh
     per-character 24-bit rainbow (7 base hues cycled ``i % 7`` —
-    revision 9); ``shimmer`` (the prompt contains ``ultrathink`` —
-    Phase 11 rev 4) activates the 3-char band (brighter same-hue 24-bit
-    shimmer variant — revision 9),
+    revision 9); ``shimmer`` activates the 3-char band (brighter
+    same-hue 24-bit shimmer variant — revision 9; revision 11: the band
+    is ALWAYS on for live segments — the ultrathink word gate is gone,
+    the parameter stays for static unit previews),
     position derived from the wall clock (``now`` injected for tests),
     repositioned on every CC re-render. Default: static rainbow.
     ``off``/``…`` are static dim gray. ``ansi=False`` reproduces the
@@ -475,12 +476,17 @@ _RENDER_LOG_MAX_BYTES = 32 * 1024
 _RENDER_LOG_KEEP_LINES = 500
 
 
-def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
+def _render_log(enabled: bool, ansi: bool, live: bool, word: bool,
                 now: float, region: list[str] | None, segment: str,
                 sweep_pos: float | None = None) -> None:
-    """Append this render's diagnostic line; swallow every failure."""
+    """Append this render's diagnostic line; swallow every failure.
+
+    ``word`` = the ultrathink gate state (ut=) — revision 11: it no
+    longer controls the band (always on when live+ansi); it is logged
+    for diagnostics only.
+    """
     try:
-        if shimmer:
+        if live and ansi:
             # [0-9;] — the 24-bit SGR (38;2;R;G;B) carries semicolons;
             # \d+ alone would keep the escapes in `visible` and skew the
             # glimmer length (revision 9)
@@ -497,7 +503,7 @@ def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(f"{ts} live={int(live)} ansi={int(ansi)}"
-                    f" ut={int(shimmer)} glim={glim} box='{box}'\n")
+                    f" ut={int(word)} glim={glim} box='{box}'\n")
         if path.stat().st_size > _RENDER_LOG_MAX_BYTES:
             lines = path.read_text(encoding="utf-8").splitlines()
             path.write_text(
@@ -580,14 +586,19 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     ansi = bool(cfg.get("statusline_ansi", True))
     live = (enabled and ratio is not None
             and not (record is not None and record.get("off")))
-    # Phase 11 rev 4: bright band only while the prompt (the pane's input
-    # box) contains "ultrathink"; a static/off segment never reads the
-    # pane (short-circuit). One capture feeds both the gate and the
-    # render diagnostic log.
+    # Revision 11: the sweep is ALWAYS on for live ansi segments — the
+    # ultrathink word gate is gone. The gate made the effect invisible by
+    # default (it only appeared while the word sat in the input box, and
+    # an invisible-by-default shimmer reads as "calismiyor"); the band
+    # now moves on its own at SHIMMER_CELLS_PER_S, no typing required.
+    # A static/off segment still never reads the pane (short-circuit);
+    # the capture feeds the render diagnostic log only (ut= stays
+    # honest: 1 = the word WAS in the box).
     now = time.time()
     region = _input_box_lines() if (ansi and live) else None
-    shimmer = bool(region) and bool(
+    word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
+    shimmer = ansi and live
     # Revision 10: constant-speed sweep — the band advances
     # SHIMMER_CELLS_PER_S cells per second of wall time; the position is
     # persisted so renders however far apart (per keystroke, ~2 Hz per
@@ -601,7 +612,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     segment = render_segment(ratio, record, enabled, blocked=blocked,
                              ansi=ansi, now=now, shimmer=shimmer,
                              shimmer_pos=sweep_pos)
-    _render_log(enabled, ansi, live, shimmer, now, region, segment,
+    _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)
