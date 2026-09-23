@@ -150,3 +150,50 @@ def pane_pending(capture: str, nudge_text: str) -> bool:
             break
     return (last is not None and bool(PROMPT_RE.match(last))
             and nudge_text in last)
+
+
+# --- nudge state machine (P10-D7) --------------------------------------------
+
+
+@dataclasses.dataclass
+class Episode:
+    """Per-(project, nnn) nudge episode (in memory; P10-D7/P10-P4).
+
+    ``n``: attempts sent so far (NUDGE/RESEND count; SEND_ENTER does
+    not — it completes the current attempt). ``nudge_ts``: ts of the
+    last nudge (verification = a ``user_prompt`` ledger entry with
+    ``ts > nudge_ts`` — the 11:30 lesson). ``waiting_health``:
+    informational — the episode opened while the server was down.
+    ``given_up``: GIVE_UP fired; DONE until a human ``user_prompt``
+    resets the episode (the daemon performs the reset, P10-P4).
+    """
+    n: int = 0
+    nudge_ts: float | None = None
+    waiting_health: bool = False
+    given_up: bool = False
+
+
+def nudge_action(health: str, ep: Episode, pane_pending: bool,
+                 max_nudges: int) -> str:
+    """P10-D7 nudge state machine (pure — the daemon executes the
+    answer and owns all side effects).
+
+    ``health``: the current ``HealthState.status``. ``ep``: the
+    episode so far. ``pane_pending``: the last nudge text sits
+    unsubmitted in the input line (``pane_pending()``).
+    ``max_nudges``: ``watchdog_max_nudges``.
+
+    First nudge (``n == 0``): NUDGE only when health is UP — a nudge is
+    a model call, so DOWN/UNKNOWN waits (P10-D7.1). Afterwards: pending
+    input → SEND_ENTER (a bare Enter is free even while DOWN); text
+    absent → RESEND (counts as the next attempt) until
+    ``n >= max_nudges`` → GIVE_UP (P10-D7.4). ``given_up`` → DONE until
+    a human ``user_prompt``.
+    """
+    if ep.given_up:
+        return DONE
+    if ep.n == 0:
+        return NUDGE if health == "UP" else WAIT_HEALTH
+    if pane_pending:
+        return SEND_ENTER
+    return RESEND if ep.n < max_nudges else GIVE_UP
