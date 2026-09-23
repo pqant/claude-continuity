@@ -123,3 +123,28 @@ def test_load_config_merges_notify_and_unattended(cc_home, tmp_path):
     assert cfg["notify_enabled"] is True
     assert cfg["notify_endpoint"] == "https://ntfy.sh/example-topic"
     assert cfg["unattended"] is True
+
+
+def test_defaults_have_phase10_keys():
+    assert config.DEFAULTS["watchdog_enabled"] is False
+    assert config.DEFAULTS["watchdog_health_url"] == ""
+    assert config.DEFAULTS["watchdog_interval_s"] == 300
+    assert config.DEFAULTS["watchdog_stale_minutes"] == 45
+    assert config.DEFAULTS["watchdog_max_nudges"] == 3
+    assert config.DEFAULTS["watchdog_nudge_text"] == "continue"
+
+
+def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({
+        "watchdog_enabled": True,
+        "watchdog_health_url": "http://127.0.0.1:18000/health",
+        "watchdog_interval_s": 60,
+        "watchdog_stale_minutes": 30}), encoding="utf-8")
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["watchdog_enabled"] is True
+    assert cfg["watchdog_health_url"] == "http://127.0.0.1:18000/health"
+    assert cfg["watchdog_interval_s"] == 60
+    assert cfg["watchdog_stale_minutes"] == 30
+    # unset keys keep defaults
+    assert cfg["watchdog_max_nudges"] == 3
+    assert cfg["watchdog_nudge_text"] == "continue"
