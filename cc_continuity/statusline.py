@@ -321,39 +321,91 @@ def _tmux_bin() -> str:
     return os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
 
 
-def prompt_has_ultrathink(timeout: float = 1.0) -> bool:
-    """True while the pane's input box contains the word ``ultrathink``.
+def _input_box_lines(timeout: float = 1.0) -> list[str] | None:
+    """The pane's input-box region, or None on any failure.
 
-    Phase 11 rev 4: ``tmux capture-pane -p`` on the current pane, then
-    search ONLY the input-box region — the last ``❯``-prefixed line
-    through the next line consisting solely of ``─`` (CC's input box; a
-    wrapped prompt stays inside it). Scrollback never triggers. Every
-    failure path (no ``$TMUX``, spawn error, timeout, non-zero exit)
-    returns False: detection must never break the status line.
+    Phase 11 rev 4: ``tmux capture-pane -p`` on the current pane; the
+    region is the last ``❯``-prefixed line through the next line
+    consisting solely of ``─`` (CC's input box; a wrapped prompt stays
+    inside it). Scrollback is never part of the region. Every failure
+    path (no ``$TMUX``, spawn error, timeout, non-zero exit, no ``❯``
+    line) returns None: detection must never break the status line.
     """
     if not os.environ.get("TMUX"):
-        return False
+        return None
     try:
         proc = subprocess.run([_tmux_bin(), "capture-pane", "-p"],
                               capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
     if proc.returncode != 0:
-        return False
+        return None
     lines = proc.stdout.decode("utf-8", "replace").splitlines()
     start = None
     for i, line in enumerate(lines):
         if line.lstrip().startswith("❯"):
             start = i
     if start is None:
-        return False
+        return None
     region = []
     for line in lines[start:]:
         region.append(line)
         stripped = line.strip()
         if stripped and set(stripped) == {_INPUT_BORDER}:
             break
-    return bool(ULTRATHINK_RE.search("\n".join(region)))
+    return region
+
+
+def prompt_has_ultrathink(timeout: float = 1.0) -> bool:
+    """True while the pane's input box contains the word ``ultrathink``.
+
+    Phase 11 rev 4: searches ONLY the input-box region
+    (``_input_box_lines``) — the last ``❯``-prefixed line through the
+    next all-``─`` border line. Scrollback never triggers; every failure
+    path returns False: detection must never break the status line.
+    """
+    region = _input_box_lines(timeout)
+    return bool(region) and bool(
+        ULTRATHINK_RE.search("\n".join(region)))
+
+
+# ------------------------- render diagnostic log (2026-09-23 bug hunt)
+#
+# One line per ``run()`` into ``runtime/statusline-render.log``:
+# ``<ts> live=<01> ansi=<01> ut=<01> glim=<n|-> box='<first ❯ line>'``.
+# This is the evidence the shimmer bug hunt needs from LIVE renders —
+# the real re-render cadence, the gate state, and exactly what the gate
+# saw — without guessing. Append-only, size-capped, and it must never
+# raise (the status line survives any log failure).
+
+_RENDER_LOG_NAME = "statusline-render.log"
+_RENDER_LOG_MAX_BYTES = 32 * 1024
+_RENDER_LOG_KEEP_LINES = 500
+
+
+def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
+                now: float, region: list[str] | None, segment: str) -> None:
+    """Append this render's diagnostic line; swallow every failure."""
+    try:
+        if shimmer:
+            visible = re.sub(r"\x1b\[\d+m", "", segment)
+            glim = str(shimmer_index(now, max(len(visible), 1)))
+        else:
+            glim = "-"
+        box = region[0][:48] if region else "-"
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        path = paths.runtime_dir() / _RENDER_LOG_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{ts} live={int(live)} ansi={int(ansi)}"
+                    f" ut={int(shimmer)} glim={glim} box='{box}'\n")
+        if path.stat().st_size > _RENDER_LOG_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            path.write_text(
+                "\n".join(lines[-_RENDER_LOG_KEEP_LINES:]) + "\n",
+                encoding="utf-8")
+    except Exception:  # the status line must never break on logging
+        pass
 
 
 # ---------------------------------------------------------------- chaining
@@ -431,9 +483,14 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             and not (record is not None and record.get("off")))
     # Phase 11 rev 4: bright band only while the prompt (the pane's input
     # box) contains "ultrathink"; a static/off segment never reads the
-    # pane (short-circuit).
-    shimmer = ansi and live and prompt_has_ultrathink()
+    # pane (short-circuit). One capture feeds both the gate and the
+    # render diagnostic log.
+    now = time.time()
+    region = _input_box_lines() if (ansi and live) else None
+    shimmer = bool(region) and bool(
+        ULTRATHINK_RE.search("\n".join(region)))
     segment = render_segment(ratio, record, enabled, blocked=blocked,
-                             ansi=ansi, shimmer=shimmer)
+                             ansi=ansi, now=now, shimmer=shimmer)
+    _render_log(enabled, ansi, live, shimmer, now, region, segment)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)

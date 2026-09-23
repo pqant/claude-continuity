@@ -756,3 +756,73 @@ def test_run_disabled_never_reads_pane(cc_home, fake_tmux_pane):
                           _cfg(enabled=False))
     assert line == "\x1b[90m⟳ off" + _RESET
     assert _pane_calls(log) == []
+
+
+# --------------------------- render diagnostic log (flicker bug hunt)
+#
+# Every ``run()`` appends one line to ``runtime/statusline-render.log``:
+# wall-clock ts, gate states (live/ansi/ut), the band's glimmer cell, and
+# the ``❯`` line the gate looked at. The 2026-09-23 "shimmer not working"
+# hunt needs exactly this evidence from LIVE renders (cadence + gate
+# input) without guessing.
+
+
+def _render_log_path(cc_home):
+    return paths.runtime_dir() / "statusline-render.log"
+
+
+def test_run_appends_render_log_with_gate_state(cc_home, monkeypatch,
+                                                fake_tmux_pane):
+    pane, log = fake_tmux_pane  # default pane carries the keyword
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert line == _rainbow("⟳ 9% ok", band={3, 4, 5})
+    lp = _render_log_path(cc_home)
+    assert lp.is_file()
+    lines = lp.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    # now=0.62: floor(0.62/0.15) % 7 = 4 → glim=4
+    assert "live=1" in lines[0]
+    assert "ansi=1" in lines[0]
+    assert "ut=1" in lines[0]
+    assert "glim=4" in lines[0]
+    assert "box='❯ fix the ultrathink flag'" in lines[0]
+
+
+def test_run_render_log_static_when_box_clean(cc_home, monkeypatch,
+                                              fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_DECOY)  # keyword only in scrollback
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
+    statusline.run(json.dumps(_payload()).encode(), _cfg())
+    line = _render_log_path(cc_home).read_text(encoding="utf-8").splitlines()[-1]
+    assert "live=1" in line and "ut=0" in line and "glim=-" in line
+
+
+def test_run_render_log_disabled_never_spawns(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    statusline.run(json.dumps(_payload()).encode(), _cfg(enabled=False))
+    line = _render_log_path(cc_home).read_text(encoding="utf-8").splitlines()[-1]
+    assert "live=0" in line and "ut=0" in line
+    assert _pane_calls(log) == []  # short-circuit preserved
+
+
+def test_render_log_caps_growth(cc_home):
+    lp = _render_log_path(cc_home)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.write_text("\n".join(f"old-{i:04d} padding-padding" for i in range(4000))
+                  + "\n", encoding="utf-8")
+    statusline.run(b"not json", _cfg(statusline_ansi=False))
+    lines = lp.read_text(encoding="utf-8").splitlines()
+    assert len(lines) <= 600  # capped: keep newest 500 + this render
+    assert "live=" in lines[-1]
+
+
+def test_render_log_never_breaks_run(cc_home):
+    # a directory squatting on the log path must not break the status line
+    lp = _render_log_path(cc_home)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.mkdir()
+    line = statusline.run(json.dumps(_payload()).encode(),
+                          _cfg(statusline_ansi=False))
+    assert line == "⟳ 9% ok"
