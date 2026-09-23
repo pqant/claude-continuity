@@ -174,6 +174,14 @@ def _fmt_ratio(r: object) -> str:
     return "—"
 
 
+def _fmt_minutes(s: float) -> str:
+    """Seconds → ``"42m"`` / ``"1h 05m"`` (the ``dgx_up`` downtime)."""
+    m = int(s) // 60
+    if m < 60:
+        return f"{m}m"
+    return f"{m // 60}h {m % 60:02d}m"
+
+
 def build_message(event: str, *, slug: str, nnn: int,
                   **fields) -> tuple[str, str, str]:
     """(title, body, priority) for one lifecycle event (spec §5, verbatim
@@ -223,6 +231,24 @@ def build_message(event: str, *, slug: str, nnn: int,
     elif event == "session_end":
         t, pr = "■ cc-continuity: session ended", "default"
         b = f"proj={slug} {p} reason={fields['reason']}"
+    elif event == "dgx_down":
+        t, pr = "🔌 cc-continuity: model server DOWN", "urgent"
+        b = (f"host={fields['host']} — probing every "
+             f"{fields['interval_min']} min; nudges deferred")
+    elif event == "dgx_up":
+        t, pr = "🔌 cc-continuity: model server back", "high"
+        b = f"down for {_fmt_minutes(fields['downtime_s'])} — nudges resume"
+    elif event == "turn_dead":
+        t, pr = "⟲ cc-continuity: turn died — recovering", "high"
+        b = (f"proj={slug} {p} idle {fields['idle_minutes']}m — "
+             f"nudge 1/{fields['max_nudges']}")
+    elif event == "turn_recovered":
+        t, pr = "✅ cc-continuity: turn recovered", "default"
+        b = (f"proj={slug} {p} nudge {fields['nudge']} "
+             "verified (user_prompt)")
+    elif event == "freeze_detected":
+        t, pr = "🧊 cc-continuity: retry-loop freeze?", "high"
+        b = f"proj={slug} {p} pane stuck, input closed — no auto-fix"
     else:
         raise ValueError(f"unknown notify event {event!r}")
     if len(b) > 200:
