@@ -140,14 +140,28 @@ _HANDOFF_STATES = frozenset({
 # rainbow as "renkli" (the 09-22 "quantized to gray" was the old 0a9b
 # client — different era).
 
-#: Shimmer timing (revision 9): 50 ms tick — the real CC cadence, 3x
-#: faster than the 150 ms the user read as "cooook agir". NO rest frame
-#: (revision 5): a rest would leave the band off on ~64% of renders at
-#: this surface's discrete re-render cadence — the random on/off flicker
-#: the user screenshotted; the band is always visible while the keyword
-#: is in the prompt (revision 4's reactive gate is unchanged).
+#: Shimmer timing. Revision 10 (2026-09-23): the band position is
+#: wall-time based, NOT tick sampled per render — CC re-renders the
+#: status line on discrete UI events only (per keystroke, ~2 Hz per
+#: streaming batch, none while idle; refreshInterval's minimum is 1 s,
+#: schema-verified from the 2.1.209 binary), so a fixed tick advances
+#: 10-20 cells per render at 2 Hz — the "cok ama cok yavas" crawl the
+#: user reported right after accepting the 24-bit encoding (render log
+#: 18:5x: two renders/sec while streaming). The sweep now advances
+#: SHIMMER_CELLS_PER_S cells per second of wall clock: at 2 Hz renders
+#: that is 2 cells/render (a fast continuous sweep), at 10 Hz typing
+#: it is 0.4 (fractional accumulation) — perceived speed is constant
+#: no matter the cadence. SHIMMER_TICK_S is the fallback for
+#: render_segment calls without sweep state (direct API use, unit
+#: previews). NO rest frame (revision 5) and the reactive gate
+#: (revision 4) are unchanged.
 SHIMMER_TICK_S = 0.05
 SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the band style
+#: Perceived sweep speed (revision 10): cells per second of wall time.
+#: 4 → a 2 s sweep over the 8-char "⟳ NN% ok" form; at the 2 Hz
+#: streaming cadence the band steps 2 cells per render — fast, but one
+#: cell at a time on any slower surface (never a teleport).
+SHIMMER_CELLS_PER_S = 4.0
 
 ANSI_RESET = "\x1b[0m"
 ANSI_BOLD = "\x1b[1m"
@@ -202,19 +216,66 @@ def shimmer_index(now: float, length: int) -> int:
     return int(now // SHIMMER_TICK_S) % length
 
 
+_SHIMMER_STATE_NAME = "shimmer-state.json"
+
+
+def shimmer_advance(now: float, prev: "tuple[float, float] | None") -> float:
+    """Sweep position in cells (fractional) at wall clock ``now``.
+
+    Revision 10: advances SHIMMER_CELLS_PER_S cells per second of wall
+    time from ``prev`` = (last_now, last_pos) — or starts at 0.0 when
+    ``prev`` is None (first render / lost state). The perceived speed is
+    therefore independent of CC's re-render cadence. Negative dt (clock
+    skew) is clamped: the sweep never rewinds.
+    """
+    if prev is None:
+        return 0.0
+    last_now, last_pos = prev
+    dt = max(0.0, now - last_now)
+    return last_pos + dt * SHIMMER_CELLS_PER_S
+
+
+def _shimmer_state_path():
+    return paths.runtime_dir() / _SHIMMER_STATE_NAME
+
+
+def _read_shimmer_state() -> "tuple[float, float] | None":
+    try:
+        rec = json.loads(_shimmer_state_path().read_text(encoding="utf-8"))
+        return float(rec["t"]), float(rec["pos"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _write_shimmer_state(now: float, pos: float) -> None:
+    """Persist the sweep clock; swallow every failure (rev-4 discipline:
+    state must never break the status line)."""
+    try:
+        path = _shimmer_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"t": now, "pos": pos}),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _style(kind: str, text: str, blocked: str | None, now: float,
-           *, shimmer: bool = False) -> str:
+           *, shimmer: bool = False,
+           shimmer_pos: float | None = None) -> str:
     """Wrap one plain segment in ANSI (ultrathink.sh rainbow shimmer).
 
     Live kinds (any state): a per-character 24-bit RAINBOW — char ``i``
     gets ``_RAINBOW[i % 7]`` (ultrathink.sh's loop, verbatim). With
     ``shimmer`` (Phase 11 rev 4: the prompt contains ``ultrathink``):
-    the 3-char band (chars within +/-1 of the wall-clock glimmer index)
-    renders ``_SHIMMER[i % 7]`` — the BRIGHTER SAME-HUE variant of the
-    char's own base (revision 9; the real CC axis — luminance contrast.
-    Rejected on this chain: 9x bright theme-eaten, reverse video read as
-    corrupted text, hue shift identity-less) — repositioned on every CC
-    re-render (the status line is a static string; it cannot self-animate).
+    the 3-char band (chars within +/-1 of the glimmer cell) renders
+    ``_SHIMMER[i % 7]`` — the BRIGHTER SAME-HUE variant of the char's own
+    base (revision 9; the real CC axis — luminance contrast. Rejected on
+    this chain: 9x bright theme-eaten, reverse video read as corrupted
+    text, hue shift identity-less). The glimmer cell comes from
+    ``shimmer_pos`` (revision 10: a wall-time constant-speed sweep
+    advanced in ``run()`` and persisted between renders) or falls back
+    to the tick math — the status line is a static string; it cannot
+    self-animate, every CC re-render is the sweep's exact position.
     Without it: the static rainbow (all base hues — visually the sweep's
     rest frame). Bold, like the original. State is conveyed by the text
     itself, not by a single hue. ``static`` (off/unknown): dim gray, never
@@ -229,7 +290,10 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
         chars = "".join(_RAINBOW[i % len(_RAINBOW)] + ch
                         for i, ch in enumerate(text))
         return ANSI_BOLD + chars + ANSI_RESET + blocked_part
-    glimmer = shimmer_index(now, len(text))
+    if shimmer_pos is None:
+        glimmer = shimmer_index(now, len(text))  # fallback: no sweep state
+    else:
+        glimmer = int(shimmer_pos) % len(text)  # revision 10: wall-time sweep
     n = len(_RAINBOW)
     chars = "".join(
         ((_SHIMMER[i % n]
@@ -264,7 +328,8 @@ def render_segment(ratio: float | None, record: dict | None,
                    enabled: bool, blocked: str | None = None,
                    *, ansi: bool = True,
                    now: float | None = None,
-                   shimmer: bool = False) -> str:
+                   shimmer: bool = False,
+                   shimmer_pos: float | None = None) -> str:
     """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
@@ -316,17 +381,18 @@ def render_segment(ratio: float | None, record: dict | None,
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
         return _style("pending", f"⟳ {pct}% PENDING→{successor}",
-                      blocked_text, now, shimmer=shimmer)
+                      blocked_text, now, shimmer=shimmer, shimmer_pos=shimmer_pos)
     if state_name == "ROTATING":
         return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now,
-                      shimmer=shimmer)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos)
     if state_name == "AWAITING_MANUAL_CLEAR":
         return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now,
-                      shimmer=shimmer)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos)
     if state_name in _HANDOFF_STATES:
         return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now,
-                      shimmer=shimmer)
-    return _style("ok", f"⟳ {pct}% ok", blocked_text, now, shimmer=shimmer)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos)
+    return _style("ok", f"⟳ {pct}% ok", blocked_text, now, shimmer=shimmer,
+                  shimmer_pos=shimmer_pos)
 
 
 # ------------------------ Phase 11 rev 4: reactive shimmer detection
@@ -410,7 +476,8 @@ _RENDER_LOG_KEEP_LINES = 500
 
 
 def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
-                now: float, region: list[str] | None, segment: str) -> None:
+                now: float, region: list[str] | None, segment: str,
+                sweep_pos: float | None = None) -> None:
     """Append this render's diagnostic line; swallow every failure."""
     try:
         if shimmer:
@@ -418,7 +485,10 @@ def _render_log(enabled: bool, ansi: bool, live: bool, shimmer: bool,
             # \d+ alone would keep the escapes in `visible` and skew the
             # glimmer length (revision 9)
             visible = re.sub(r"\x1b\[[0-9;]*m", "", segment)
-            glim = str(shimmer_index(now, max(len(visible), 1)))
+            if sweep_pos is not None:
+                glim = str(int(sweep_pos) % max(len(visible), 1))
+            else:
+                glim = str(shimmer_index(now, max(len(visible), 1)))
         else:
             glim = "-"
         box = region[0][:48] if region else "-"
@@ -518,8 +588,20 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     region = _input_box_lines() if (ansi and live) else None
     shimmer = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
+    # Revision 10: constant-speed sweep — the band advances
+    # SHIMMER_CELLS_PER_S cells per second of wall time; the position is
+    # persisted so renders however far apart (per keystroke, ~2 Hz per
+    # streaming batch, none while idle) form one continuous sweep. The
+    # clock also advances while the gate is closed, so the sweep is
+    # mid-motion when the word reappears.
+    sweep_pos = (shimmer_advance(now, _read_shimmer_state())
+                 if (ansi and live) else None)
+    if sweep_pos is not None:
+        _write_shimmer_state(now, sweep_pos)
     segment = render_segment(ratio, record, enabled, blocked=blocked,
-                             ansi=ansi, now=now, shimmer=shimmer)
-    _render_log(enabled, ansi, live, shimmer, now, region, segment)
+                             ansi=ansi, now=now, shimmer=shimmer,
+                             shimmer_pos=sweep_pos)
+    _render_log(enabled, ansi, live, shimmer, now, region, segment,
+                sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
     return compose_line(chained, segment)
