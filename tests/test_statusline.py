@@ -457,53 +457,61 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
 
 _RESET = "\x1b[0m"
 _BOLD = "\x1b[1m"
-_REVERSE = "\x1b[7m"  # what the band must NOT contain (rev 8 contract)
-# Revision 8: the band's hue = own hue shifted by this much (mod 7),
-# nothing else. 3 is coprime-feelingly far: a band char never matches its
-# own hue nor either neighbour's static hue (see test below). Bright 9x
-# is NOT used for the band — invisible on the user's display chain;
-# reverse video is NOT used either — the inverted patch read as corrupted
-# text on the user's display (2026-09-23).
-_SHIFT = 3
-# Per-character rainbow (ultrathink.sh revision 3) — 7 (base, bright)
-# basic-16 SGR pairs, cycled ``i % 7`` across the segment. Mirrors
-# statusline._RAINBOW (the 24-bit revision-1 palette quantized to gray on
-# a 16-color client, so the rainbow is rendered in basic-16).
-_RAINBOW = [
-    ("\x1b[31m", "\x1b[91m"),  # red
-    ("\x1b[33m", "\x1b[93m"),  # yellow (orange)
-    ("\x1b[32m", "\x1b[92m"),  # green
-    ("\x1b[34m", "\x1b[94m"),  # blue
-    ("\x1b[35m", "\x1b[95m"),  # magenta (indigo/violet)
-    ("\x1b[36m", "\x1b[96m"),  # cyan
-    ("\x1b[37m", "\x1b[97m"),  # white
+_REVERSE = "\x1b[7m"  # what the band must NOT contain (rev 8+ contract)
+# Revision 9 (2026-09-23): the band = the BRIGHTER SAME-HUE 24-bit
+# SHIMMER variant of each char's own base hue, nothing else. Hue shift
+# is REJECTED (the 15:32 video: a shifted hue on a rainbow has no
+# identity — "ne oldugu belirsiz, cooook agir"), 9x bright is
+# theme-eaten (020 BRIGHT TEST), reverse video read as corrupted text
+# ("okunmuyor bile"). The 24-bit port is proven on the user's chain:
+# tmux 3.7b client emits 38;2 SGR for hex styles (pty capture, 09-23)
+# and the user's eyes read the app's own 24-bit input-box rainbow as
+# "renkli" (the 09-22 "gray" was the old 0a9b client — different era).
+# Per-character palettes (ultrathink.sh, verbatim), cycled ``i % 7``:
+_RAINBOW = [  # BASE — per-char static
+    "\x1b[38;2;235;95;87m",   # red
+    "\x1b[38;2;245;139;87m",  # orange
+    "\x1b[38;2;250;195;95m",  # yellow
+    "\x1b[38;2;145;200;130m", # green
+    "\x1b[38;2;130;170;220m", # blue
+    "\x1b[38;2;155;130;200m", # indigo
+    "\x1b[38;2;200;130;180m", # violet
+]
+_SHIMMER = [  # BRIGHTER SAME-HUE band variant
+    "\x1b[38;2;250;155;147m",  # red_shimmer
+    "\x1b[38;2;255;185;137m",  # orange_shimmer
+    "\x1b[38;2;255;225;155m",  # yellow_shimmer
+    "\x1b[38;2;185;230;180m",  # green_shimmer
+    "\x1b[38;2;180;205;240m",  # blue_shimmer
+    "\x1b[38;2;195;180;230m",  # indigo_shimmer
+    "\x1b[38;2;230;180;210m",  # violet_shimmer
 ]
 _R = "\x1b[31m"  # red — the BLOCKED suffix keeps its own span
 
 
 def _rainbow(text: str, band: set = frozenset()) -> str:
-    """Per-char rainbow escapes (ultrathink.sh loop); ``band`` = the
-    shimmer indices. Char ``i`` uses ``_RAINBOW[i % 7]``; band chars
-    (revision 8) get the base hue shifted by ``_SHIFT`` — a hue that
-    differs from own and from both neighbours, so the band survives a
-    flat bright palette AND a TUI that drops 9x codes. NO reverse video
-    (revision 8: the inverted 3-char patch read as corrupted text on the
-    user's display — "okunmuyor bile", 2026-09-23 13:53)."""
+    """Per-char 24-bit rainbow escapes (ultrathink.sh loop); ``band`` =
+    the shimmer indices. Char ``i`` uses ``_RAINBOW[i % 7]``; band chars
+    (revision 9) use ``_SHIMMER[i % 7]`` — the BRIGHTER SAME-HUE variant
+    (luminance contrast, the axis the user's chain actually shows). NO
+    hue shift, NO reverse video, NO 9x bright."""
     return _BOLD + "".join(
-        ((_RAINBOW[(i + _SHIFT) % len(_RAINBOW)][0]
+        ((_SHIMMER[i % len(_SHIMMER)]
           if i in band
-          else _RAINBOW[i % len(_RAINBOW)][0]) + ch)
+          else _RAINBOW[i % len(_RAINBOW)]) + ch)
         for i, ch in enumerate(text)) + _RESET
 
 
 def test_shimmer_index_math():
-    # 150 ms tick, NO rest frame (revision 5): glimmer always in [0, length)
+    # 50 ms tick (revision 9 = the real CC cadence, 3x faster than the
+    # 150 ms the user read as "cooook agir"), NO rest frame (revision 5):
+    # glimmer always in [0, length)
     assert statusline.shimmer_index(0.0, 8) == 0
-    assert statusline.shimmer_index(0.16, 8) == 1
-    assert statusline.shimmer_index(0.31, 8) == 2
-    assert statusline.shimmer_index(0.62, 8) == 4
-    # one full cycle (8 ticks = 1.2 s) lands on the same cell
-    assert statusline.shimmer_index(0.62 + 1.2, 8) == 4
+    assert statusline.shimmer_index(0.06, 8) == 1
+    assert statusline.shimmer_index(0.11, 8) == 2
+    assert statusline.shimmer_index(0.26, 8) == 5
+    # one full cycle (8 ticks = 0.4 s) lands on the same cell
+    assert statusline.shimmer_index(0.26 + 0.4, 8) == 5
 
 
 def test_shimmer_band_always_visible_no_rest_frame():
@@ -526,60 +534,64 @@ def test_segment_ansi_shimmer_band_three_chars():
     # default = static rainbow (no band)
     assert statusline.render_segment(0.61, rec, True, now=0.0) == \
         _rainbow(text)
-    # shimmer on, now=0.62 -> glimmer=4 -> chars 3..5 ('6', '1', '%') in
-    # the bright variant
+    # shimmer on, now=0.62 -> glimmer = floor(0.62/0.05) % 8 = 4 ->
+    # chars 3..5 ('6', '1', '%') in the brighter same-hue variant
     assert statusline.render_segment(0.61, rec, True, now=0.62,
                                      shimmer=True) == \
         _rainbow(text, band={3, 4, 5})
 
 
-def test_shimmer_band_uses_hue_shift_not_bright_not_reverse():
-    # revision 8 (2026-09-23): the band is a base hue shifted 3 from own —
-    # NO bright (91-97 invisible on the user's display chain), NO reverse
-    # video (the inverted 3-char patch read as corrupted text: "okunmuyor
-    # bile", 13:53:5x). now=0.62 → glimmer 4 → band {3,4,5}: '1' own
-    # blue→white, '%' own magenta→red, ' ' own cyan→yellow.
+def test_shimmer_band_uses_brighter_same_hue_not_9x_not_reverse():
+    # revision 9 (2026-09-23): the band is the BRIGHTER SAME-HUE 24-bit
+    # shimmer variant of the char's own base — NO 9x bright (theme-eaten
+    # on the user's display chain, 020 BRIGHT TEST), NO reverse video
+    # ("okunmuyor bile", 13:53:5x), NO hue shift (the 15:32 video:
+    # identity-less drift, "ne oldugu belirsiz, cooook agir").
+    # now=0.62 → glimmer 4 → band {3,4,5}: '1' green→green_shimmer,
+    # '%' blue→blue_shimmer.
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
     out = statusline.render_segment(0.61, rec, True, now=0.62,
                                     shimmer=True)
     assert "\x1b[9" not in out
     assert "\x1b[7m" not in out
-    assert "\x1b[37m1" in out
-    assert "\x1b[31m%" in out
+    assert "\x1b[38;2;185;230;180m1" in out  # '1' = green_shimmer
+    assert "\x1b[38;2;180;205;240m%" in out  # '%' = blue_shimmer
 
 
-def test_shimmer_band_hue_differs_from_own_and_neighbours():
-    # the whole point of the shift: at EVERY glimmer position, a band
-    # char's hue differs from its own static hue and from the static
-    # hue of each adjacent char (so the band is a different COLOR, not
-    # a different brightness — brightness is what the display chain ate)
+def test_shimmer_band_is_brighter_same_hue_property():
+    # the whole point of revision 9: at EVERY glimmer position, a band
+    # char renders its OWN hue's shimmer variant (same hue, brighter
+    # luminance — the contrast axis that actually survives the user's
+    # display chain; the app's own input-box rainbow reads renkli),
+    # non-band chars the base; no reverse, no 9x, no hue shift anywhere.
     import re as _re
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
     n = len(text)
-    own = [_RAINBOW[i % 7][0] for i in range(n)]
+
+    def _lum(sgr):
+        r, g, b = (int(x) for x in sgr[2:-1].split(";")[-3:])
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
     for g in range(n):
-        # mid-tick (g+0.5): g * 0.15 lands exactly on a tick boundary,
-        # where float division (0.45/0.15) flips the floor — flaky glimmer
-        out = statusline.render_segment(0.61, rec, True, now=(g + 0.5) * 0.15,
+        # mid-tick (g+0.5): g * 0.05 lands exactly on a tick boundary,
+        # where float division flips the floor — flaky glimmer
+        out = statusline.render_segment(0.61, rec, True, now=(g + 0.5) * 0.05,
                                         shimmer=True)
         body = out[len(_BOLD):-len(_RESET)]
-        # per char: its escapes (1 static, 1 band: hue only — rev 8) + char
         groups = _re.findall(r"((?:\x1b\[[0-9;]*m)+.)", body, flags=_re.S)
         assert len(groups) == n, (g, out)
         for i, grp in enumerate(groups):
             idx = grp.rfind("\x1b")
-            hue = grp[idx:grp.rfind("m") + 1]  # escape right before the char
+            sgr = grp[idx:grp.rfind("m") + 1]  # escape right before the char
+            assert _REVERSE not in grp, (g, i)     # no reverse video
+            assert "\x1b[9" not in grp, (g, i)     # no 9x bright
             if abs(i - g) > 1:
-                assert hue == own[i], (g, i)
-                assert _REVERSE not in grp, (g, i)
+                assert sgr == _RAINBOW[i % 7], (g, i)  # base
                 continue
-            assert _REVERSE not in grp, (g, i)       # rev 8: no reverse
-            assert hue != own[i], (g, i)             # not own hue
-            for j in (i - 1, i + 1):
-                if 0 <= j < n and abs(j - g) > 1:
-                    assert hue != own[j], (g, i, j)  # not neighbour hue
+            assert sgr == _SHIMMER[i % 7], (g, i)  # same hue, brighter
+            assert _lum(sgr) > _lum(_RAINBOW[i % 7]), (g, i)
 
 
 def test_segment_ansi_rainbow_is_state_independent():
@@ -802,8 +814,8 @@ def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    # revision 5 math: floor(0.62 / 0.15) % 7 = 4 → band = glimmer ± 1
-    assert line == _rainbow("⟳ 9% ok", band={3, 4, 5})
+    # revision 9 math: floor(0.62 / 0.05) % 7 = 5 → band = glimmer ± 1
+    assert line == _rainbow("⟳ 9% ok", band={4, 5, 6})
     assert _pane_calls(log) == [["capture-pane", "-p"]]
 
 
@@ -843,16 +855,16 @@ def test_run_appends_render_log_with_gate_state(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={3, 4, 5})
+    assert line == _rainbow("⟳ 9% ok", band={4, 5, 6})
     lp = _render_log_path(cc_home)
     assert lp.is_file()
     lines = lp.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
-    # now=0.62: floor(0.62/0.15) % 7 = 4 → glim=4
+    # now=0.62: floor(0.62/0.05) % 7 = 5 → glim=5
     assert "live=1" in lines[0]
     assert "ansi=1" in lines[0]
     assert "ut=1" in lines[0]
-    assert "glim=4" in lines[0]
+    assert "glim=5" in lines[0]
     assert "box='❯ fix the ultrathink flag'" in lines[0]
 
 
