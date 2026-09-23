@@ -51,3 +51,165 @@ def test_health_down_to_up_transition():
     assert h.feed(ok=True, now=2000.0) == "up"
     assert h.status == "UP"
     assert h.down_since is None  # consumed by the daemon for the push body
+
+
+# --- pane inspection (P10-D6 "pane at prompt" / "error in tail") ------------
+
+NOW = 10_000.0
+STALE_S = 300.0
+FRESH_TS = NOW - 10.0
+STALE_TS = NOW - 301.0  # 301 s of silence > 300 s threshold → stale
+CAP_PROMPT = "ran tool: Read\n❯ "
+CAP_NOT_PROMPT = "▓▓▓ 42% thinking"
+
+
+def test_pane_idle_last_nonempty_line_is_prompt():
+    assert watchdog.pane_idle("output\n❯ ") is True
+    assert watchdog.pane_idle("output\n  ❯ ") is True  # PROMPT_RE: ^\s*❯
+
+
+def test_pane_idle_ignores_trailing_blanks():
+    assert watchdog.pane_idle("output\n❯ \n\n   \n") is True
+
+
+def test_pane_idle_not_at_prompt():
+    assert watchdog.pane_idle("output\nspinner 42%") is False
+
+
+def test_pane_idle_empty_capture():
+    assert watchdog.pane_idle("") is False
+    assert watchdog.pane_idle("\n   \n") is False
+
+
+def test_error_in_tail_matches_observed_cc_strings():
+    for s in ("API Error: 503", "error: connection refused",
+              "Connection closed by peer", "Request timed out",
+              "Retrying in 5s..."):
+        assert watchdog.error_in_tail(f"{s}\n❯ ") is True, s
+
+
+def test_error_in_tail_window_is_last_ten_nonprompt_lines():
+    inside = "\n".join([f"line {i}" for i in range(10)] + ["error: boom"])
+    assert watchdog.error_in_tail(inside + "\n❯ ") is True
+    outside = "\n".join(["error: boom"] + [f"line {i}" for i in range(10)])
+    assert watchdog.error_in_tail(outside + "\n❯ ") is False
+
+
+def test_error_in_tail_excludes_prompt_lines():
+    # a prompt containing the word "error:" is input, not an error marker
+    cap = "\n".join([f"line {i}" for i in range(10)]
+                    + ["❯ fix the error: in auth"])
+    assert watchdog.error_in_tail(cap) is False
+    assert watchdog.pane_idle(cap) is True  # the prompt is the last line
+
+
+# --- classify (full P10-D6 matrix, row order P10-P2) -------------------------
+
+
+def test_classify_skip_dominates_fresh_ledger():
+    # row 7 checked FIRST: mid-rotation state, even a fresh ledger → SKIP
+    rec = {"state": "ROTATION_PENDING", "turn_active": True}
+    assert watchdog.classify(rec, FRESH_TS, CAP_PROMPT, None,
+                             NOW, STALE_S) == "SKIP"
+
+
+def test_classify_skip_non_eligible_states():
+    for state in ("BOOTSTRAPPING", "AWAITING_MANUAL_CLEAR",
+                  "HANDOFF_REQUESTED", "ROTATING", "ROTATED"):
+        rec = {"state": state, "turn_active": True}
+        assert watchdog.classify(rec, STALE_TS, CAP_PROMPT, CAP_PROMPT,
+                                 NOW, STALE_S) == "SKIP"
+
+
+def test_classify_alive_on_fresh_ledger():
+    rec = {"state": "ACTIVE", "turn_active": True}
+    assert watchdog.classify(rec, FRESH_TS, CAP_NOT_PROMPT, CAP_NOT_PROMPT,
+                             NOW, STALE_S) == "ALIVE"
+
+
+def test_classify_alive_when_pane_changed():
+    # row 2: stale ledger, but the pane rendered something new this tick
+    rec = {"state": "ACTIVE", "turn_active": True}
+    assert watchdog.classify(rec, STALE_TS, "fresh output line",
+                             "older output line", NOW, STALE_S) == "ALIVE"
+
+
+def test_classify_turn_dead_mid_turn_death():
+    # row 3: stale + at prompt + unchanged + turn never stopped
+    rec = {"state": "ACTIVE", "turn_active": True}
+    assert watchdog.classify(rec, STALE_TS, CAP_PROMPT, CAP_PROMPT,
+                             NOW, STALE_S) == "TURN_DEAD"
+
+
+def test_classify_stalled_error_in_tail():
+    # row 4: turn stopped (turn_active False) but the turn ended in error
+    rec = {"state": "ACTIVE", "turn_active": False}
+    cap = "API Error: connection reset by peer\n❯ "
+    assert watchdog.classify(rec, STALE_TS, cap, cap, NOW, STALE_S) \
+        == "STALLED"
+
+
+def test_classify_idle_waiting_no_error():
+    # row 6: legitimately waiting for the user
+    rec = {"state": "WARNED", "turn_active": False}
+    assert watchdog.classify(rec, STALE_TS, CAP_PROMPT, CAP_PROMPT,
+                             NOW, STALE_S) == "IDLE_WAITING"
+
+
+def test_classify_old_error_outside_tail_window_is_idle():
+    # an hours-old error must not trigger STALLED (10 non-prompt lines)
+    rec = {"state": "ACTIVE", "turn_active": False}
+    lines = ["old error: boom"] + [f"line {i}" for i in range(10)]
+    cap = "\n".join(lines) + "\n❯ "
+    assert watchdog.classify(rec, STALE_TS, cap, cap, NOW, STALE_S) \
+        == "IDLE_WAITING"
+
+
+def test_classify_frozen_at_two_unchanged_ticks():
+    # row 5: not at prompt, capture unchanged for 2 consecutive ticks
+    rec = {"state": "ACTIVE", "turn_active": False}
+    assert watchdog.classify(rec, STALE_TS, CAP_NOT_PROMPT, CAP_NOT_PROMPT,
+                             NOW, STALE_S, unchanged_ticks=2) == "FROZEN"
+
+
+def test_classify_wait_before_two_ticks():
+    # P10-P3: the first comparison tick must do nothing
+    rec = {"state": "ACTIVE", "turn_active": False}
+    for ticks in (0, 1):
+        assert watchdog.classify(rec, STALE_TS, CAP_NOT_PROMPT,
+                                 CAP_NOT_PROMPT, NOW, STALE_S,
+                                 unchanged_ticks=ticks) == "WAIT"
+
+
+def test_classify_first_tick_no_prev_capture():
+    # prev None: row 2 can't fire; at-prompt rows still decide (P10-P2)
+    rec = {"state": "ACTIVE", "turn_active": True}
+    assert watchdog.classify(rec, STALE_TS, CAP_PROMPT, None,
+                             NOW, STALE_S) == "TURN_DEAD"
+
+
+def test_classify_no_ledger_treated_as_stale():
+    rec = {"state": "ACTIVE", "turn_active": False}
+    assert watchdog.classify(rec, None, CAP_PROMPT, CAP_PROMPT,
+                             NOW, STALE_S) == "IDLE_WAITING"
+
+
+# --- pane_pending (P10-D7.3: nudge text sitting unsubmitted) ----------------
+
+
+def test_pane_pending_nudge_sitting_in_input_line():
+    assert watchdog.pane_pending("output\n❯ continue", "continue") is True
+
+
+def test_pane_pending_empty_prompt():
+    assert watchdog.pane_pending("output\n❯ ", "continue") is False
+
+
+def test_pane_pending_not_at_prompt():
+    assert watchdog.pane_pending("continue was typed\nspinner",
+                                 "continue") is False
+
+
+def test_pane_pending_submitted_text_is_not_pending():
+    cap = "❯ continue\noutput\n❯ "
+    assert watchdog.pane_pending(cap, "continue") is False
