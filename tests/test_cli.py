@@ -3,6 +3,7 @@
 Phase 2: ``statusline`` + ``status``. Phase 3: ``hook <event>`` + ``history``.
 """
 
+import argparse
 import io
 import json
 import os
@@ -476,3 +477,115 @@ def test_signal_without_session_exits_1_no_push(cc_home, tmp_path,
     assert cli.main(["signal", "done", "x"]) == 1
     assert "No registered session" in capsys.readouterr().err
     assert sent == []
+
+# --- Phase 10: watchdog subcommand group + configure flags ------------------
+
+
+def test_watchdog_subparser_smoke():
+    for action in ("install", "uninstall", "start", "stop", "status",
+                   "run"):
+        ns = cli.build_parser().parse_args(["watchdog", action])
+        assert ns.command == "watchdog"
+        assert ns.watchdog_command == action
+
+
+def _wd_ns(action):
+    return argparse.Namespace(command="watchdog",
+                              watchdog_command=action)
+
+
+def _fake_runner():
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = "state = running\n"
+        stderr = ""
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        return R()
+
+    return runner, calls
+
+
+def test_watchdog_install_refuses_when_disabled(cc_home, tmp_path,
+                                                capsys):
+    (cc_home / "config.json").write_text("{}", encoding="utf-8")
+    runner, calls = _fake_runner()
+    rc = cli.cmd_watchdog(_wd_ns("install"), home=tmp_path, runner=runner)
+    assert rc == 1
+    assert "watchdog_enabled is false" in capsys.readouterr().err
+    assert calls == []  # no launchctl, no plist
+
+
+def test_watchdog_install_when_enabled(cc_home, tmp_path, capsys,
+                                       monkeypatch):
+    from cc_continuity import watchdogd
+    (cc_home / "config.json").write_text(
+        json.dumps({"watchdog_enabled": True}), encoding="utf-8")
+    runner, calls = _fake_runner()
+    monkeypatch.setattr(watchdogd.shutil, "which",
+                        lambda name: "/bin/cc-continuity")
+    assert cli.cmd_watchdog(_wd_ns("install"), home=tmp_path,
+                            runner=runner) == 0
+    plist = tmp_path / "Library" / "LaunchAgents" \
+        / "com.claude-continuity.watchdog.plist"
+    assert plist.is_file()
+    assert calls[0][:3] == ["launchctl", "bootstrap",
+                            f"gui/{os.getuid()}"]
+    assert "watchdog installed" in capsys.readouterr().out
+
+
+def test_watchdog_uninstall(cc_home, tmp_path, capsys, monkeypatch):
+    from cc_continuity import watchdogd
+    (cc_home / "config.json").write_text(
+        json.dumps({"watchdog_enabled": True}), encoding="utf-8")
+    runner, calls = _fake_runner()
+    monkeypatch.setattr(watchdogd.shutil, "which",
+                        lambda name: "/bin/cc-continuity")
+    cli.cmd_watchdog(_wd_ns("install"), home=tmp_path, runner=runner)
+    assert cli.cmd_watchdog(_wd_ns("uninstall"), home=tmp_path,
+                            runner=runner) == 0
+    assert not (tmp_path / "Library" / "LaunchAgents"
+                / "com.claude-continuity.watchdog.plist").exists()
+    assert calls[-1][:3] == ["launchctl", "bootout",
+                             f"gui/{os.getuid()}/"
+                             "com.claude-continuity.watchdog"]
+
+
+def test_watchdog_status_not_loaded(cc_home, tmp_path, capsys):
+    runner, _ = _fake_runner()
+
+    class NotLoaded:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    assert cli.cmd_watchdog(_wd_ns("status"), home=tmp_path,
+                            runner=lambda cmd, **kw: NotLoaded()) == 0
+    assert "not loaded" in capsys.readouterr().out
+
+
+def test_configure_watchdog_flags(cc_home):
+    assert cli.main(["configure", "--watchdog-enabled", "true",
+                     "--watchdog-health", "http://127.0.0.1:18000/health"
+                     ]) == 0
+    cfg = json.loads((cc_home / "config.json").read_text(encoding="utf-8"))
+    assert cfg["watchdog_enabled"] is True
+    assert cfg["watchdog_health_url"] == "http://127.0.0.1:18000/health"
+
+
+def test_configure_watchdog_health_off_and_disabled(cc_home):
+    assert cli.main(["configure", "--watchdog-health", "off",
+                     "--watchdog-enabled", "false"]) == 0
+    cfg = json.loads((cc_home / "config.json").read_text(encoding="utf-8"))
+    assert cfg["watchdog_health_url"] == ""
+    assert cfg["watchdog_enabled"] is False
+
+
+def test_configure_watchdog_health_invalid_writes_nothing(cc_home,
+                                                          capsys):
+    assert cli.main(["configure", "--watchdog-health", "not-a-url"]) == 1
+    assert not (cc_home / "config.json").exists()
+    assert "invalid health URL" in capsys.readouterr().err
