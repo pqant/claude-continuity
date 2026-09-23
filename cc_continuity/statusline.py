@@ -139,18 +139,20 @@ _HANDOFF_STATES = frozenset({
 #: the prompt (revision 4's reactive gate is unchanged).
 SHIMMER_TICK_S = 0.15
 SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the band style
-#: Revision 7 (2026-09-23): the band's hue = own hue + this (mod 7). The
-#: bright-16 variant (91-97) is emitted yet INVISIBLE on the user's
-#: display chain (render log: ut=1 for 2 min, no band on screen; BRIGHT
-#: TEST exonerated tmux; the rainbow's base 31-37 IS visible). So the
-#: band must differ by COLOR, not brightness: a base hue shifted 3 never
-#: equals the char's own hue nor either neighbour's static hue, and
-#: reverse video makes it a solid block even under a flat palette.
+#: Revision 8 (2026-09-23): the band's hue = own hue + this (mod 7) —
+#: and NOTHING else. The bright-16 variant (91-97) was emitted yet
+#: INVISIBLE on the user's display chain (render log: ut=1 for 2 min, no
+#: band on screen; BRIGHT TEST exonerated tmux; the rainbow's base 31-37
+#: IS visible) → the band differs by COLOR, not brightness: a base hue
+#: shifted 3 never equals the char's own hue nor either neighbour's
+#: static hue. Reverse video (revision 7) is dropped: the inverted 3-char
+#: patch read as corrupted text on the user's display ("okunmuyor bile",
+#: 13:53:5x) — a color patch reads as a highlight, an inverted patch as
+#: breakage.
 SHIMMER_HUE_SHIFT = 3
 
 ANSI_RESET = "\x1b[0m"
 ANSI_BOLD = "\x1b[1m"
-ANSI_REVERSE = "\x1b[7m"
 
 
 #: Per-character rainbow (ultrathink.sh, revision 3): 7 (base, shimmer)
@@ -160,8 +162,9 @@ ANSI_REVERSE = "\x1b[7m"
 #: revision-1 palette quantized to GRAY on the user's 16-color tmux
 #: client — observed 2026-09-22, user screenshot). Each pair = normal +
 #: bright variant of one hue; the bright member is NOT used by the band
-#: any more (revision 7: the band is reverse video + a hue-shifted BASE
-#: hue — the bright variant was invisible on the user's display chain).
+#: any more (revision 8: the band is a hue-shifted BASE hue only — the
+#: bright variant was invisible, and reverse video read as corrupted
+#: text, on the user's display chain).
 #: Supersedes the per-state single-hue
 #: colors of revision 2 (user: the segment must be colorful like
 #: ultrathink.sh, not a monochrome pulse).
@@ -201,11 +204,12 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
     Live kinds (any state): a per-character RAINBOW — char ``i`` gets
     ``_RAINBOW[i % 7]`` (ultrathink.sh's loop). With ``shimmer`` (Phase 11
     rev 4: the prompt contains ``ultrathink``): the 3-char band (chars
-    within +/-1 of the wall-clock glimmer index) renders REVERSE VIDEO +
-    the base hue shifted by ``SHIMMER_HUE_SHIFT`` (revision 7 — the
-    bright-16 variant was invisible on the user's display chain) —
-    repositioned on every CC re-render (the status line is a static
-    string; it cannot self-animate).
+    within +/-1 of the wall-clock glimmer index) renders the base hue
+    shifted by ``SHIMMER_HUE_SHIFT`` (revision 8 — the bright-16 variant
+    was invisible on the user's display chain; reverse video read as
+    corrupted text, so the band is a COLOR patch only) — repositioned on
+    every CC re-render (the status line is a static string; it cannot
+    self-animate).
     Without it: the static rainbow (all base hues — visually the sweep's
     rest frame). Bold, like the original. State is conveyed by the text
     itself, not by a single hue. ``static`` (off/unknown): dim gray, never
@@ -223,7 +227,7 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
     glimmer = shimmer_index(now, len(text))
     n = len(_RAINBOW)
     chars = "".join(
-        ((ANSI_REVERSE + _RAINBOW[(i + SHIMMER_HUE_SHIFT) % n][0]
+        ((_RAINBOW[(i + SHIMMER_HUE_SHIFT) % n][0]
           if abs(i - glimmer) <= SHIMMER_BAND
           else _RAINBOW[i % n][0]) + ch)
         for i, ch in enumerate(text))
@@ -271,7 +275,7 @@ def render_segment(ratio: float | None, record: dict | None,
     ``statusline_ansi``) live segments render the ultrathink.sh
     per-character rainbow (7 basic-16 hues cycled ``i % 7``); ``shimmer``
     (the prompt contains ``ultrathink`` — Phase 11 rev 4) activates the
-    3-char band (reverse video + hue-shifted base hue — revision 7),
+    3-char band (hue-shifted base hue only — revision 8),
     position derived from the wall clock (``now`` injected for tests),
     repositioned on every CC re-render. Default: static rainbow.
     ``off``/``…`` are static dim gray. ``ansi=False`` reproduces the
