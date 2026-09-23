@@ -209,3 +209,53 @@ def test_doctor_notify_failed_test_send_is_not_ok(fake_home):
                             which=lambda n: "/usr/bin/fake")}
     assert by["notify"].ok is False
     assert "test send failed" in by["notify"].detail
+
+
+# --- Phase 10: watchdog check ------------------------------------------------
+
+
+def _write_cfg(home, **extra):
+    store = home / ".claude-continuity"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "config.json").write_text(
+        json.dumps({"window_tokens": 262144, **extra}), encoding="utf-8")
+
+
+def test_watchdog_check_disabled_ok(fake_home):
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    wd = next(c for c in checks if c.name == "watchdog")
+    assert wd.ok and "disabled" in wd.detail
+
+
+def test_watchdog_check_enabled_not_installed(fake_home):
+    _write_cfg(fake_home, watchdog_enabled=True)
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    wd = next(c for c in checks if c.name == "watchdog")
+    assert not wd.ok and "watchdog install" in wd.detail
+
+
+def test_watchdog_check_enabled_binary_missing(fake_home, tmp_path):
+    from cc_continuity import watchdogd
+    _write_cfg(fake_home, watchdog_enabled=True)
+    watchdogd.install_plist(fake_home, runner=FakeRun(),
+                            which=lambda name:
+                            "/nonexistent-cc-continuity-xyz")
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    wd = next(c for c in checks if c.name == "watchdog")
+    assert not wd.ok and "watchdog install" in wd.detail
+
+
+def test_watchdog_check_enabled_loaded_ok(fake_home, tmp_path):
+    from cc_continuity import watchdogd
+    fakebin = tmp_path / "cc-continuity-bin"
+    fakebin.write_text("#!/bin/sh\n")
+    _write_cfg(fake_home, watchdog_enabled=True)
+    watchdogd.install_plist(fake_home, runner=FakeRun(),
+                            which=lambda name: str(fakebin))
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    wd = next(c for c in checks if c.name == "watchdog")
+    assert wd.ok and "loaded" in wd.detail

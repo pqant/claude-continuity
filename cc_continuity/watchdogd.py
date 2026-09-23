@@ -578,5 +578,9 @@ def status_plist(home: Path | str, *, runner=subprocess.run) -> str | None:
                       capture_output=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
-    return proc.stdout.decode(errors="replace") \
-        if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout
+    if isinstance(out, bytes):  # fakes may answer with str
+        out = out.decode(errors="replace")
+    return out
