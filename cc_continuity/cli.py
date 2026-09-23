@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -113,6 +114,22 @@ def build_parser() -> argparse.ArgumentParser:
                        help="set config.json unattended=true (loud: the "
                             "agent then runs without per-action approval — "
                             "see README)")
+    p_cfg.add_argument("--watchdog-health", default=None,
+                       help="model server health URL (or 'off' = "
+                            "liveness-only mode)")
+    p_cfg.add_argument("--watchdog-enabled", default=None,
+                       choices=["true", "false"],
+                       help="enable/disable the watchdog daemon")
+
+    p_wd = sub.add_parser("watchdog",
+                          help="LLM watchdog daemon (Phase 10)")
+    wd_sub = p_wd.add_subparsers(dest="watchdog_command", metavar="<action>")
+    wd_sub.add_parser("install", help="install the launchd LaunchAgent")
+    wd_sub.add_parser("uninstall", help="remove the LaunchAgent")
+    wd_sub.add_parser("start", help="kickstart the running LaunchAgent")
+    wd_sub.add_parser("stop", help="bootout the LaunchAgent")
+    wd_sub.add_parser("status", help="show the LaunchAgent status")
+    wd_sub.add_parser("run", help="run the watchdog loop (foreground)")
 
     p_sig = sub.add_parser("signal",
                            help="agent signal: needs-human / done (Phase 9)")
@@ -549,6 +566,20 @@ def cmd_configure(args: argparse.Namespace) -> int:
     if args.unattended:
         cfg["unattended"] = True
         changed.append("unattended=true")
+    if args.watchdog_health is not None:
+        url = ("" if args.watchdog_health.strip().lower() == "off"
+               else args.watchdog_health.strip())
+        if url and not url.startswith(("http://", "https://")):
+            print(f"cc-continuity configure: invalid health URL "
+                  f"{url!r} (expected http(s)://… or 'off')",
+                  file=sys.stderr)
+            return 1
+        cfg["watchdog_health_url"] = url
+        changed.append("watchdog_health_url="
+                       + (url or "(liveness-only)"))
+    if args.watchdog_enabled is not None:
+        cfg["watchdog_enabled"] = args.watchdog_enabled == "true"
+        changed.append("watchdog_enabled=" + args.watchdog_enabled)
     if not changed:
         print("cc-continuity configure: nothing to change (pass --ntfy "
               "<url|off> and/or --unattended)", file=sys.stderr)
@@ -557,6 +588,52 @@ def cmd_configure(args: argparse.Namespace) -> int:
     atomic.atomic_write_json(cfg_path, cfg)
     print("cc-continuity configured: " + ", ".join(changed))
     return 0
+
+
+def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
+                 runner=subprocess.run) -> int:
+    """P10-D2: the watchdog CLI — plist lifecycle + foreground run."""
+    from . import watchdogd  # local import keeps cli import light (P10-P1)
+    home = Path(home) if home is not None else Path.home()
+    action = args.watchdog_command
+    if action == "run":
+        return watchdogd.run_forever(config.load_config())
+    if action == "install":
+        if not config.load_config().get("watchdog_enabled"):
+            print("cc-continuity watchdog: watchdog_enabled is false — "
+                  "enable it first (cc-continuity configure "
+                  "--watchdog-enabled true), then install: a disabled "
+                  "daemon exits 0 on every launchd spawn",
+                  file=sys.stderr)
+            return 1
+        try:
+            p = watchdogd.install_plist(home, runner=runner)
+        except watchdogd.WatchdogError as e:
+            print(f"cc-continuity watchdog install: {e}", file=sys.stderr)
+            return 1
+        print(f"watchdog installed: {p} (launchd RunAtLoad + KeepAlive)")
+        return 0
+    if action == "uninstall":
+        watchdogd.uninstall_plist(home, runner=runner)
+        print("watchdog uninstalled (launchd bootout + plist removed)")
+        return 0
+    if action == "start":
+        ok = watchdogd.start_plist(home, runner=runner)
+        msg = "watchdog started" if ok \
+            else "watchdog start failed (is it installed?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "stop":
+        ok = watchdogd.stop_plist(home, runner=runner)
+        msg = "watchdog stopped" if ok \
+            else "watchdog stop failed (was it loaded?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "status":
+        out = watchdogd.status_plist(home, runner=runner)
+        print("watchdog: not loaded" if out is None else out.rstrip())
+        return 0
+    return 2
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -638,6 +715,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_uninstall(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "watchdog":
+        return cmd_watchdog(args)
     return 2
 
 
