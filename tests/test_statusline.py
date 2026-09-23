@@ -457,11 +457,13 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
 
 _RESET = "\x1b[0m"
 _BOLD = "\x1b[1m"
-_REVERSE = "\x1b[7m"
-# Revision 7: the band's hue = own hue shifted by this much (mod 7).
-# 3 is coprime-feelingly far: a band char never matches its own hue nor
-# either neighbour's static hue (see test below). Bright 9x is NOT used
-# for the band anymore — invisible on the user's display chain (2026-09-23).
+_REVERSE = "\x1b[7m"  # what the band must NOT contain (rev 8 contract)
+# Revision 8: the band's hue = own hue shifted by this much (mod 7),
+# nothing else. 3 is coprime-feelingly far: a band char never matches its
+# own hue nor either neighbour's static hue (see test below). Bright 9x
+# is NOT used for the band — invisible on the user's display chain;
+# reverse video is NOT used either — the inverted patch read as corrupted
+# text on the user's display (2026-09-23).
 _SHIFT = 3
 # Per-character rainbow (ultrathink.sh revision 3) — 7 (base, bright)
 # basic-16 SGR pairs, cycled ``i % 7`` across the segment. Mirrors
@@ -482,11 +484,13 @@ _R = "\x1b[31m"  # red — the BLOCKED suffix keeps its own span
 def _rainbow(text: str, band: set = frozenset()) -> str:
     """Per-char rainbow escapes (ultrathink.sh loop); ``band`` = the
     shimmer indices. Char ``i`` uses ``_RAINBOW[i % 7]``; band chars
-    (revision 7) get reverse video + the base hue shifted by ``_SHIFT``
-    — a hue that differs from own and from both neighbours, so the band
-    survives a flat bright palette AND a TUI that drops 9x codes."""
+    (revision 8) get the base hue shifted by ``_SHIFT`` — a hue that
+    differs from own and from both neighbours, so the band survives a
+    flat bright palette AND a TUI that drops 9x codes. NO reverse video
+    (revision 8: the inverted 3-char patch read as corrupted text on the
+    user's display — "okunmuyor bile", 2026-09-23 13:53)."""
     return _BOLD + "".join(
-        ((_REVERSE + _RAINBOW[(i + _SHIFT) % len(_RAINBOW)][0]
+        ((_RAINBOW[(i + _SHIFT) % len(_RAINBOW)][0]
           if i in band
           else _RAINBOW[i % len(_RAINBOW)][0]) + ch)
         for i, ch in enumerate(text)) + _RESET
@@ -509,8 +513,11 @@ def test_shimmer_band_always_visible_no_rest_frame():
     for now in (0.0, 0.05, 0.1, 0.17, 0.4, 1.0, 2.5):
         out = statusline.render_segment(0.61, rec, True, now=now,
                                         shimmer=True)
-        # rev 7: the band is reverse video (2 chars min at a text edge)
-        assert out.count("\x1b[7m") >= 2, now
+        # rev 8: band present on EVERY render = at least one char re-hued
+        # (2 chars min at a text edge); no rest frame
+        static = statusline.render_segment(0.61, rec, True, now=now,
+                                           shimmer=False)
+        assert out != static, now
 
 
 def test_segment_ansi_shimmer_band_three_chars():
@@ -526,23 +533,20 @@ def test_segment_ansi_shimmer_band_three_chars():
         _rainbow(text, band={3, 4, 5})
 
 
-def test_shimmer_band_uses_hue_shift_and_reverse_not_bright():
-    # revision 7 (2026-09-23): the bright-SGR band (91-97) was emitted on
-    # every render yet stayed INVISIBLE on the user's display (BRIGHT TEST
-    # exonerated tmux; the rainbow's base 31-37 IS on screen). The band is
-    # re-encoded as reverse video + a base hue shifted 3 from own —
-    # visible under a flat bright palette, and if the TUI normalizes or
-    # drops 9x. now=0.62 → glimmer 4 → band {3,4,5}: '1' own blue→white,
-    # '%' own magenta→red, ' ' own cyan→yellow.
+def test_shimmer_band_uses_hue_shift_not_bright_not_reverse():
+    # revision 8 (2026-09-23): the band is a base hue shifted 3 from own —
+    # NO bright (91-97 invisible on the user's display chain), NO reverse
+    # video (the inverted 3-char patch read as corrupted text: "okunmuyor
+    # bile", 13:53:5x). now=0.62 → glimmer 4 → band {3,4,5}: '1' own
+    # blue→white, '%' own magenta→red, ' ' own cyan→yellow.
     rec = {"state": "ACTIVE", "name": "p-001"}
     text = "⟳ 61% ok"
     out = statusline.render_segment(0.61, rec, True, now=0.62,
                                     shimmer=True)
     assert "\x1b[9" not in out
-    assert out.count("\x1b[7m") == 3
-    assert "\x1b[7m\x1b[37m1" in out
-    assert "\x1b[7m\x1b[31m%" in out
-    assert "\x1b[7m\x1b[33m " in out
+    assert "\x1b[7m" not in out
+    assert "\x1b[37m1" in out
+    assert "\x1b[31m%" in out
 
 
 def test_shimmer_band_hue_differs_from_own_and_neighbours():
@@ -561,7 +565,7 @@ def test_shimmer_band_hue_differs_from_own_and_neighbours():
         out = statusline.render_segment(0.61, rec, True, now=(g + 0.5) * 0.15,
                                         shimmer=True)
         body = out[len(_BOLD):-len(_RESET)]
-        # per char: its escapes (1 static, 2 band: reverse + hue) + char
+        # per char: its escapes (1 static, 1 band: hue only — rev 8) + char
         groups = _re.findall(r"((?:\x1b\[[0-9;]*m)+.)", body, flags=_re.S)
         assert len(groups) == n, (g, out)
         for i, grp in enumerate(groups):
@@ -571,7 +575,7 @@ def test_shimmer_band_hue_differs_from_own_and_neighbours():
                 assert hue == own[i], (g, i)
                 assert _REVERSE not in grp, (g, i)
                 continue
-            assert _REVERSE in grp, (g, i)
+            assert _REVERSE not in grp, (g, i)       # rev 8: no reverse
             assert hue != own[i], (g, i)             # not own hue
             for j in (i - 1, i + 1):
                 if 0 <= j < n and abs(j - g) > 1:
