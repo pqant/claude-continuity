@@ -213,3 +213,56 @@ def test_pane_pending_not_at_prompt():
 def test_pane_pending_submitted_text_is_not_pending():
     cap = "❯ continue\noutput\n❯ "
     assert watchdog.pane_pending(cap, "continue") is False
+
+
+# --- Episode + nudge_action (P10-D7 table) ----------------------------------
+
+
+def test_episode_defaults():
+    ep = watchdog.Episode()
+    assert ep.n == 0
+    assert ep.nudge_ts is None
+    assert ep.waiting_health is False
+    assert ep.given_up is False
+
+
+def test_nudge_action_first_up_nudges():
+    assert watchdog.nudge_action("UP", watchdog.Episode(), False, 3) \
+        == "NUDGE"
+
+
+def test_nudge_action_first_down_or_unknown_waits():
+    for health in ("DOWN", "UNKNOWN"):
+        assert watchdog.nudge_action(health, watchdog.Episode(), False, 3) \
+            == "WAIT_HEALTH"
+
+
+def test_nudge_action_pending_input_send_enter_even_when_down():
+    # Enter is free (no model call) — submit the waiting nudge regardless
+    ep = watchdog.Episode(n=1, nudge_ts=1.0)
+    for health in ("UP", "DOWN"):
+        assert watchdog.nudge_action(health, ep, True, 3) == "SEND_ENTER"
+
+
+def test_nudge_action_unverified_resend_counts_as_next_attempt():
+    for n in (1, 2):
+        ep = watchdog.Episode(n=n, nudge_ts=float(n))
+        assert watchdog.nudge_action("UP", ep, False, 3) == "RESEND"
+
+
+def test_nudge_action_give_up_after_max_unverified():
+    ep = watchdog.Episode(n=3, nudge_ts=3.0)
+    assert watchdog.nudge_action("UP", ep, False, 3) == "GIVE_UP"
+
+
+def test_nudge_action_given_up_done_until_human():
+    ep = watchdog.Episode(n=3, nudge_ts=3.0, given_up=True)
+    assert watchdog.nudge_action("UP", ep, False, 3) == "DONE"
+    assert watchdog.nudge_action("DOWN", ep, True, 3) == "DONE"
+
+
+def test_nudge_action_max_one_nudge():
+    assert watchdog.nudge_action("UP", watchdog.Episode(), False, 1) \
+        == "NUDGE"
+    ep = watchdog.Episode(n=1, nudge_ts=1.0)
+    assert watchdog.nudge_action("UP", ep, False, 1) == "GIVE_UP"
