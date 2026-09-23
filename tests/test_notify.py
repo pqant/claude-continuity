@@ -214,3 +214,62 @@ def test_advance_without_cfg_is_silent(cc_home, monkeypatch):
                         lambda cfg, event, **kw: fired.append(event) or True)
     thresholds.advance("k3", 1, "ROTATION_PENDING", ratio=0.65)
     assert fired == []
+
+
+# --- Phase 10 watchdog events (spec P10-D11, exact strings) ------------------
+
+
+def test_build_message_dgx_down():
+    t, b, pr = notify.build_message("dgx_down", slug="", nnn=0,
+                                    host="mac-mini", interval_min=5)
+    assert (t, pr) == ("🔌 cc-continuity: model server DOWN", "urgent")
+    assert b == "host=mac-mini — probing every 5 min; nudges deferred"
+
+
+def test_build_message_dgx_up_formats_downtime():
+    # 3930 s = 1h 05m 30s → floors to "1h 05m" (zero-padded minutes)
+    t, b, pr = notify.build_message("dgx_up", slug="", nnn=0,
+                                    downtime_s=3930)
+    assert (t, pr) == ("🔌 cc-continuity: model server back", "high")
+    assert b == "down for 1h 05m — nudges resume"
+
+
+def test_build_message_turn_dead_first_nudge():
+    t, b, pr = notify.build_message("turn_dead", slug="spike-repo", nnn=7,
+                                    idle_minutes=47, max_nudges=3)
+    assert (t, pr) == ("⟲ cc-continuity: turn died — recovering", "high")
+    assert b == "proj=spike-repo 007 idle 47m — nudge 1/3"
+
+
+def test_build_message_turn_recovered():
+    t, b, pr = notify.build_message("turn_recovered", slug="spike-repo",
+                                    nnn=7, nudge=2)
+    assert (t, pr) == ("✅ cc-continuity: turn recovered", "default")
+    assert b == "proj=spike-repo 007 nudge 2 verified (user_prompt)"
+
+
+def test_build_message_freeze_detected():
+    t, b, pr = notify.build_message("freeze_detected",
+                                    slug="spike-repo", nnn=7)
+    assert (t, pr) == ("🧊 cc-continuity: retry-loop freeze?", "high")
+    assert b == "proj=spike-repo 007 pane stuck, input closed — no auto-fix"
+
+
+def test_fmt_minutes():
+    assert notify._fmt_minutes(0) == "0m"
+    assert notify._fmt_minutes(59 * 60) == "59m"
+    assert notify._fmt_minutes(3930) == "1h 05m"
+    assert notify._fmt_minutes(90 * 60) == "1h 30m"
+
+
+def test_watchdog_bodies_under_200_chars():
+    # the 200-char cap (build_message) must hold even for extreme fields
+    for ev, kw in [
+        ("dgx_down", dict(host="a" * 60, interval_min=60)),
+        ("dgx_up", dict(downtime_s=10 ** 6)),
+        ("turn_dead", dict(idle_minutes=10 ** 9, max_nudges=99)),
+        ("turn_recovered", dict(nudge=99)),
+        ("freeze_detected", {}),
+    ]:
+        _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
+        assert len(b) <= 200, ev
