@@ -99,13 +99,29 @@ def test_full_lifecycle_push_sequence(ntfy, cc_home, tmp_path, fake_tmux,
     _wait(ntfy, 8)  # row 10
 
     got = [(p["title"], p["priority"]) for p in ntfy.pushes]
-    assert got == [
+    assert got[:4] == [
         ("▶ cc-continuity: session started", "default"),       # 001
         ("⚠ cc-continuity: context warning", "default"),
         ("⟳ cc-continuity: rotation pending", "high"),
         ("✓ cc-continuity: handoff written & verified", "default"),
-        ("▶ cc-continuity: session started", "default"),       # 002
-        ("↻ cc-continuity: resumed", "default"),
+    ]
+    # P9-D7: pushes are best-effort fire-and-forget (detached curl). The
+    # successor's "started" (SessionStart hook — the hook writes its
+    # .started marker BEFORE firing the curl, so the rotator proceeds
+    # while that curl may still be connecting) and "resumed"
+    # (UserPromptSubmit hook) are two near-simultaneous deliveries with
+    # NO wire-order guarantee — under load the server accepts them in
+    # either order (exact-order assert went flaky 2026-09-23). The rest
+    # stays exact: 5→6 is serialized by the rotator's _verify_resume
+    # poll (the "resumed" curl fires inside the hook that the poll waits
+    # for).
+    assert got[4:6] in [
+        [("▶ cc-continuity: session started", "default"),      # 002
+         ("↻ cc-continuity: resumed", "default")],
+        [("↻ cc-continuity: resumed", "default"),
+         ("▶ cc-continuity: session started", "default")],     # 002
+    ]
+    assert got[6:] == [
         ("🔄 cc-continuity: rotation complete", "high"),
         ("■ cc-continuity: session ended", "default"),
     ]
@@ -113,7 +129,9 @@ def test_full_lifecycle_push_sequence(ntfy, cc_home, tmp_path, fake_tmux,
     assert bodies[0].startswith("proj=spike-repo 001 (spike-repo-001)")
     assert "proj=spike-repo 001" in bodies[2]
     assert bodies[3] == "proj=spike-repo 001 cp-001 sha256 OK"
-    assert "proj=spike-repo 002" in bodies[4]
+    # the started-002/resumed pair may be swapped on the wire (above)
+    started_i = 4 if got[4][0].endswith("session started") else 5
+    assert "proj=spike-repo 002" in bodies[started_i]
     assert bodies[6].startswith("proj=spike-repo 001→002 ratio ")
     assert "proj=spike-repo 001" in bodies[7]
 
