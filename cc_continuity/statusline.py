@@ -670,8 +670,17 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             result = {}
         win = result.get("window_id") if isinstance(result, dict) else None
         if win:
-            progress_pane.write_progress_data(win, render_segment(
-                ratio, record, enabled, blocked=blocked, ansi=False))
+            # Feed the pane only when we have a real metric (ratio present).
+            # A no-metric render (idle between turns — e.g. the instant a
+            # turn ends) would write the "⟳ …" placeholder into the data
+            # file and downgrade the pane from its last real text — the
+            # 30-min-placeholder symptom resurfacing on the WRITER side
+            # (Bug B only covered the pane reading a vanished file).
+            # Skipping the write leaves the file's mtime unchanged, so the
+            # animator keeps its last real text.
+            if ratio is not None:
+                progress_pane.write_progress_data(win, render_segment(
+                    ratio, record, enabled, blocked=blocked, ansi=False))
             segment = ""
         else:
             segment = render_segment(ratio, record, enabled,

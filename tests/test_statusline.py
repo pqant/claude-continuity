@@ -1091,6 +1091,30 @@ def test_run_mode1_no_window_id_writes_no_data_file(cc_home, monkeypatch):
                 / "progress-data-@7.json").exists()
 
 
+def test_run_mode1_idle_render_keeps_pane_real_text(cc_home, monkeypatch):
+    # A render with NO usable token data (idle between turns — a turn
+    # ending) must NOT overwrite the pane's last real text with the
+    # "⟳ …" placeholder: that is what flipped the live pane to ".." the
+    # instant a turn ended (the 30-min-placeholder symptom resurfacing on
+    # the WRITER side; Bug B only covered the pane reading a vanished file).
+    # Skipping the write leaves the mtime unchanged, so the animator keeps
+    # its last real text.
+    calls = []
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure(calls))
+    data_file = paths.runtime_dir() / "progress-data-@7.json"
+    # 1. an active render (has tokens) feeds the pane real text
+    statusline.run(json.dumps(_payload()).encode(), _cfg(progress_type=1))
+    real = json.loads(data_file.read_text(encoding="utf-8"))["text"]
+    assert real == "◆ 9% Active Usage"
+    # 2. an idle render (no tokens -> ratio None) must leave the file as-is
+    idle = _payload()
+    idle["context_window"]["current_usage"] = None
+    idle["context_window"]["total_input_tokens"] = None
+    statusline.run(json.dumps(idle).encode(), _cfg(progress_type=1))
+    assert json.loads(data_file.read_text(encoding="utf-8"))["text"] == real
+
+
 def test_run_mode0_never_calls_ensure_and_keeps_sweep(cc_home, monkeypatch):
     calls = []
     monkeypatch.setattr(progress_pane, "ensure_progress_pane",
