@@ -41,7 +41,7 @@ DEFAULTS: dict = {
     ),
     "git_snapshot": True,
     "snapshot_retention": 20,
-    "handoff_max_words": 2500,
+    "handoff_max_words": 5000,
     "inline_handoff_max_chars": 12000,
     "notify_command": None,
     "notify_endpoint": "",

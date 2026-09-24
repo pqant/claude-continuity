@@ -26,7 +26,7 @@ def test_defaults_match_prd_section_15():
     assert d["settle_ms"] == 1500
     assert d["git_snapshot"] is True
     assert d["snapshot_retention"] == 20
-    assert d["handoff_max_words"] == 2500
+    assert d["handoff_max_words"] == 5000
     assert d["inline_handoff_max_chars"] == 12000
     assert d["notify_command"] is None
     assert d["log_level"] == "info"

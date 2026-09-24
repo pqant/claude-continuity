@@ -123,7 +123,7 @@ def validate_draft(text: str, cfg: dict) -> DraftReport:
         if h in bodies and len(bodies[h].strip()) < MIN_REQUIRED_CHARS:
             problems.append(f"section too short (< {MIN_REQUIRED_CHARS} chars): {h}")
     word_count = len(redacted_text.split())
-    max_words = cfg.get("handoff_max_words", 2500)
+    max_words = cfg.get("handoff_max_words", 5000)
     if word_count > max_words:
         problems.append(f"too long: {word_count} > {max_words} words")
     return DraftReport(ok=not problems, problems=problems, warnings=warnings,
