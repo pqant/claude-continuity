@@ -10,7 +10,7 @@ Reads the status line JSON from stdin and:
    consume; anything older than 10 minutes is stale, PRD §7);
 3. chains the user's previous status line command (``chained_statusline`` in
    config, saved by the installer) with the *same* stdin and a 2 s timeout,
-   then appends our segment: ``⟳ 61% ok`` / ``⟳ 63% PENDING→proj-002`` /
+   then appends our segment: ``◆ 61% Active Usage`` / ``⟳ 63% PENDING→proj-002`` /
    ``⟳ 73% HANDOFF!`` / ``⟳ off``.
 
 ``window_tokens`` comes from config; when no config file sets it, the
@@ -158,7 +158,8 @@ _HANDOFF_STATES = frozenset({
 SHIMMER_TICK_S = 0.05
 SHIMMER_BAND = 1  # chars within +/-1 of the glimmer index get the band style
 #: Perceived sweep speed (revision 10): cells per second of wall time.
-#: 4 → a 2 s sweep over the 8-char "⟳ NN% ok" form; at the 2 Hz
+#: 4 → the band crosses the ~20-char "◆ NN% Active Usage" form in
+#: ~5 s of wall time; at the 2 Hz
 #: streaming cadence the band steps 2 cells per render — fast, but one
 #: cell at a time on any slower surface (never a teleport).
 SHIMMER_CELLS_PER_S = 4.0
@@ -380,7 +381,7 @@ def render_segment(ratio: float | None, record: dict | None,
     """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
-    ``⟳ NN% ok``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% ROTATING``,
+    ``◆ NN% Active Usage``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% ROTATING``,
     ``⟳ NN% AMCL``, ``⟳ NN% HANDOFF!``.
     The percentage is an int via ceil (never understate: the PRD pairs
     ratio 0.6036 with ``⟳ 61%``); the inner round kills IEEE-754 noise so
@@ -418,7 +419,7 @@ def render_segment(ratio: float | None, record: dict | None,
             return f"⟳ {pct}% AMCL" + (blocked_text or "")
         if state_name in _HANDOFF_STATES:
             return f"⟳ {pct}% HANDOFF!" + (blocked_text or "")
-        return f"⟳ {pct}% ok" + (blocked_text or "")
+        return f"◆ {pct}% Active Usage" + (blocked_text or "")
 
     if not enabled or (record is not None and record.get("off")):
         return _style("static", "⟳ off", None, now)
@@ -441,8 +442,8 @@ def render_segment(ratio: float | None, record: dict | None,
     if state_name in _HANDOFF_STATES:
         return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now,
                       shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
-    return _style("ok", f"⟳ {pct}% ok", blocked_text, now, shimmer=shimmer,
-                  shimmer_pos=shimmer_pos, breath=breath)
+    return _style("ok", f"◆ {pct}% Active Usage", blocked_text, now,
+                  shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
 
 
 # ------------------------ Phase 11 rev 4: reactive shimmer detection

@@ -4,7 +4,7 @@ The status line is the *only* trusted context source (PRD §4 F4/F5):
 ``cc-continuity statusline`` reads the status line JSON on stdin, atomically
 writes ``runtime/<session_id>.json``, chains the user's previous status line
 command (same stdin, 2 s timeout), and appends our segment
-(``⟳ 61% ok`` / ``⟳ 63% PENDING→proj-002`` / ``⟳ 73% HANDOFF!`` / ``⟳ off``).
+(``◆ 61% Active Usage`` / ``⟳ 63% PENDING→proj-002`` / ``⟳ 73% HANDOFF!`` / ``⟳ off``).
 """
 
 import json
@@ -226,9 +226,9 @@ def test_segment_ok_below_rotate(cc_home):
     rec = _make_session()  # BOOTSTRAPPING
     # ceil, so we never understate (PRD pairs ratio 0.6036 with "⟳ 61%").
     assert statusline.render_segment(0.6036, rec, enabled=True,
-                                     ansi=False) == "⟳ 61% ok"
+                                     ansi=False) == "◆ 61% Active Usage"
     assert statusline.render_segment(0.60, rec, enabled=True,
-                                     ansi=False) == "⟳ 60% ok"
+                                     ansi=False) == "◆ 60% Active Usage"
 
 
 def test_segment_pending_shows_successor(cc_home):
@@ -265,13 +265,13 @@ def test_segment_handoff_checkpoint_states(cc_home):
 def test_segment_none_record_ok(cc_home):
     # No matching session yet (e.g. before Phase 3 registers it): just ratio+ok.
     assert statusline.render_segment(0.5, None, enabled=True,
-                                     ansi=False) == "⟳ 50% ok"
+                                     ansi=False) == "◆ 50% Active Usage"
 
 
 def test_segment_ceil_ignores_float_noise(cc_home):
     # 0.07 * 100 == 7.000000000000001 in IEEE 754 — naive ceil would show 8%.
     assert statusline.render_segment(0.07, None, enabled=True,
-                                     ansi=False) == "⟳ 7% ok"
+                                     ansi=False) == "◆ 7% Active Usage"
 
 
 # ---------------------------------------------------------- chaining
@@ -318,15 +318,15 @@ def test_chain_missing_command_returns_empty(cc_home):
 
 
 def test_compose_line_appends_segment_after_chained(cc_home):
-    assert statusline.compose_line("prev", "⟳ 61% ok") == "prev ⟳ 61% ok"
-    assert statusline.compose_line("", "⟳ 61% ok") == "⟳ 61% ok"
+    assert statusline.compose_line("prev", "◆ 61% Active Usage") == "prev ◆ 61% Active Usage"
+    assert statusline.compose_line("", "◆ 61% Active Usage") == "◆ 61% Active Usage"
 
 
 def test_run_writes_metric_and_renders_segment(cc_home, tmp_path, monkeypatch):
     payload = _payload()
     line = statusline.run(json.dumps(payload).encode(),
                           _cfg(statusline_ansi=False))
-    assert line == "⟳ 9% ok"  # 23170/262144 -> 8.8% -> ceil 9
+    assert line == "◆ 9% Active Usage"  # 23170/262144 -> 8.8% -> ceil 9
     m = json.loads(
         (paths.runtime_dir() / f"{payload['session_id']}.json").read_text()
     )
@@ -341,7 +341,7 @@ def test_run_chains_user_statusline(cc_home, tmp_path):
     payload = _payload()
     line = statusline.run(json.dumps(payload).encode(),
                           _cfg(chained_statusline=str(prev), statusline_ansi=False))
-    assert line == "hud ⟳ 9% ok"
+    assert line == "hud ◆ 9% Active Usage"
 
 
 def test_run_disabled_writes_nothing_and_shows_off(cc_home, monkeypatch):
@@ -416,10 +416,10 @@ def test_render_segment_cv_stays_handoff(cc_home):
 
 def test_render_segment_blocked_suffix():
     rec = {"state": "ACTIVE", "name": "spike-repo-001"}
-    assert statusline.render_segment(0.5, rec, True, ansi=False) == "⟳ 50% ok"
+    assert statusline.render_segment(0.5, rec, True, ansi=False) == "◆ 50% Active Usage"
     assert statusline.render_segment(0.5, rec, True,
                                      blocked="drop db?", ansi=False) == \
-        "⟳ 50% ok ⛔ BLOCKED"
+        "◆ 50% Active Usage ⛔ BLOCKED"
     assert statusline.render_segment(None, rec, True,
                                      blocked="x", ansi=False) == "⟳ … ⛔ BLOCKED"
     assert statusline.render_segment(0.5, rec, False,
@@ -450,7 +450,7 @@ def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
     # (the ANSI BLOCKED span is asserted in the Phase 11 block below).
     line = statusline.run(json.dumps(payload).encode("utf-8"),
                           dict(config.DEFAULTS, statusline_ansi=False))
-    assert line == "⟳ 50% ok ⛔ BLOCKED"
+    assert line == "◆ 50% Active Usage ⛔ BLOCKED"
 
 
 # ----------------------------------- Phase 11: color + shimmer sweep
@@ -549,15 +549,15 @@ def test_shimmer_band_always_visible_no_rest_frame():
 
 def test_segment_ansi_shimmer_band_three_chars():
     rec = {"state": "ACTIVE", "name": "p-001"}
-    text = "⟳ 61% ok"
+    text = "◆ 61% Active Usage"
     # default = static rainbow (no band)
     assert statusline.render_segment(0.61, rec, True, now=0.0) == \
         _rainbow(text)
-    # shimmer on, now=0.62 -> glimmer = floor(0.62/0.05) % 8 = 4 ->
-    # chars 3..5 ('6', '1', '%') in the brighter same-hue variant
+    # shimmer on, now=0.62 -> glimmer = floor(0.62/0.05) % 18 = 12 ->
+    # chars 11..13 ('e', ' ', 'U') in the brighter same-hue variant
     assert statusline.render_segment(0.61, rec, True, now=0.62,
                                      shimmer=True) == \
-        _rainbow(text, band={3, 4, 5})
+        _rainbow(text, band={11, 12, 13})
 
 
 def test_shimmer_band_uses_brighter_same_hue_not_9x_not_reverse():
@@ -566,16 +566,16 @@ def test_shimmer_band_uses_brighter_same_hue_not_9x_not_reverse():
     # on the user's display chain, 020 BRIGHT TEST), NO reverse video
     # ("okunmuyor bile", 13:53:5x), NO hue shift (the 15:32 video:
     # identity-less drift, "ne oldugu belirsiz, cooook agir").
-    # now=0.62 → glimmer 4 → band {3,4,5}: '1' green→green_shimmer,
-    # '%' blue→blue_shimmer.
+    # now=0.62 → glimmer 12 (18-char form) → band {11,12,13}:
+    # 'e' blue→blue_shimmer, 'U' magenta→magenta_shimmer.
     rec = {"state": "ACTIVE", "name": "p-001"}
-    text = "⟳ 61% ok"
+    text = "◆ 61% Active Usage"
     out = statusline.render_segment(0.61, rec, True, now=0.62,
                                     shimmer=True)
     assert "\x1b[9" not in out
     assert "\x1b[7m" not in out
-    assert "\x1b[38;2;185;230;180m1" in out  # '1' = green_shimmer
-    assert "\x1b[38;2;180;205;240m%" in out  # '%' = blue_shimmer
+    assert "\x1b[38;2;180;205;240me" in out  # 'e' = blue_shimmer
+    assert "\x1b[38;2;230;180;210mU" in out  # 'U' = magenta_shimmer
 
 
 def test_shimmer_band_is_brighter_same_hue_property():
@@ -586,7 +586,7 @@ def test_shimmer_band_is_brighter_same_hue_property():
     # non-band chars the base; no reverse, no 9x, no hue shift anywhere.
     import re as _re
     rec = {"state": "ACTIVE", "name": "p-001"}
-    text = "⟳ 61% ok"
+    text = "◆ 61% Active Usage"
     n = len(text)
 
     def _lum(sgr):
@@ -635,7 +635,7 @@ def test_segment_ansi_blocked_span_own_color():
     rec = {"state": "ACTIVE", "name": "p-001"}
     span = _BOLD + _R + " ⛔ BLOCKED" + _RESET
     assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.0) \
-        == _rainbow("⟳ 50% ok") + span
+        == _rainbow("◆ 50% Active Usage") + span
     # the band sweeps the segment only — the BLOCKED span stays put
     assert statusline.render_segment(0.5, rec, True, blocked="x", now=0.62) \
         .endswith(span)
@@ -654,7 +654,7 @@ def test_segment_ansi_off_and_unknown_are_static_gray():
 def test_segment_plain_mode_byte_identical_when_ansi_false():
     rec = {"state": "ACTIVE", "name": "p-001"}
     assert statusline.render_segment(0.5, rec, True, blocked="x",
-                                     ansi=False) == "⟳ 50% ok ⛔ BLOCKED"
+                                     ansi=False) == "◆ 50% Active Usage ⛔ BLOCKED"
     assert statusline.render_segment(None, rec, True, blocked="x",
                                      ansi=False) == "⟳ … ⛔ BLOCKED"
     assert statusline.render_segment(None, None, True,
@@ -672,7 +672,7 @@ def test_run_ansi_off_renders_legacy_plain_line(cc_home, tmp_path):
     payload = _payload()
     line = statusline.run(json.dumps(payload).encode(),
                           _cfg(statusline_ansi=False))
-    assert line == "⟳ 9% ok"
+    assert line == "◆ 9% Active Usage"
 
 
 def test_run_ansi_on_renders_sweeping_rainbow(cc_home, tmp_path,
@@ -682,11 +682,11 @@ def test_run_ansi_on_renders_sweeping_rainbow(cc_home, tmp_path,
     payload = _payload()
     monkeypatch.setattr(statusline.time, "time", lambda: 0.0)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={0, 1})
+    assert line == _rainbow("◆ 9% Active Usage", band={0, 1})
     # wall clock moves → the band moves with it
     monkeypatch.setattr(statusline.time, "time", lambda: 0.55)
     line = statusline.run(json.dumps(payload).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={1, 2, 3})
+    assert line == _rainbow("◆ 9% Active Usage", band={1, 2, 3})
 
 
 # -------------------------------- Phase 11 rev 4: reactive shimmer
@@ -836,7 +836,7 @@ def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
     # revision 10: fresh state → sweep starts at cell 0 → band {0,1}
     # (no wrap: the band is |i−0| ≤ 1 = 2 chars at the left edge)
-    assert line == _rainbow("⟳ 9% ok", band={0, 1})
+    assert line == _rainbow("◆ 9% Active Usage", band={0, 1})
     assert _pane_calls(log) == [["capture-pane", "-p"]]
 
 
@@ -852,14 +852,14 @@ def test_run_sweep_advances_constant_speed_across_renders(cc_home,
     # double and int() of 1.9999… would not move the band
     monkeypatch.setattr(statusline.time, "time", lambda: 0.5)
     first = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert first == _rainbow("⟳ 9% ok", band={0, 1})
+    assert first == _rainbow("◆ 9% Active Usage", band={0, 1})
     monkeypatch.setattr(statusline.time, "time", lambda: 1.0)
     second = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert second == _rainbow("⟳ 9% ok", band={1, 2, 3})
+    assert second == _rainbow("◆ 9% Active Usage", band={1, 2, 3})
     # and another 250 ms (fractional accumulation: +1 cell)
     monkeypatch.setattr(statusline.time, "time", lambda: 1.25)
     third = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert third == _rainbow("⟳ 9% ok", band={2, 3, 4})
+    assert third == _rainbow("◆ 9% Active Usage", band={2, 3, 4})
 
 
 def test_run_bands_even_with_clean_prompt(cc_home, monkeypatch,
@@ -870,7 +870,7 @@ def test_run_bands_even_with_clean_prompt(cc_home, monkeypatch,
     _set_pane(pane, _PANE_DECOY)
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={0, 1})
+    assert line == _rainbow("◆ 9% Active Usage", band={0, 1})
 
 
 def test_run_disabled_never_reads_pane(cc_home, fake_tmux_pane):
@@ -900,7 +900,7 @@ def test_run_appends_render_log_with_gate_state(cc_home, monkeypatch,
     pane, log = fake_tmux_pane  # default pane carries the keyword
     monkeypatch.setattr(statusline.time, "time", lambda: 0.62)
     line = statusline.run(json.dumps(_payload()).encode(), _cfg())
-    assert line == _rainbow("⟳ 9% ok", band={0, 1})
+    assert line == _rainbow("◆ 9% Active Usage", band={0, 1})
     lp = _render_log_path(cc_home)
     assert lp.is_file()
     lines = lp.read_text(encoding="utf-8").splitlines()
@@ -951,7 +951,7 @@ def test_render_log_never_breaks_run(cc_home):
     lp.mkdir()
     line = statusline.run(json.dumps(_payload()).encode(),
                           _cfg(statusline_ansi=False))
-    assert line == "⟳ 9% ok"
+    assert line == "◆ 9% Active Usage"
 
 
 # --------------------------- Phase 12: progress_type mode 2 (breathing)
@@ -978,7 +978,7 @@ def test_breath_factor_one_equals_static_rainbow():
     # factor 1.0 (phase 2) must reproduce the base rainbow EXACTLY — no
     # rounding drift — so a breath at full brightness is today's look.
     rec = {"state": "ACTIVE", "name": "p-001"}
-    text = "⟳ 61% ok"
+    text = "◆ 61% Active Usage"
     static = statusline.render_segment(0.61, rec, True, now=0.0,
                                        shimmer=False)
     breath1 = statusline.render_segment(0.61, rec, True, now=1.0,
@@ -1021,7 +1021,7 @@ def test_breath_never_shimmers_band():
         # every char still carries a 24-bit SGR
         body = out[len(_BOLD):-len(_RESET)]
         assert len(_re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", body)) == \
-            len("⟳ 61% ok")
+            len("◆ 61% Active Usage")
 
 
 # ------------------- Phase 12: progress_type run() wiring (modes 1 & 2)
@@ -1062,7 +1062,7 @@ def test_run_mode1_writes_progress_data_ensures_no_sweep(
     data = json.loads(
         (paths.runtime_dir() / "progress-data-@7.json").read_text(
             encoding="utf-8"))
-    assert data["text"] == "⟳ 9% ok"
+    assert data["text"] == "◆ 9% Active Usage"
     assert not (paths.runtime_dir() / "progress-data.json").exists()
     # 3. the visible segment is the STATIC rainbow (no band, no breath)
     assert line == statusline.render_segment(

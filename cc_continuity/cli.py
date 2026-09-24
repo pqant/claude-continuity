@@ -527,7 +527,7 @@ USAGE_SUMMARY = """\
 Daily use:
   cd ~/anything
   claude                       # auto-tmux, named <project>-NNN
-  watch the status line: ⟳ NN% ok → PENDING → rotation by itself
+  watch the status line: ◆ NN% Active Usage → PENDING → rotation
 In-session skills:
   /continuity-status  /continuity-checkpoint  /continuity-rotate
   /continuity-off     /continuity-on          /continuity-history
