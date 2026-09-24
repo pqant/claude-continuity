@@ -605,4 +605,13 @@ def test_cli_progress_pane_runs_animator(cc_home, monkeypatch):
         "cc_continuity.progress_pane.run_animator",
         lambda **kw: calls.append(kw))
     assert cli.main(["progress-pane"]) == 0
-    assert len(calls) == 1
+    assert calls == [{"window_id": None}]  # no arg, no $TMUX_PANE
+
+
+def test_cli_progress_pane_passes_window_id(cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "cc_continuity.progress_pane.run_animator",
+        lambda **kw: calls.append(kw))
+    assert cli.main(["progress-pane", "@7"]) == 0
+    assert calls == [{"window_id": "@7"}]
