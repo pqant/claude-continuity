@@ -952,3 +952,73 @@ def test_render_log_never_breaks_run(cc_home):
     line = statusline.run(json.dumps(_payload()).encode(),
                           _cfg(statusline_ansi=False))
     assert line == "⟳ 9% ok"
+
+
+# --------------------------- Phase 12: progress_type mode 2 (breathing)
+#
+# Mode 2 = the whole live segment "breathes": its 24-bit base-rainbow
+# brightness pulses in a 2 s cycle of four 0.5 s phases (factors
+# 0.5, 0.75, 1.0, 0.75). Pure wall-time (int(now // 0.5) % 4) — renders
+# however far apart stay coherent; NO band (the band is the sweep, mode 0).
+# Phase 2 (factor 1.0) is EXACTLY the base rainbow = today's look, so a
+# breath at factor 1.0 is byte-identical to the static rainbow.
+
+
+def test_breath_factor_four_phase_cycle():
+    # four 0.5 s phases: 0.5, 0.75, 1.0, 0.75 — then the cycle wraps
+    assert statusline._breath_factor(0.0) == 0.5
+    assert statusline._breath_factor(0.5) == 0.75
+    assert statusline._breath_factor(1.0) == 1.0
+    assert statusline._breath_factor(1.5) == 0.75
+    assert statusline._breath_factor(2.0) == 0.5   # wraps to the top
+    assert statusline._breath_factor(2.5) == 0.75
+
+
+def test_breath_factor_one_equals_static_rainbow():
+    # factor 1.0 (phase 2) must reproduce the base rainbow EXACTLY — no
+    # rounding drift — so a breath at full brightness is today's look.
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    text = "⟳ 61% ok"
+    static = statusline.render_segment(0.61, rec, True, now=0.0,
+                                       shimmer=False)
+    breath1 = statusline.render_segment(0.61, rec, True, now=1.0,
+                                        breathing=True)
+    assert breath1 == static == _rainbow(text)
+
+
+def test_breath_phases_differ():
+    # now=0.0 (factor 0.5) vs now=0.5 (factor 0.75): different brightness
+    # bytes, and both differ from the full-brightness static rainbow.
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    a = statusline.render_segment(0.61, rec, True, now=0.0, breathing=True)
+    b = statusline.render_segment(0.61, rec, True, now=0.5, breathing=True)
+    static = statusline.render_segment(0.61, rec, True, now=0.0,
+                                       shimmer=False)
+    assert a != b
+    assert a != static
+
+
+def test_breath_is_deterministic():
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    for now in (0.0, 0.5, 1.0, 1.5, 2.0, 3.3):
+        first = statusline.render_segment(0.61, rec, True, now=now,
+                                          breathing=True)
+        second = statusline.render_segment(0.61, rec, True, now=now,
+                                           breathing=True)
+        assert first == second, now
+
+
+def test_breath_never_shimmers_band():
+    # mode 2 has NO band: the output at any phase contains only base-hue
+    # SGR (possibly darkened), never the _SHIMMER brighter-same-hue codes.
+    rec = {"state": "ACTIVE", "name": "p-001"}
+    import re as _re
+    for now in (0.0, 0.5, 1.0, 1.5):
+        out = statusline.render_segment(0.61, rec, True, now=now,
+                                        breathing=True)
+        for sgr in _SHIMMER:
+            assert sgr not in out, now
+        # every char still carries a 24-bit SGR
+        body = out[len(_BOLD):-len(_RESET)]
+        assert len(_re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", body)) == \
+            len("⟳ 61% ok")

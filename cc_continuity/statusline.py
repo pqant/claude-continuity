@@ -200,6 +200,44 @@ _BLOCKED_BASE = "\x1b[31m"  # red, own bold span
 _COLOR_STATIC = "\x1b[90m"         # dim gray
 
 
+def _sgr_rgb(sgr: str) -> "tuple[int, int, int]":
+    """``"\\x1b[38;2;R;G;Bm"`` -> ``(R, G, B)`` (the last three fields)."""
+    return tuple(int(x) for x in sgr[2:-1].split(";")[-3:])
+
+
+#: RGB triplets for each base hue, parsed ONCE at import from the pinned
+#: ``_RAINBOW`` SGR strings — a single source of truth. The pinned strings
+#: drive the shimmer tests and must not change; the triplets are derived,
+#: so there is no second source of truth to drift.
+_RAINBOW_RGB = [_sgr_rgb(s) for s in _RAINBOW]
+
+#: Phase 12 mode 2 "breathing": one 2 s cycle in four 0.5 s phases. Phase
+#: 2 (factor 1.0) is EXACTLY the base rainbow = today's look.
+_BREATH_FACTORS = (0.5, 0.75, 1.0, 0.75)
+
+
+def _breath_factor(now: float) -> float:
+    """Brightness factor for wall clock ``now`` (Phase 12 mode 2).
+
+    Pure wall-time: ``int(now // 0.5) % 4`` picks the phase, so renders
+    however far apart stay coherent (no sweep state to persist). Phase 2
+    (factor 1.0) reproduces the base rainbow.
+    """
+    return _BREATH_FACTORS[int(now // 0.5) % 4]
+
+
+def _breath_sgr(i: int, factor: float) -> str:
+    """24-bit SGR for char ``i``'s base hue scaled to ``factor``.
+
+    factor 1.0 reproduces ``_RAINBOW[i % 7]`` byte-for-byte (the rounding
+    is a no-op at 1.0); factor < 1.0 darkens the hue toward black (the
+    "breath in"). The hue is unchanged — only luminance moves.
+    """
+    r, g, b = _RAINBOW_RGB[i % len(_RAINBOW_RGB)]
+    return (f"\x1b[38;2;{round(r * factor)};"
+            f"{round(g * factor)};{round(b * factor)}m")
+
+
 def shimmer_index(now: float, length: int) -> int:
     """Glimmer cell for wall-clock ``now`` (ultrathink.sh math, revision 9).
 
@@ -261,7 +299,8 @@ def _write_shimmer_state(now: float, pos: float) -> None:
 
 def _style(kind: str, text: str, blocked: str | None, now: float,
            *, shimmer: bool = False,
-           shimmer_pos: float | None = None) -> str:
+           shimmer_pos: float | None = None,
+           breath: float | None = None) -> str:
     """Wrap one plain segment in ANSI (ultrathink.sh rainbow shimmer).
 
     Live kinds (any state): a per-character 24-bit RAINBOW — char ``i``
@@ -286,6 +325,13 @@ def _style(kind: str, text: str, blocked: str | None, now: float,
                     if blocked else "")
     if kind == "static":
         return _COLOR_STATIC + text + ANSI_RESET + blocked_part
+    if breath is not None:
+        # Phase 12 mode 2 "breathing": the base rainbow scaled to the
+        # breath factor, NO band — the whole segment brightens/dims
+        # together. Takes precedence over the band (mode 2 has no sweep).
+        chars = "".join(_breath_sgr(i, breath) + ch
+                        for i, ch in enumerate(text))
+        return ANSI_BOLD + chars + ANSI_RESET + blocked_part
     if not shimmer:
         chars = "".join(_RAINBOW[i % len(_RAINBOW)] + ch
                         for i, ch in enumerate(text))
@@ -329,7 +375,8 @@ def render_segment(ratio: float | None, record: dict | None,
                    *, ansi: bool = True,
                    now: float | None = None,
                    shimmer: bool = False,
-                   shimmer_pos: float | None = None) -> str:
+                   shimmer_pos: float | None = None,
+                   breathing: bool = False) -> str:
     """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
@@ -379,21 +426,23 @@ def render_segment(ratio: float | None, record: dict | None,
         return _style("static", "⟳ …", blocked_text, now)
     pct = math.ceil(round(ratio * 100, 6))
     state_name = (record or {}).get("state", "ACTIVE")
+    breath = _breath_factor(now) if breathing else None
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
         return _style("pending", f"⟳ {pct}% PENDING→{successor}",
-                      blocked_text, now, shimmer=shimmer, shimmer_pos=shimmer_pos)
+                      blocked_text, now, shimmer=shimmer, shimmer_pos=shimmer_pos,
+                      breath=breath)
     if state_name == "ROTATING":
         return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now,
-                      shimmer=shimmer, shimmer_pos=shimmer_pos)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     if state_name == "AWAITING_MANUAL_CLEAR":
         return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now,
-                      shimmer=shimmer, shimmer_pos=shimmer_pos)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     if state_name in _HANDOFF_STATES:
         return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now,
-                      shimmer=shimmer, shimmer_pos=shimmer_pos)
+                      shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     return _style("ok", f"⟳ {pct}% ok", blocked_text, now, shimmer=shimmer,
-                  shimmer_pos=shimmer_pos)
+                  shimmer_pos=shimmer_pos, breath=breath)
 
 
 # ------------------------ Phase 11 rev 4: reactive shimmer detection
