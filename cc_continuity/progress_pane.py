@@ -88,6 +88,21 @@ def _progress_data_mtime() -> float | None:
         return None
 
 
+def write_progress_data(text: str) -> None:
+    """Persist the plain segment text for the pane's animator (mode 1).
+
+    The mode-1 status line calls this on every render; the animator reloads
+    when the mtime changes. Swallows every failure (state must never break
+    the status line).
+    """
+    try:
+        path = _progress_data_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic.atomic_write_json(path, {"text": text, "ts": time.time()})
+    except OSError:
+        pass
+
+
 # ------------------------------------------------------------ pane record I/O
 
 

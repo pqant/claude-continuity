@@ -635,32 +635,55 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     ansi = bool(cfg.get("statusline_ansi", True))
     live = (enabled and ratio is not None
             and not (record is not None and record.get("off")))
-    # Revision 11: the sweep is ALWAYS on for live ansi segments — the
-    # ultrathink word gate is gone. The gate made the effect invisible by
-    # default (it only appeared while the word sat in the input box, and
-    # an invisible-by-default shimmer reads as "calismiyor"); the band
-    # now moves on its own at SHIMMER_CELLS_PER_S, no typing required.
-    # A static/off segment still never reads the pane (short-circuit);
-    # the capture feeds the render diagnostic log only (ut= stays
-    # honest: 1 = the word WAS in the box).
+    # Revision 11: in mode 0 the sweep is ALWAYS on for live ansi
+    # segments — the ultrathink word gate is gone. The gate made the
+    # effect invisible by default (it only appeared while the word sat in
+    # the input box, and an invisible-by-default shimmer reads as
+    # "calismiyor"); the band now moves on its own at
+    # SHIMMER_CELLS_PER_S, no typing required. A static/off segment still
+    # never reads the pane (short-circuit); the capture feeds the render
+    # diagnostic log only (ut= stays honest: 1 = the word WAS in the box).
     now = time.time()
     region = _input_box_lines() if (ansi and live) else None
     word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
-    shimmer = ansi and live
-    # Revision 10: constant-speed sweep — the band advances
-    # SHIMMER_CELLS_PER_S cells per second of wall time; the position is
-    # persisted so renders however far apart (per keystroke, ~2 Hz per
-    # streaming batch, none while idle) form one continuous sweep. The
-    # clock also advances while the gate is closed, so the sweep is
-    # mid-motion when the word reappears.
-    sweep_pos = (shimmer_advance(now, _read_shimmer_state())
-                 if (ansi and live) else None)
-    if sweep_pos is not None:
-        _write_shimmer_state(now, sweep_pos)
-    segment = render_segment(ratio, record, enabled, blocked=blocked,
-                             ansi=ansi, now=now, shimmer=shimmer,
-                             shimmer_pos=sweep_pos)
+    mode = config.progress_mode(cfg)
+    if mode == 1:
+        # Phase 12: the status line stays a STATIC rainbow; the 20 fps
+        # sweep happens in our own 1-line pane. Write the plain text for
+        # the animator and ensure the pane exists (self-heal; the call
+        # never raises — and neither must this branch).
+        from . import progress_pane  # local: it imports from THIS module
+        sweep_pos = None
+        segment = render_segment(ratio, record, enabled, blocked=blocked,
+                                 ansi=ansi, now=now, shimmer=False)
+        progress_pane.write_progress_data(render_segment(
+            ratio, record, enabled, blocked=blocked, ansi=False))
+        try:
+            progress_pane.ensure_progress_pane(cfg)
+        except Exception:
+            pass
+    elif mode == 2:
+        # Phase 12: breathing — the whole segment brightens and dims in
+        # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No
+        # sweep, so no shimmer-state write.
+        sweep_pos = None
+        segment = render_segment(ratio, record, enabled, blocked=blocked,
+                                 ansi=ansi, now=now, breathing=True)
+    else:
+        # mode 0 (default): byte-identical to today. Revision 10:
+        # constant-speed sweep — the band advances SHIMMER_CELLS_PER_S
+        # cells per second of wall time; the position is persisted so
+        # renders however far apart (per keystroke, ~2 Hz per streaming
+        # batch, none while idle) form one continuous sweep.
+        shimmer = ansi and live
+        sweep_pos = (shimmer_advance(now, _read_shimmer_state())
+                     if (ansi and live) else None)
+        if sweep_pos is not None:
+            _write_shimmer_state(now, sweep_pos)
+        segment = render_segment(ratio, record, enabled, blocked=blocked,
+                                 ansi=ansi, now=now, shimmer=shimmer,
+                                 shimmer_pos=sweep_pos)
     _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
