@@ -49,7 +49,7 @@ DRAFT_BODIES = {
     "Rejected Approaches — Do Not Repeat": "Rejected model-written snapshots.",
     "Open Problems, Risks, Questions for the User": (
         "gitsnap flake observed once; monitoring in Phase 4 runs."),
-    "Runtime Environment Notes": "Local vLLM at 127.0.0.1:8000, effort low.",
+    "Runtime Environment Notes": "Local vLLM at <DGX-IP>:8000, effort low.",
 }
 HEADING_ORDER = [
     "Objective", "Current Task and Exact Stopping Point", "Completed This Session",
