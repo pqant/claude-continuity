@@ -650,16 +650,20 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         ULTRATHINK_RE.search("\n".join(region)))
     mode = config.progress_mode(cfg)
     if mode == 1:
-        # Phase 12: the status line stays a STATIC rainbow; the 20 fps
-        # sweep happens in our own 1-line pane. Ensure the pane exists
-        # (self-heal; the call never raises — and neither must this
-        # branch), then write THIS window's plain text for the animator
-        # (per-window file: a global one made other windows' panes show
-        # this session's %).
+        # Phase 12 fix (user bug A): in mode 1 the PANE is the ONLY
+        # progress display — the status line must not render the same
+        # live segment at the same time ("sadece bi tanesi ayni anda
+        # aktif olabilir"). Ensure the pane exists (self-heal; the call
+        # never raises — and neither must this branch), then write THIS
+        # window's plain FULL form (incl. state: PENDING→/HANDOFF!/⛔
+        # BLOCKED; per-window file — a global one made other windows'
+        # panes show this session's %) for the animator. When the pane
+        # owns the display the status line DROPS the segment (chained
+        # user output only). Non-tmux: no pane can exist, so the status
+        # line keeps the full static segment — the pane cannot own the
+        # display there.
         from . import progress_pane  # local: it imports from THIS module
         sweep_pos = None
-        segment = render_segment(ratio, record, enabled, blocked=blocked,
-                                 ansi=ansi, now=now, shimmer=False)
         try:
             result = progress_pane.ensure_progress_pane(cfg)
         except Exception:
@@ -668,6 +672,11 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         if win:
             progress_pane.write_progress_data(win, render_segment(
                 ratio, record, enabled, blocked=blocked, ansi=False))
+            segment = ""
+        else:
+            segment = render_segment(ratio, record, enabled,
+                                     blocked=blocked, ansi=ansi, now=now,
+                                     shimmer=False)
     elif mode == 2:
         # Phase 12: breathing — the whole segment brightens and dims in
         # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No
