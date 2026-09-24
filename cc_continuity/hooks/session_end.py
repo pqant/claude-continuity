@@ -35,8 +35,12 @@ def handle(ctx: HookContext) -> dict | None:
 
 def _cleanup_progress_pane() -> None:
     """Phase 12 (mode 1): kill the 1-line progress pane of THIS tmux window
-    and drop its record entry + per-window data file (no stale % for the
-    next session that reuses the window).
+    and drop its record entry. The per-window data file is KEPT: the pane
+    is dead anyway, and dropping it leaves a recreated pane on the "⟳ …"
+    placeholder until the next status line render — none comes while the
+    model is down (a dropped file is how the pane sat on "…" through a
+    30-minute server freeze). The next session's pane sees at most ~2 s of
+    stale text before its first render overwrites it.
 
     The window id is resolved from ``$TMUX_PANE`` (the hook still runs in
     this CC's pane, so it is alive). No env, no record, no entry for this
@@ -71,4 +75,4 @@ def _cleanup_progress_pane_impl() -> None:
                                  ["kill-pane", "-t", pid])
     del record[win]
     progress_pane._write_pane_record(record)
-    progress_pane.drop_progress_data(win)
+    # the per-window data file is intentionally KEPT — see the docstring.

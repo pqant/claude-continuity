@@ -298,6 +298,45 @@ def test_animator_reloads_text_on_mtime_change(cc_home):
     assert v[2].startswith("BBBBB") and v[3].startswith("BBBBB")
 
 
+def test_animator_keeps_last_text_when_file_disappears(cc_home):
+    # The data file vanishing mid-run (e.g. cleanup while the model
+    # server is down) must NOT downgrade the pane to the placeholder:
+    # nothing rewrites the file until the next status line render, and
+    # no render comes while the model is down — the placeholder would
+    # be the only thing on the pane for the whole outage (the freeze
+    # the user saw: a pane sitting on "…"). The file reappearing with
+    # new content still reloads normally.
+    written = []
+    state = {"mtime": 1, "text": "AAAAA"}
+    flips = {"n": 0}
+
+    def text():
+        # what _read_progress_text returns: the placeholder when the
+        # file is missing/corrupt
+        return state["text"] if state["mtime"] is not None else "⟳ …"
+
+    def sleep(s):
+        flips["n"] += 1
+        if flips["n"] == 2:      # after frame 2: file disappears
+            state["mtime"] = None
+        elif flips["n"] == 4:    # after frame 4: file reappears
+            state["mtime"] = 3
+            state["text"] = "BBBBB"
+
+    progress_pane.run_animator(
+        _frames=6, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(5), _text=text,
+        _mtime=lambda: state["mtime"], _sleep=sleep)
+    v = [_visible(w.decode("utf-8")) for w in written]
+    # while the file is gone: keep the last real text (no "⟳ …")
+    assert v[0].startswith("AAAAA")
+    assert v[2].startswith("AAAAA")
+    assert v[3].startswith("AAAAA")
+    # file back with new content -> reload
+    assert v[4].startswith("BBBBB")
+    assert v[5].startswith("BBBBB")
+
+
 def test_animator_returns_on_io_failure(cc_home):
     # a closed pane (write raises) must END the loop, not raise — the
     # statusline self-heal recreates the pane on the next render.
