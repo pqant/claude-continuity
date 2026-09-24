@@ -8,8 +8,11 @@ in our own process, gliding a bright same-hue band over a full-width rainbow
 at ``PANE_CELLS_PER_S`` cells/s.
 
 The pane shows the SAME segment text the status line renders — in mode 1 the
-status line writes that plain text to ``runtime/progress-data.json`` on every
-render, and the pane reloads it when the file's mtime changes.
+status line writes that plain text to ``runtime/progress-data-<window_id>.json``
+on every render, and the pane reloads it when the file's mtime changes. The
+file is PER WINDOW: with one global file, every window's pane showed whatever
+another window's status line had written last (two CC windows showed each
+other's context %).
 
 Multi-CC safety: the pane record is a dict keyed by tmux WINDOW id (the pane
 dies with its CC, the window is the stable identity), so several CC windows
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -28,12 +32,16 @@ import time
 from . import atomic, paths
 from .statusline import _RAINBOW, _SHIMMER
 
+#: Window ids are tmux-generated (``@12``); restrict what we splice into
+#: filenames to word chars / ``@`` / ``-``.
+_VALID_WINDOW_ID = re.compile(r"[\w@-]+")
+
 #: Band speed for the pane (cells per second of wall time). The status line
 #: uses 4.0 (tuned for its 1 s cap); at a real 20 fps surface that reads
 #: slow, so the pane is faster — ~4 s for a full-width sweep at 80 cols.
 PANE_CELLS_PER_S = 24.0
 
-_PROGRESS_DATA_NAME = "progress-data.json"
+_PROGRESS_DATA_PREFIX = "progress-data-"
 _PANE_RECORD_NAME = "progress-pane.json"
 
 
@@ -63,42 +71,65 @@ def _frame(width: int, text: str, now: float) -> str:
 # ---------------------------------------------------------- progress-data I/O
 
 
-def _progress_data_path():
-    return paths.runtime_dir() / _PROGRESS_DATA_NAME
+def _valid_window_id(window_id: str | None) -> bool:
+    return bool(window_id) and bool(
+        _VALID_WINDOW_ID.fullmatch(window_id))
 
 
-def _read_progress_text() -> str:
-    """The plain segment text for the pane, or the unknown placeholder.
+def _progress_data_path(window_id: str):
+    return paths.runtime_dir() / f"{_PROGRESS_DATA_PREFIX}{window_id}.json"
 
-    Mode 1's status line writes ``{"text": <plain>, "ts": ...}`` each render;
-    a missing or corrupt file yields the placeholder (never a crash).
+
+def _read_progress_text(window_id: str | None) -> str:
+    """This window's plain segment text, or the unknown placeholder.
+
+    Mode 1's status line writes ``{"text": <plain>, "ts": ...}`` each render
+    to the PER-WINDOW file; a missing/corrupt file or an invalid window id
+    yields the placeholder (never a crash).
     """
+    if not _valid_window_id(window_id):
+        return "⟳ …"
     try:
-        data = json.loads(_progress_data_path().read_text(encoding="utf-8"))
+        data = json.loads(
+            _progress_data_path(window_id).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "⟳ …"
     text = data.get("text") if isinstance(data, dict) else None
     return text if isinstance(text, str) and text else "⟳ …"
 
 
-def _progress_data_mtime() -> float | None:
+def _progress_data_mtime(window_id: str | None) -> float | None:
+    if not _valid_window_id(window_id):
+        return None
     try:
-        return _progress_data_path().stat().st_mtime
+        return _progress_data_path(window_id).stat().st_mtime
     except OSError:
         return None
 
 
-def write_progress_data(text: str) -> None:
-    """Persist the plain segment text for the pane's animator (mode 1).
+def write_progress_data(window_id: str | None, text: str) -> None:
+    """Persist THIS window's plain segment text for the pane's animator.
 
     The mode-1 status line calls this on every render; the animator reloads
-    when the mtime changes. Swallows every failure (state must never break
-    the status line).
+    when the mtime changes. Invalid window id or any failure -> no-op (state
+    must never break the status line).
     """
+    if not _valid_window_id(window_id):
+        return
     try:
-        path = _progress_data_path()
+        path = _progress_data_path(window_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic.atomic_write_json(path, {"text": text, "ts": time.time()})
+    except OSError:
+        pass
+
+
+def drop_progress_data(window_id: str | None) -> None:
+    """Remove this window's data file (SessionEnd cleanup). Never raises."""
+    if not _valid_window_id(window_id):
+        return
+    try:
+        _progress_data_path(window_id).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -157,6 +188,22 @@ def _pane_alive(runner, bin_: str, pid: str, win: str) -> bool:
     return len(parts) >= 2 and parts[0] == pid and parts[1] == win
 
 
+def resolve_window_id(runner=subprocess.run,
+                      tmux=os.environ.get) -> str | None:
+    """This process's tmux window id (from ``$TMUX_PANE``), or None.
+
+    Used by the status line (per-window data file), by ``_ensure`` (record
+    key + pane argv), and by the pane process itself when it was launched
+    without an explicit window id.
+    """
+    pane = tmux("TMUX_PANE")
+    if not pane:
+        return None
+    bin_ = tmux("CC_CONTINUITY_TMUX_BIN") or "tmux"
+    return _tmux_call(runner, bin_, ["display-message", "-p", "-t", pane,
+                                     "#{window_id}"])
+
+
 def ensure_progress_pane(cfg: dict, *, runner=subprocess.run,
                          tmux=os.environ.get) -> dict:
     """Ensure a 1-line progress pane exists for this CC window.
@@ -177,8 +224,7 @@ def _ensure(cfg, runner, tmux) -> dict:
     if not pane:
         return {"created": False, "reason": "no-tmux-pane"}
     bin_ = tmux("CC_CONTINUITY_TMUX_BIN") or "tmux"
-    win = _tmux_call(runner, bin_, ["display-message", "-p", "-t", pane,
-                                    "#{window_id}"])
+    win = resolve_window_id(runner, tmux)
     if not win:
         return {"created": False, "reason": "no-window"}
     record = _read_pane_record()
@@ -186,14 +232,18 @@ def _ensure(cfg, runner, tmux) -> dict:
     if isinstance(entry, dict):
         pid = entry.get("pane_id")
         if pid and _pane_alive(runner, bin_, pid, win):
-            return {"created": False, "reason": "alive"}
+            return {"created": False, "reason": "alive",
+                    "window_id": win}
     cli = _cli_path()
     if not cli:
         return {"created": False, "reason": "no-binary"}
+    # the pane process gets its window id on the command line: its data
+    # file is per-window (one global file made windows share each
+    # other's segment text)
     out = _tmux_call(runner, bin_,
                      ["split-window", "-d", "-l", "1", "-t", pane,
                       "-P", "-F", "#{pane_id} #{window_id}",
-                      f"{cli} progress-pane"])
+                      f"{cli} progress-pane {win}"])
     if not out:
         return {"created": False, "reason": "split-failed"}
     parts = out.split()
@@ -208,24 +258,32 @@ def _ensure(cfg, runner, tmux) -> dict:
 # --------------------------------------------------------------- run_animator
 
 
-def run_animator(*, _frames=None, _write=None, _now=None, _size=None,
-                 _text=None, _mtime=None, _sleep=None) -> None:
+def run_animator(window_id: str | None = None, *, _frames=None,
+                 _write=None, _now=None, _size=None, _text=None,
+                 _mtime=None, _sleep=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\r\\x1b[2K`` + a full-width ``_frame`` + ``\\x1b[0m``
-    written to stdout. The segment text reloads when ``progress-data.json``'s
-    mtime changes (the mode-1 status line rewrites it each render). The sleep
-    is drift-compensated (0.05 s target minus the frame's own cost). ANY I/O
-    failure ends the loop (returns) — the pane dies and the status line
-    self-heal recreates it. ``_frames`` bounds the loop (tests).
+    written to stdout. The segment text reloads when this window's
+    ``progress-data-<window_id>.json`` mtime changes (the mode-1 status line
+    rewrites it each render). ``window_id`` normally comes from the command
+    line (``cc-continuity progress-pane <window_id>``); None falls back to
+    resolving ``$TMUX_PANE`` and, failing that, animates the placeholder.
+    The sleep is drift-compensated (0.05 s target minus the frame's own
+    cost). ANY I/O failure ends the loop (returns) — the pane dies and the
+    status line self-heal recreates it. ``_frames`` bounds the loop (tests).
     """
     write = _write if _write is not None else (lambda b: os.write(1, b))
     now = _now if _now is not None else time.time
     size = (_size if _size is not None
             else (lambda: shutil.get_terminal_size((80, 1))))
     sleep = _sleep if _sleep is not None else time.sleep
-    text_fn = _text if _text is not None else _read_progress_text
-    mtime_fn = _mtime if _mtime is not None else _progress_data_mtime
+    if not _valid_window_id(window_id):
+        window_id = resolve_window_id()
+    text_fn = (_text if _text is not None
+               else (lambda: _read_progress_text(window_id)))
+    mtime_fn = (_mtime if _mtime is not None
+                else (lambda: _progress_data_mtime(window_id)))
     try:
         width = size().columns
         cur_text = text_fn()

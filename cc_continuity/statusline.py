@@ -650,19 +650,23 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     mode = config.progress_mode(cfg)
     if mode == 1:
         # Phase 12: the status line stays a STATIC rainbow; the 20 fps
-        # sweep happens in our own 1-line pane. Write the plain text for
-        # the animator and ensure the pane exists (self-heal; the call
-        # never raises — and neither must this branch).
+        # sweep happens in our own 1-line pane. Ensure the pane exists
+        # (self-heal; the call never raises — and neither must this
+        # branch), then write THIS window's plain text for the animator
+        # (per-window file: a global one made other windows' panes show
+        # this session's %).
         from . import progress_pane  # local: it imports from THIS module
         sweep_pos = None
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, shimmer=False)
-        progress_pane.write_progress_data(render_segment(
-            ratio, record, enabled, blocked=blocked, ansi=False))
         try:
-            progress_pane.ensure_progress_pane(cfg)
+            result = progress_pane.ensure_progress_pane(cfg)
         except Exception:
-            pass
+            result = {}
+        win = result.get("window_id") if isinstance(result, dict) else None
+        if win:
+            progress_pane.write_progress_data(win, render_segment(
+                ratio, record, enabled, blocked=blocked, ansi=False))
     elif mode == 2:
         # Phase 12: breathing — the whole segment brightens and dims in
         # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No

@@ -128,15 +128,20 @@ def test_session_end_kills_progress_pane_and_drops_entry(
     repo = make_repo(tmp_path)
     register_session(repo)
     _seed_pane_record(cc_home, {"pane_id": "%31", "ts": 1.0})
+    data = paths.runtime_dir() / "progress-data-@7.json"
+    data.write_text(_json.dumps({"text": "⟳ 61% ok", "ts": 1.0}),
+                    encoding="utf-8")
     monkeypatch.setenv("TMUX_PANE", "%5")
     run_hook("SessionEnd", payload("SessionEnd", repo))
     log = _tmux_log(fake_tmux_win)
     assert "kill-pane" in log
     assert "%31" in log
-    # record entry dropped
+    # record entry dropped + the window's data file dropped (no stale %
+    # for the next session that reuses this window)
     rec = _json.loads(
         (paths.runtime_dir() / "progress-pane.json").read_text())
     assert "@7" not in rec
+    assert not data.exists()
 
 
 def test_session_end_no_tmux_pane_is_noop(cc_home, tmp_path,

@@ -165,6 +165,8 @@ def test_ensure_alive_pane_is_noop(cc_home, monkeypatch):
         tmux=_env(TMUX_PANE="%7"))
     assert rec["created"] is False
     assert rec["reason"] == "alive"
+    # the status line needs the window id to write its per-window data file
+    assert rec["window_id"] == "12"
     assert not any("split-window" in c for c in calls)
 
 
@@ -187,6 +189,9 @@ def test_ensure_dead_pane_recreates(cc_home, monkeypatch):
     assert len(splits) == 1
     # -d (don't steal focus) and -l 1 (one line) are part of the contract
     assert "-d" in splits[0] and "-l" in splits[0] and "1" in splits[0]
+    # the pane process must know its window (its data file is per-window)
+    assert splits[0][-1] == "/fake/cc-continuity progress-pane 12"
+    assert rec["window_id"] == "12"
 
 
 def test_ensure_missing_record_creates(cc_home, monkeypatch):
@@ -328,23 +333,41 @@ def test_animator_drift_compensates_sleep(cc_home):
 
 
 def test_read_progress_text_defaults_to_unknown(cc_home):
-    # no progress-data.json yet -> the placeholder, never a crash
-    assert progress_pane._read_progress_text() == "⟳ …"
+    # no data file yet -> the placeholder, never a crash
+    assert progress_pane._read_progress_text("12") == "⟳ …"
 
 
 def test_read_progress_text_reads_file(cc_home):
-    p = paths.runtime_dir() / "progress-data.json"
+    p = paths.runtime_dir() / "progress-data-12.json"
     atomic.atomic_write_json(p, {"text": "⟳ 9% ok", "ts": time.time()})
-    assert progress_pane._read_progress_text() == "⟳ 9% ok"
+    assert progress_pane._read_progress_text("12") == "⟳ 9% ok"
     # corrupt file -> placeholder
     p.write_text("{not json", encoding="utf-8")
-    assert progress_pane._read_progress_text() == "⟳ …"
+    assert progress_pane._read_progress_text("12") == "⟳ …"
+
+
+def test_read_progress_text_isolated_per_window(cc_home):
+    # the bug this fixes: one global progress-data.json made every window's
+    # pane show whatever ANOTHER window's status line wrote last
+    atomic.atomic_write_json(
+        paths.runtime_dir() / "progress-data-12.json",
+        {"text": "⟳ 61% ok", "ts": time.time()})
+    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
+    assert progress_pane._read_progress_text("15") == "⟳ …"
 
 
 def test_write_progress_data_roundtrip(cc_home):
-    progress_pane.write_progress_data("⟳ 61% ok")
-    p = paths.runtime_dir() / "progress-data.json"
+    progress_pane.write_progress_data("12", "⟳ 61% ok")
+    p = paths.runtime_dir() / "progress-data-12.json"
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["text"] == "⟳ 61% ok"
     assert isinstance(data["ts"], float)
-    assert progress_pane._read_progress_text() == "⟳ 61% ok"
+    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
+
+
+def test_drop_progress_data(cc_home):
+    progress_pane.write_progress_data("12", "⟳ 61% ok")
+    progress_pane.drop_progress_data("12")
+    assert not (paths.runtime_dir() / "progress-data-12.json").exists()
+    # missing file is a no-op (never raises)
+    progress_pane.drop_progress_data("15")

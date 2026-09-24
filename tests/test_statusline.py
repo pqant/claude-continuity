@@ -1036,9 +1036,14 @@ import cc_continuity.progress_pane as progress_pane  # noqa: E402
 _RATIO = round(23170 / 262144, 4)  # what extract_metric yields for _payload
 
 
-def _fake_ensure(calls):
-    return (lambda cfg: calls.append(cfg)
-            or {"created": False, "reason": "fake"})
+def _fake_ensure(calls, window_id="@7"):
+    def ensure(cfg):
+        calls.append(cfg)
+        rec = {"created": False, "reason": "fake"}
+        if window_id is not None:
+            rec["window_id"] = window_id
+        return rec
+    return ensure
 
 
 def test_run_mode1_writes_progress_data_ensures_no_sweep(
@@ -1052,16 +1057,32 @@ def test_run_mode1_writes_progress_data_ensures_no_sweep(
     # 1. the pane was ensured with the cfg (self-heal on every render)
     assert len(calls) == 1
     assert calls[0]["progress_type"] == 1
-    # 2. the plain segment text went to progress-data.json for the animator
+    # 2. the plain segment text went to the PER-WINDOW data file
+    #    (a global file made other windows' panes show this session's %)
     data = json.loads(
-        (paths.runtime_dir() / "progress-data.json").read_text(
+        (paths.runtime_dir() / "progress-data-@7.json").read_text(
             encoding="utf-8"))
     assert data["text"] == "⟳ 9% ok"
+    assert not (paths.runtime_dir() / "progress-data.json").exists()
     # 3. the visible segment is the STATIC rainbow (no band, no breath)
     assert line == statusline.render_segment(
         _RATIO, None, True, ansi=True, shimmer=False)
     # 4. no shimmer-state write (the sweep is skipped, not stalled)
     assert not statusline._shimmer_state_path().exists()
+
+
+def test_run_mode1_no_window_id_writes_no_data_file(cc_home, monkeypatch):
+    # outside tmux ensure can't resolve a window -> no data file at all
+    # (there is no pane either, so there is nothing to feed)
+    calls = []
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure(calls, window_id=None))
+    statusline.run(json.dumps(_payload()).encode(),
+                   _cfg(progress_type=1))
+    assert len(calls) == 1
+    assert not (paths.runtime_dir() / "progress-data.json").exists()
+    assert not (paths.runtime_dir()
+                / "progress-data-@7.json").exists()
 
 
 def test_run_mode0_never_calls_ensure_and_keeps_sweep(cc_home, monkeypatch):

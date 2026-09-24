@@ -132,8 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     wd_sub.add_parser("status", help="show the LaunchAgent status")
     wd_sub.add_parser("run", help="run the watchdog loop (foreground)")
 
-    sub.add_parser("progress-pane",
-                   help="run the mode-1 20 fps progress line (Phase 12)")
+    p_pane = sub.add_parser(
+        "progress-pane",
+        help="run the mode-1 20 fps progress line (Phase 12)")
+    p_pane.add_argument("window_id", nargs="?", default=None,
+                        help="tmux window id (default: resolve $TMUX_PANE)")
 
     p_sig = sub.add_parser("signal",
                            help="agent signal: needs-human / done (Phase 9)")
@@ -291,11 +294,15 @@ def cmd_statusline(args: argparse.Namespace) -> int:
 def cmd_progress_pane(args: argparse.Namespace) -> int:
     """Run the mode-1 progress line in a 1-line pane we own (Phase 12).
 
-    ``run_animator`` ticks at ~20 fps until any I/O fails, then returns —
-    the process exits, tmux reaps the pane, and the status line's
-    self-heal (``ensure_progress_pane``) recreates it on the next render.
+    The pane animates ITS window's segment text (per-window data file —
+    ``window_id`` comes from the command line, or ``$TMUX_PANE`` when the
+    pane was launched without one). ``run_animator`` ticks at ~20 fps until
+    any I/O fails, then returns — the process exits, tmux reaps the pane,
+    and the status line's self-heal (``ensure_progress_pane``) recreates it
+    on the next render.
     """
-    progress_pane.run_animator()
+    win = args.window_id or progress_pane.resolve_window_id()
+    progress_pane.run_animator(window_id=win)
     return 0
 
 
