@@ -174,3 +174,26 @@ def test_session_end_window_not_in_record_is_noop(
     run_hook("SessionEnd", payload("SessionEnd", repo))
     log = _tmux_log(fake_tmux_win)
     assert "kill-pane" not in log
+
+
+def test_session_end_drops_only_own_server_entry(
+        cc_home, tmp_path, monkeypatch, fake_tmux_win):
+    # two tmux servers both own a window @7: SessionEnd must kill and
+    # drop only THIS server's entry — never the other server's pane
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    (paths.runtime_dir() / "progress-pane.json").write_text(
+        _json.dumps({"s1111@7": {"pane_id": "%31", "ts": 1.0},
+                     "s2222@7": {"pane_id": "%32", "ts": 1.0}}),
+        encoding="utf-8")
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    monkeypatch.setenv("TMUX", "/tmp/srv,1111,0")
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    log = _tmux_log(fake_tmux_win)
+    assert "kill-pane" in log
+    assert "%31" in log
+    assert "%32" not in log  # the other server's pane must survive
+    rec = _json.loads(
+        (paths.runtime_dir() / "progress-pane.json").read_text())
+    assert "s1111@7" not in rec
+    assert rec["s2222@7"] == {"pane_id": "%32", "ts": 1.0}
