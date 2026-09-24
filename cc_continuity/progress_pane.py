@@ -292,7 +292,14 @@ def run_animator(window_id: str | None = None, *, _frames=None,
         while True:
             mt = mtime_fn()
             if mt != cur_mtime:
-                cur_text = text_fn()
+                # A file that DISAPPEARED (mtime None) is not a new text:
+                # reloading it would downgrade the pane to the placeholder,
+                # which stays until the next status line render — and no
+                # render comes while the model is down (the freeze left the
+                # pane on "…" for 30 minutes). Keep the last real text; a
+                # reappearing file (None -> new mtime) still reloads.
+                if mt is not None:
+                    cur_text = text_fn()
                 cur_mtime = mt
             t = now()
             write(("\r\x1b[2K" + _frame(width, cur_text, t)
