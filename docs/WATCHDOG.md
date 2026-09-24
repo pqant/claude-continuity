@@ -148,4 +148,8 @@ line is submitted with a bare Enter on the next unchanged tick.
 
 ## Acceptance record
 
-- _pending — filled by Task 13 (date + evidence pointer)_
+- 2026-09-24: acceptance passed — scratch project + local fake server;
+  evidence: pane capture (`you said: continue`), 3-push inbox
+  (DOWN → back → turn died, exact order), watchdog.log
+  (dgx_down / dgx_up / turn_dead, single daemon process), ledger
+  (`watchdog_nudge` n=1). DGX untouched (P10-D1).
