@@ -129,7 +129,7 @@ def test_session_end_kills_progress_pane_and_drops_entry(
     register_session(repo)
     _seed_pane_record(cc_home, {"pane_id": "%31", "ts": 1.0})
     data = paths.runtime_dir() / "progress-data-@7.json"
-    data.write_text(_json.dumps({"text": "⟳ 61% ok", "ts": 1.0}),
+    data.write_text(_json.dumps({"text": "◆ 61% Active Usage", "ts": 1.0}),
                     encoding="utf-8")
     monkeypatch.setenv("TMUX_PANE", "%5")
     run_hook("SessionEnd", payload("SessionEnd", repo))

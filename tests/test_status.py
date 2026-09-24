@@ -172,7 +172,7 @@ def test_cli_statusline_reads_stdin_and_prints_line(cc_home, tmp_path,
     # Phase 11: the CLI line is state-colored by default — assert the
     # contract on the SGR-stripped text (format-agnostic).
     plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
-    assert "⟳ 61% ok" in plain  # ceil(158234/262144*100) = 61
+    assert "◆ 61% Active Usage" in plain  # ceil(158234/262144*100) = 61
 
 
 def test_cli_statusline_garbage_stdin_exits_zero(cc_home, tmp_path,
