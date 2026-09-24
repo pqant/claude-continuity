@@ -48,6 +48,10 @@ DEFAULTS: dict = {
     "notify_enabled": False,
     "unattended": False,
     "statusline_ansi": True,
+    # Progress display (Phase 12): 0 = statusline shimmer (default, today's
+    # look), 1 = separate tmux pane (true 50 ms), 2 = statusline
+    # "breathing". Missing/invalid values degrade to 0 via progress_mode().
+    "progress_type": 0,
     "watchdog_enabled": False,
     "watchdog_health_url": "",
     "watchdog_interval_s": 300,
@@ -155,3 +159,15 @@ def is_enabled(cfg: dict) -> bool:
     if not cfg.get("enabled", True):
         return False
     return os.environ.get("CC_CONTINUITY", "1").strip() != "0"
+
+
+def progress_mode(cfg: dict) -> int:
+    """Validated progress display mode (Phase 12).
+
+    ``progress_type``: 0 = statusline shimmer (default / current look),
+    1 = separate tmux pane (true 50 ms), 2 = statusline "breathing".
+    A missing key or any invalid value (non-int, out of range) degrades to
+    0, so an existing install renders byte-identically to today.
+    """
+    v = cfg.get("progress_type", 0)
+    return v if v in (0, 1, 2) else 0

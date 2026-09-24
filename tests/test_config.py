@@ -27,6 +27,7 @@ def test_defaults_match_prd_section_15():
     assert d["git_snapshot"] is True
     assert d["snapshot_retention"] == 20
     assert d["handoff_max_words"] == 5000
+    assert d["progress_type"] == 0
     assert d["inline_handoff_max_chars"] == 12000
     assert d["notify_command"] is None
     assert d["log_level"] == "info"
@@ -155,3 +156,40 @@ def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
     assert cfg["watchdog_nudge_text"] == "continue"
     assert cfg["watchdog_network_recovery_cmd"] == \
         "sudo -n /usr/local/libexec/dgx-network-recovery"
+
+
+# --------------------------------------------------- progress_type (Phase 12)
+# Config key: 0 = statusline shimmer (default / current behavior),
+# 1 = separate tmux pane (true 50 ms), 2 = statusline "breathing".
+# Anything missing or invalid degrades to 0 = today's look.
+
+
+def test_progress_type_defaults_to_zero():
+    assert config.DEFAULTS["progress_type"] == 0
+
+
+def test_progress_mode_passthrough_valid_values():
+    for v in (0, 1, 2):
+        assert config.progress_mode({"progress_type": v}) == v
+
+
+def test_progress_mode_out_of_range_falls_back_to_zero():
+    assert config.progress_mode({"progress_type": 5}) == 0
+    assert config.progress_mode({"progress_type": -1}) == 0
+
+
+def test_progress_mode_non_int_falls_back_to_zero():
+    assert config.progress_mode({"progress_type": "1"}) == 0
+    assert config.progress_mode({"progress_type": None}) == 0
+
+
+def test_progress_mode_missing_key_falls_back_to_zero():
+    assert config.progress_mode({}) == 0
+
+
+def test_load_config_progress_type_merges(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"progress_type": 2}),
+                                         encoding="utf-8")
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["progress_type"] == 2
+    assert config.progress_mode(cfg) == 2
