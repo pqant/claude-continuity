@@ -132,6 +132,11 @@ def test_defaults_have_phase10_keys():
     assert config.DEFAULTS["watchdog_stale_minutes"] == 45
     assert config.DEFAULTS["watchdog_max_nudges"] == 3
     assert config.DEFAULTS["watchdog_nudge_text"] == "continue"
+    # P10 (network recovery): on a failed probe the daemon re-establishes the
+    # DGX route (macOS root wrapper, passwordless sudo) before re-probing.
+    # Empty string disables the step.
+    assert config.DEFAULTS["watchdog_network_recovery_cmd"] == \
+        "sudo -n /usr/local/libexec/dgx-network-recovery"
 
 
 def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
@@ -148,3 +153,5 @@ def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
     # unset keys keep defaults
     assert cfg["watchdog_max_nudges"] == 3
     assert cfg["watchdog_nudge_text"] == "continue"
+    assert cfg["watchdog_network_recovery_cmd"] == \
+        "sudo -n /usr/local/libexec/dgx-network-recovery"

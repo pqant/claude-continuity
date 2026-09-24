@@ -54,6 +54,11 @@ DEFAULTS: dict = {
     "watchdog_stale_minutes": 45,
     "watchdog_max_nudges": 3,
     "watchdog_nudge_text": "continue",
+    # On a failed health probe the daemon runs this (macOS root wrapper,
+    # passwordless sudo) to re-establish the DGX route, then re-probes. Empty
+    # string disables the step. See setup_dgx_network_recovery.sh.
+    "watchdog_network_recovery_cmd":
+        "sudo -n /usr/local/libexec/dgx-network-recovery",
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",
