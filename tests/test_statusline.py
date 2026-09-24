@@ -1064,22 +1064,28 @@ def test_run_mode1_writes_progress_data_ensures_no_sweep(
             encoding="utf-8"))
     assert data["text"] == "◆ 9% Active Usage"
     assert not (paths.runtime_dir() / "progress-data.json").exists()
-    # 3. the visible segment is the STATIC rainbow (no band, no breath)
-    assert line == statusline.render_segment(
-        _RATIO, None, True, ansi=True, shimmer=False)
+    # 3. the visible line DROPS the segment: in mode 1 the pane is the
+    #    ONLY progress display (user bug A — "sadece bi tanesi ayni anda
+    #    aktif olabilir"), so with no chained statusline the line is empty
+    assert line == ""
     # 4. no shimmer-state write (the sweep is skipped, not stalled)
     assert not statusline._shimmer_state_path().exists()
 
 
 def test_run_mode1_no_window_id_writes_no_data_file(cc_home, monkeypatch):
     # outside tmux ensure can't resolve a window -> no data file at all
-    # (there is no pane either, so there is nothing to feed)
+    # (there is no pane either, so there is nothing to feed). The status
+    # line KEEPS the full static segment here: no pane can exist, so the
+    # pane cannot own the display (user bug A non-tmux fallback).
     calls = []
     monkeypatch.setattr(progress_pane, "ensure_progress_pane",
                         _fake_ensure(calls, window_id=None))
-    statusline.run(json.dumps(_payload()).encode(),
-                   _cfg(progress_type=1))
+    line = statusline.run(json.dumps(_payload()).encode(),
+                          _cfg(progress_type=1))
     assert len(calls) == 1
+    # non-tmux: the full static segment stays in the status line
+    assert line == statusline.render_segment(
+        _RATIO, None, True, ansi=True, shimmer=False)
     assert not (paths.runtime_dir() / "progress-data.json").exists()
     assert not (paths.runtime_dir()
                 / "progress-data-@7.json").exists()
