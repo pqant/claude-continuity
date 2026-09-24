@@ -66,13 +66,16 @@ def _cleanup_progress_pane_impl() -> None:
     win = progress_pane._tmux_call(subprocess.run, bin_,
                                    ["display-message", "-p", "-t", pane,
                                     "#{window_id}"])
-    if not win or win not in record:
+    # server-scoped key: window ids are per-server, so the bare window id
+    # would match (and kill) the OTHER server's entry for the same "@N"
+    key = progress_pane._pane_record_key(win) if win else None
+    if not key or key not in record:
         return
-    entry = record[win]
+    entry = record[key]
     pid = entry.get("pane_id") if isinstance(entry, dict) else None
     if pid:
         progress_pane._tmux_call(subprocess.run, bin_,
                                  ["kill-pane", "-t", pid])
-    del record[win]
+    del record[key]
     progress_pane._write_pane_record(record)
     # the per-window data file is intentionally KEPT — see the docstring.

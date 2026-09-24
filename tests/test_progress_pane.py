@@ -228,6 +228,32 @@ def test_ensure_record_keyed_by_window(cc_home, monkeypatch):
     assert on_disk["15"]["pane_id"] == "%101"
 
 
+def test_ensure_record_keyed_per_server(cc_home, monkeypatch):
+    # the bug this fixes: window ids are per-server, so two tmux servers
+    # each with a window "12" shared ONE record entry — each render found
+    # the OTHER server's pane, thought it dead locally, and re-split forever
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    calls = []
+    monkeypatch.setenv("TMUX", "/tmp/srv,1111,0")
+    progress_pane.ensure_progress_pane(
+        {}, runner=_fake_run({"window": "12", "pane": None,
+                              "split": "%99 12"}, calls),
+        tmux=_env(TMUX_PANE="%7"))
+    calls.clear()
+    monkeypatch.setenv("TMUX", "/tmp/srv,2222,0")
+    progress_pane.ensure_progress_pane(
+        {}, runner=_fake_run({"window": "12", "pane": None,
+                              "split": "%101 12"}, calls),
+        tmux=_env(TMUX_PANE="%7"))
+    on_disk = json.loads(
+        (paths.runtime_dir() / "progress-pane.json").read_text(encoding="utf-8"))
+    # distinct per-server keys, each keeping its own pane
+    assert set(on_disk) == {"s111112", "s222212"}
+    assert on_disk["s111112"]["pane_id"] == "%99"
+    assert on_disk["s222212"]["pane_id"] == "%101"
+
+
 def test_ensure_no_binary_is_noop(cc_home, monkeypatch):
     calls = []
     monkeypatch.setattr(progress_pane, "_cli_path", lambda: None)
@@ -410,3 +436,16 @@ def test_drop_progress_data(cc_home):
     assert not (paths.runtime_dir() / "progress-data-12.json").exists()
     # missing file is a no-op (never raises)
     progress_pane.drop_progress_data("15")
+
+
+def test_progress_data_isolated_per_server(cc_home, monkeypatch):
+    # the bug this fixes: two tmux servers each have a window "12", so the
+    # shared progress-data-12.json made one server's pane show the OTHER
+    # server's % (and churned the pane record)
+    monkeypatch.setenv("TMUX", "/tmp/srv,1111,0")
+    progress_pane.write_progress_data("12", "⟳ 61% ok")
+    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
+    # a different server reading the same window id sees its own (empty)
+    # file, not server 1111's data
+    monkeypatch.setenv("TMUX", "/tmp/srv,2222,0")
+    assert progress_pane._read_progress_text("12") == "⟳ …"

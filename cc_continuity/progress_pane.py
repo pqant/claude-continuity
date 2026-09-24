@@ -18,6 +18,12 @@ Multi-CC safety: the pane record is a dict keyed by tmux WINDOW id (the pane
 dies with its CC, the window is the stable identity), so several CC windows
 in one session never clobber each other. Self-heal: the pane dies on any I/O
 failure; the next status line render (``ensure_progress_pane``) recreates it.
+
+Both the data file and the pane-record key are ALSO scoped per tmux SERVER
+(the ``$TMUX`` server pid, ``_tmux_server_token``): window ids are
+per-server, so two servers each with a window ``@0`` would otherwise
+clobber the same file and the same record entry (frozen pane, and one
+server's pane showing the other server's %).
 """
 
 from __future__ import annotations
@@ -76,8 +82,36 @@ def _valid_window_id(window_id: str | None) -> bool:
         _VALID_WINDOW_ID.fullmatch(window_id))
 
 
+def _tmux_server_token() -> str:
+    """This process's tmux server id, tokenized for filenames/record keys.
+
+    ``$TMUX`` is ``<socket>,<server_pid>,<session>``; the server pid is
+    unique per server and read identically by the status line and the
+    in-pane animator (same server). Window ids (``@N``) are per-server —
+    two servers both have a window ``@0`` — so data files and pane-record
+    keys must carry this token or the servers clobber each other (the
+    frozen pane + one server showing the other's %). Non-tmux -> "" (no
+    pane is created there anyway).
+    """
+    tmux = os.environ.get("TMUX", "")
+    if not tmux:
+        return ""
+    parts = tmux.split(",")
+    if len(parts) >= 2 and parts[1].isdigit():
+        return f"s{parts[1]}"
+    return ""
+
+
+def _pane_record_key(window_id: str) -> str:
+    """Server-scoped pane-record key (see ``_tmux_server_token``)."""
+    return f"{_tmux_server_token()}{window_id}"
+
+
 def _progress_data_path(window_id: str):
-    return paths.runtime_dir() / f"{_PROGRESS_DATA_PREFIX}{window_id}.json"
+    # per-window AND per-server: two tmux servers each have a window "@0"
+    # — the bare window id made them clobber one shared data file
+    return paths.runtime_dir() / (
+        f"{_PROGRESS_DATA_PREFIX}{_tmux_server_token()}{window_id}.json")
 
 
 def _read_progress_text(window_id: str | None) -> str:
@@ -227,8 +261,12 @@ def _ensure(cfg, runner, tmux) -> dict:
     win = resolve_window_id(runner, tmux)
     if not win:
         return {"created": False, "reason": "no-window"}
+    # record key is per-SERVER + window: two servers each have a window
+    # "@0" — the bare window id made each render "find" the OTHER server's
+    # pane, see it dead locally, and re-split forever
     record = _read_pane_record()
-    entry = record.get(win)
+    key = _pane_record_key(win)
+    entry = record.get(key)
     if isinstance(entry, dict):
         pid = entry.get("pane_id")
         if pid and _pane_alive(runner, bin_, pid, win):
@@ -250,7 +288,7 @@ def _ensure(cfg, runner, tmux) -> dict:
     if not parts:
         return {"created": False, "reason": "bad-output"}
     new_pid = parts[0]
-    record[win] = {"pane_id": new_pid, "ts": time.time()}
+    record[key] = {"pane_id": new_pid, "ts": time.time()}
     _write_pane_record(record)
     return {"created": True, "pane_id": new_pid, "window_id": win}
 
