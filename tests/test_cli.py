@@ -589,3 +589,20 @@ def test_configure_watchdog_health_invalid_writes_nothing(cc_home,
     assert cli.main(["configure", "--watchdog-health", "not-a-url"]) == 1
     assert not (cc_home / "config.json").exists()
     assert "invalid health URL" in capsys.readouterr().err
+
+
+# ------------------- Phase 12: progress-pane subcommand (mode 1)
+
+
+def test_progress_pane_subparser_smoke():
+    ns = cli.build_parser().parse_args(["progress-pane"])
+    assert ns.command == "progress-pane"
+
+
+def test_cli_progress_pane_runs_animator(cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "cc_continuity.progress_pane.run_animator",
+        lambda **kw: calls.append(kw))
+    assert cli.main(["progress-pane"]) == 0
+    assert len(calls) == 1
