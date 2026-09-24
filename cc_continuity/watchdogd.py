@@ -106,6 +106,41 @@ def probe_health(cfg: dict) -> bool:
         proc.stdout.decode(errors="replace").strip() == "200"
 
 
+# P10 (network recovery): the macOS root wrapper re-establishes the DGX route;
+# it tears Ethernet down for ~15s, so the daemon runs it ONLY on a failed
+# probe, never on a healthy one. See setup_dgx_network_recovery.sh.
+_RECOVERY_TIMEOUT_S = 30
+
+
+def recover_network(cfg: dict, runner=subprocess.run) -> dict:
+    """Re-establish the DGX route after a failed probe, so a stale route
+    (e.g. after a DGX/Mac restart) is not counted as a real failure.
+
+    Runs ``cfg["watchdog_network_recovery_cmd"]`` via the shell; an empty /
+    missing command is a no-op (``ran: False``, nothing executed). Captures
+    combined stdout+stderr so the run is inspectable in Claude Code (the
+    caller logs it). Never raises (P10-D12): a failed start degrades to
+    ``ran: True, exit: None`` — the probe still gets its second chance, and
+    if the route was not actually restored the next tick counts a real
+    failure."""
+    cmd = str(cfg.get("watchdog_network_recovery_cmd") or "").strip()
+    if not cmd:
+        return {"ran": False, "exit": None, "elapsed_s": 0.0, "out": ""}
+    start = time.monotonic()
+    try:
+        proc = runner(cmd, shell=True, capture_output=True,
+                      timeout=_RECOVERY_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return {"ran": True, "exit": None,
+                "elapsed_s": time.monotonic() - start,
+                "out": "recovery command failed to start"}
+    out = (proc.stdout or b"").decode(errors="replace").strip()
+    err = (proc.stderr or b"").decode(errors="replace").strip()
+    return {"ran": True, "exit": proc.returncode,
+            "elapsed_s": time.monotonic() - start,
+            "out": "\n".join(p for p in (out, err) if p)}
+
+
 def capture_pane(target: str) -> str | None:
     try:
         proc = subprocess.run(

@@ -187,6 +187,88 @@ def test_probe_health_empty_url_is_liveness_only():
     assert watchdogd.probe_health({"watchdog_health_url": ""}) is True
 
 
+# --- recover_network (P10 network recovery) ----------------------------------
+
+
+class _FakeRecoverRunner:
+    """Stands in for ``subprocess.run`` (shell=True) — records the call,
+    returns a fixed result, or raises like a missing binary."""
+
+    def __init__(self, stdout=b"", stderr=b"", rc=0, exc=None):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.rc = rc
+        self.exc = exc
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((cmd, kw))
+        if self.exc is not None:
+            raise self.exc
+
+        class _P:
+            pass
+        p = _P()
+        p.stdout = self.stdout
+        p.stderr = self.stderr
+        p.returncode = self.rc
+        return p
+
+
+def test_recover_network_runs_and_captures_stdout():
+    r = _FakeRecoverRunner(stdout=b"[DGX] Network recovery completed.\n")
+    rec = watchdogd.recover_network(
+        {"watchdog_network_recovery_cmd":
+         "sudo -n /usr/local/libexec/dgx-network-recovery"}, runner=r)
+    assert rec["ran"] is True
+    assert rec["exit"] == 0
+    assert rec["out"] == "[DGX] Network recovery completed."
+    assert len(r.calls) == 1
+    assert r.calls[0][0] == \
+        "sudo -n /usr/local/libexec/dgx-network-recovery"
+    assert r.calls[0][1].get("shell") is True
+
+
+def test_recover_network_includes_stderr():
+    r = _FakeRecoverRunner(stdout=b"line1\n", stderr=b"err1\n")
+    rec = watchdogd.recover_network(
+        {"watchdog_network_recovery_cmd": "true"}, runner=r)
+    assert rec["out"] == "line1\nerr1"
+
+
+def test_recover_network_empty_cmd_is_noop():
+    r = _FakeRecoverRunner()
+    rec = watchdogd.recover_network(
+        {"watchdog_network_recovery_cmd": ""}, runner=r)
+    assert rec["ran"] is False
+    assert rec["exit"] is None
+    assert r.calls == []  # nothing executed
+
+
+def test_recover_network_missing_cmd_is_noop():
+    r = _FakeRecoverRunner()
+    rec = watchdogd.recover_network({}, runner=r)
+    assert rec["ran"] is False
+    assert r.calls == []
+
+
+def test_recover_network_nonzero_exit_reported():
+    r = _FakeRecoverRunner(rc=2)
+    rec = watchdogd.recover_network(
+        {"watchdog_network_recovery_cmd": "x"}, runner=r)
+    assert rec["ran"] is True
+    assert rec["exit"] == 2
+
+
+def test_recover_network_runner_raises_degrades():
+    r = _FakeRecoverRunner(exc=OSError("no sudo"))
+    rec = watchdogd.recover_network(
+        {"watchdog_network_recovery_cmd": "x"}, runner=r)
+    assert rec["ran"] is True
+    assert rec["exit"] is None
+    assert "failed to start" in rec["out"]
+
+
 # --- tick: branches ----------------------------------------------------------
 
 
