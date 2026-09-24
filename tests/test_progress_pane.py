@@ -339,3 +339,12 @@ def test_read_progress_text_reads_file(cc_home):
     # corrupt file -> placeholder
     p.write_text("{not json", encoding="utf-8")
     assert progress_pane._read_progress_text() == "⟳ …"
+
+
+def test_write_progress_data_roundtrip(cc_home):
+    progress_pane.write_progress_data("⟳ 61% ok")
+    p = paths.runtime_dir() / "progress-data.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["text"] == "⟳ 61% ok"
+    assert isinstance(data["ts"], float)
+    assert progress_pane._read_progress_text() == "⟳ 61% ok"

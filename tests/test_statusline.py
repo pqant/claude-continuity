@@ -1022,3 +1022,79 @@ def test_breath_never_shimmers_band():
         body = out[len(_BOLD):-len(_RESET)]
         assert len(_re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", body)) == \
             len("⟳ 61% ok")
+
+
+# ------------------- Phase 12: progress_type run() wiring (modes 1 & 2)
+#
+# Mode 0 = unchanged (sweep + shimmer). Mode 1 = static rainbow in the
+# status line + runtime/progress-data.json for the pane + ensure
+# (self-heal); NO sweep. Mode 2 = breathing; NO sweep. In modes 1/2 the
+# shimmer-state file must NOT be written (the sweep is off, not stalled).
+
+import cc_continuity.progress_pane as progress_pane  # noqa: E402
+
+_RATIO = round(23170 / 262144, 4)  # what extract_metric yields for _payload
+
+
+def _fake_ensure(calls):
+    return (lambda cfg: calls.append(cfg)
+            or {"created": False, "reason": "fake"})
+
+
+def test_run_mode1_writes_progress_data_ensures_no_sweep(
+        cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure(calls))
+    payload = _payload()
+    line = statusline.run(json.dumps(payload).encode(),
+                          _cfg(progress_type=1))
+    # 1. the pane was ensured with the cfg (self-heal on every render)
+    assert len(calls) == 1
+    assert calls[0]["progress_type"] == 1
+    # 2. the plain segment text went to progress-data.json for the animator
+    data = json.loads(
+        (paths.runtime_dir() / "progress-data.json").read_text(
+            encoding="utf-8"))
+    assert data["text"] == "⟳ 9% ok"
+    # 3. the visible segment is the STATIC rainbow (no band, no breath)
+    assert line == statusline.render_segment(
+        _RATIO, None, True, ansi=True, shimmer=False)
+    # 4. no shimmer-state write (the sweep is skipped, not stalled)
+    assert not statusline._shimmer_state_path().exists()
+
+
+def test_run_mode0_never_calls_ensure_and_keeps_sweep(cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure(calls))
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert calls == []
+    # mode 0 (default) is byte-for-byte today: sweep state written,
+    # progress-data.json never touched
+    assert statusline._shimmer_state_path().exists()
+    assert not (paths.runtime_dir() / "progress-data.json").exists()
+
+
+def test_run_mode2_renders_breathing_no_sweep_state(cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure(calls))
+    static = statusline.render_segment(
+        _RATIO, None, True, ansi=True, now=0.0, shimmer=False)
+    payload = _payload()
+    # phase T=0.0 -> factor 0.5 (dim) -> differs from the static rainbow
+    monkeypatch.setattr(statusline.time, "time", lambda: 0.0)
+    dim = statusline.run(json.dumps(payload).encode(),
+                         _cfg(progress_type=2))
+    assert dim != static
+    assert dim == statusline.render_segment(
+        _RATIO, None, True, ansi=True, now=0.0, breathing=True)
+    # phase T=1.0 -> factor 1.0 -> byte-identical to the static rainbow
+    monkeypatch.setattr(statusline.time, "time", lambda: 1.0)
+    peak = statusline.run(json.dumps(payload).encode(),
+                          _cfg(progress_type=2))
+    assert peak == static
+    # mode 2 never touches the pane; no shimmer-state write
+    assert calls == []
+    assert not statusline._shimmer_state_path().exists()
