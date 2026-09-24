@@ -18,8 +18,9 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from . import (__version__, checkpoint, config, ledger, naming, paths,
-               project, state, statusline, thresholds, validate)
+from . import (__version__, checkpoint, config, ledger, naming,
+               paths, project, progress_pane, state, statusline,
+               thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
                     session_start, stop, task, tool_use, user_prompt)
 
@@ -130,6 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     wd_sub.add_parser("stop", help="bootout the LaunchAgent")
     wd_sub.add_parser("status", help="show the LaunchAgent status")
     wd_sub.add_parser("run", help="run the watchdog loop (foreground)")
+
+    sub.add_parser("progress-pane",
+                   help="run the mode-1 20 fps progress line (Phase 12)")
 
     p_sig = sub.add_parser("signal",
                            help="agent signal: needs-human / done (Phase 9)")
@@ -281,6 +285,17 @@ def cmd_statusline(args: argparse.Namespace) -> int:
     except Exception:  # the status line must never break the TUI
         line = "⟳ …"
     print(line)
+    return 0
+
+
+def cmd_progress_pane(args: argparse.Namespace) -> int:
+    """Run the mode-1 progress line in a 1-line pane we own (Phase 12).
+
+    ``run_animator`` ticks at ~20 fps until any I/O fails, then returns —
+    the process exits, tmux reaps the pane, and the status line's
+    self-heal (``ensure_progress_pane``) recreates it on the next render.
+    """
+    progress_pane.run_animator()
     return 0
 
 
@@ -683,6 +698,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "statusline":
         return cmd_statusline(args)
+    if args.command == "progress-pane":
+        return cmd_progress_pane(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "hook":
