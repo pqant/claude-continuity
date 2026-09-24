@@ -141,6 +141,26 @@ def recover_network(cfg: dict, runner=subprocess.run) -> dict:
             "out": "\n".join(p for p in (out, err) if p)}
 
 
+def _recovery_log(cfg: dict, recovery: dict) -> None:
+    """The full recovery output, timestamped, to
+    ``runtime/watchdog-recovery.log`` — the script's ``[DGX] ...`` lines,
+    inspectable inside Claude Code (the user's requirement). Never raises."""
+    cmd = str(cfg.get("watchdog_network_recovery_cmd") or "").strip()
+    try:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        body = (f"{stamp} cmd={cmd or '(disabled)'} "
+                f"exit={recovery.get('exit')} "
+                f"elapsed_s={recovery.get('elapsed_s')}\n")
+        out = str(recovery.get("out") or "").strip()
+        if out:
+            body += out + "\n"
+        with open(paths.runtime_dir() / "watchdog-recovery.log", "a",
+                  encoding="utf-8") as f:
+            f.write(body)
+    except OSError:
+        pass
+
+
 def capture_pane(target: str) -> str | None:
     try:
         proc = subprocess.run(
@@ -284,6 +304,7 @@ class TickCtx:
     list_sessions: object  # () -> list[str] | None
     send: object         # (target: str, *keys: str) -> bool
     now: float | None = None
+    recover: object = None  # () -> dict (recover_network); None = no recovery
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -411,6 +432,28 @@ def tick(ctx: TickCtx) -> dict:
     except Exception:
         _log_error("probe")
         ok = False
+
+    # network recovery (P10): a failed probe may be a stale route (DGX/Mac
+    # restart), not a real outage — run the configured macOS wrapper, log
+    # its full output, re-probe, and only then count this tick as a fail.
+    recovery = None
+    if not ok and ctx.recover is not None:
+        try:
+            recovery = ctx.recover()
+        except Exception:
+            _log_error("recover")
+        if recovery and recovery.get("ran"):
+            _recovery_log(ctx.cfg, recovery)
+            try:
+                ok = bool(ctx.probe())  # second chance after recovery
+            except Exception:
+                _log_error("probe")
+                ok = False
+    if recovery is not None:
+        line["recovery"] = {"ran": recovery.get("ran"),
+                            "exit": recovery.get("exit"),
+                            "elapsed_s": round(
+                                float(recovery.get("elapsed_s") or 0.0), 3)}
     down_since = ctx.health.down_since
     transition = ctx.health.feed(ok, now)
     if transition == "down":
@@ -490,7 +533,7 @@ def tick(ctx: TickCtx) -> dict:
 
 def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 sleep=time.sleep, probe=None, capture=None,
-                list_sessions=None, send=None) -> int:
+                list_sessions=None, send=None, recover=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
@@ -509,6 +552,8 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
         list_sessions=list_sessions if list_sessions is not None
         else list_tmux_sessions,
         send=send if send is not None else send_keys,
+        recover=(recover if recover is not None
+                 else (lambda: recover_network(cfg))),
     )
     ticks = 0
     while True:

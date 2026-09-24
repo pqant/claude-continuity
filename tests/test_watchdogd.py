@@ -28,12 +28,21 @@ class FakeIO:
         self.sessions = sessions
         self.sends = []
         self.probe_calls = 0
+        self.recover_calls = 0
+        self.recover_result = None  # None = no recovery configured
 
     def probe(self):
         self.probe_calls += 1
         if isinstance(self.ok, Exception):
             raise self.ok
+        if isinstance(self.ok, list):
+            # a list is a call sequence; the last value repeats
+            return self.ok[min(self.probe_calls - 1, len(self.ok) - 1)]
         return self.ok
+
+    def recover(self):
+        self.recover_calls += 1
+        return self.recover_result
 
     def capture(self, target):
         return self.pane
@@ -57,7 +66,7 @@ def _ctx(io, cfg_over=None, now=10_000.0, down=False):
     ctx = TickCtx(cfg=cfg, health=HealthState(), episodes={},
                   prev_captures={}, froze=set(), probe=io.probe,
                   capture=io.capture, list_sessions=io.list_sessions,
-                  send=io.send, now=now)
+                  send=io.send, recover=io.recover, now=now)
     if down:
         ctx.health.feed(False, now)
         ctx.health.feed(False, now)
@@ -267,6 +276,64 @@ def test_recover_network_runner_raises_degrades():
     assert rec["ran"] is True
     assert rec["exit"] is None
     assert "failed to start" in rec["out"]
+
+
+# --- tick + recovery (P10 network-recovery wiring) ---------------------------
+
+
+def test_tick_failed_probe_recovers_then_up(cc_home):
+    # fail → recovery ran → re-probe ok: the tick counts as healthy
+    io = FakeIO(health_ok=[False, True])
+    io.recover_result = {"ran": True, "exit": 0, "elapsed_s": 14.8,
+                         "out": "[DGX] Network recovery completed."}
+    ctx = _ctx(io, cfg_over={"watchdog_network_recovery_cmd":
+                             "sudo -n /usr/local/libexec/dgx-network-recovery"})
+    line = watchdogd.tick(ctx)
+    assert io.probe_calls == 2        # probe + re-probe
+    assert io.recover_calls == 1
+    assert "dgx_down" not in line["events"]
+    assert ctx.health.status == "UP"
+    assert line["recovery"] == {"ran": True, "exit": 0, "elapsed_s": 14.8}
+    log = (paths.runtime_dir() / "watchdog-recovery.log").read_text(
+        encoding="utf-8")
+    assert "[DGX] Network recovery completed." in log
+
+
+def test_tick_recovery_fails_still_down(cc_home, monkeypatch):
+    # fail → recovery ran → re-probe still fails: counts as a real fail
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=[False, False])
+    io.recover_result = {"ran": True, "exit": 1, "elapsed_s": 15.0,
+                         "out": "[DGX] route still missing."}
+    ctx = _ctx(io, cfg_over={"watchdog_network_recovery_cmd": "x"})
+    ctx.health.feed(False, ctx.now)   # first strike already consumed
+    line = watchdogd.tick(ctx)
+    assert io.probe_calls == 2
+    assert ctx.health.status == "DOWN"
+    assert "dgx_down" in line["events"]
+    assert any(p[0] == "dgx_down" for p in pushes)
+
+
+def test_tick_healthy_probe_never_recovers(cc_home):
+    io = FakeIO(health_ok=True)
+    ctx = _ctx(io)
+    line = watchdogd.tick(ctx)
+    assert io.probe_calls == 1
+    assert io.recover_calls == 0
+    assert "recovery" not in line
+
+
+def test_tick_recovery_noop_does_not_reprobe(cc_home):
+    # empty cmd → ran: False → no second chance, just one probe
+    io = FakeIO(health_ok=False)
+    io.recover_result = {"ran": False, "exit": None, "elapsed_s": 0.0,
+                         "out": ""}
+    ctx = _ctx(io, cfg_over={"watchdog_network_recovery_cmd": ""})
+    line = watchdogd.tick(ctx)
+    assert io.probe_calls == 1
+    assert io.recover_calls == 1
+    assert line["recovery"]["ran"] is False
+    assert "dgx_down" not in line["events"]  # 1 fail < 2-strike debounce
 
 
 # --- tick: branches ----------------------------------------------------------
