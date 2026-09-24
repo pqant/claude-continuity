@@ -73,3 +73,96 @@ def test_session_end_pushes_row10(cc_home, tmp_path, monkeypatch):
     assert run_hook("SessionEnd", p) == 0
     assert sent == [("■ cc-continuity: session ended",
                      "proj=spike-repo 001 reason=clear")]
+
+
+# ------------------- Phase 12: progress pane cleanup on SessionEnd
+#
+# Mode 1 owns a 1-line tmux pane per CC WINDOW. SessionEnd kills the pane
+# for THIS window (window id resolved from $TMUX_PANE) and drops its
+# record entry. No $TMUX_PANE (or no entry) -> no-op. Fully wrapped: the
+# hook must never fail because of it.
+
+import json as _json
+import os as _os
+
+import pytest
+
+from cc_continuity import progress_pane
+
+_FAKE_TMUX_WIN = """#!/bin/sh
+printf '%s\\n' "---" "$@" >> "${FAKE_TMUX_LOG:?}"
+for a in "$@"; do
+  if [ "$a" = "#{window_id}" ]; then
+    printf '@7\\n'
+    exit 0
+  fi
+done
+exit 0
+"""
+
+
+@pytest.fixture
+def fake_tmux_win(tmp_path, monkeypatch):
+    bin_path = tmp_path / "fake-tmux"
+    bin_path.write_text(_FAKE_TMUX_WIN)
+    _os.chmod(bin_path, 0o755)
+    log = tmp_path / "tmux-args.log"
+    monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", str(bin_path))
+    monkeypatch.setenv("FAKE_TMUX_LOG", str(log))
+    return log
+
+
+def _seed_pane_record(cc_home, entry):
+    p = paths.runtime_dir() / "progress-pane.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps({"@7": entry}), encoding="utf-8")
+
+
+def _tmux_log(path) -> str:
+    """The fake-tmux arg log; empty string when the fake was never called."""
+    return path.read_text() if path.exists() else ""
+
+
+def test_session_end_kills_progress_pane_and_drops_entry(
+        cc_home, tmp_path, monkeypatch, fake_tmux_win):
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    _seed_pane_record(cc_home, {"pane_id": "%31", "ts": 1.0})
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    log = _tmux_log(fake_tmux_win)
+    assert "kill-pane" in log
+    assert "%31" in log
+    # record entry dropped
+    rec = _json.loads(
+        (paths.runtime_dir() / "progress-pane.json").read_text())
+    assert "@7" not in rec
+
+
+def test_session_end_no_tmux_pane_is_noop(cc_home, tmp_path,
+                                          monkeypatch, fake_tmux_win):
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    _seed_pane_record(cc_home, {"pane_id": "%31", "ts": 1.0})
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    log = _tmux_log(fake_tmux_win)
+    assert "kill-pane" not in log
+    rec = _json.loads(
+        (paths.runtime_dir() / "progress-pane.json").read_text())
+    assert rec == {"@7": {"pane_id": "%31", "ts": 1.0}}
+
+
+def test_session_end_window_not_in_record_is_noop(
+        cc_home, tmp_path, monkeypatch, fake_tmux_win):
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    # record only knows window @9; this pane is in window @7
+    _seed_pane_record(cc_home, {"pane_id": "%31", "ts": 1.0})
+    (paths.runtime_dir() / "progress-pane.json").write_text(
+        _json.dumps({"@9": {"pane_id": "%99", "ts": 1.0}}),
+        encoding="utf-8")
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    log = _tmux_log(fake_tmux_win)
+    assert "kill-pane" not in log
