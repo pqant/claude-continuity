@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -71,7 +72,11 @@ def test_launcher_stub_is_executable_and_points_at_app(fake_home):
     mode = os.stat(launcher).st_mode
     assert mode & stat.S_IXUSR
     text = launcher.read_text(encoding="utf-8")
-    assert text.startswith("#!/usr/bin/env python3")
+    # Absolute interpreter: `#!/usr/bin/env python3` broke the Phase 10
+    # LaunchAgent — launchd's minimal PATH has no homebrew, so `env python3`
+    # resolved to the system 3.9, which cannot parse `dict | None`
+    # (TypeError at import → crash loop, watchdog never probed).
+    assert text.startswith(f"#!{sys.executable}")
     assert "cc_continuity.cli import main" in text
 
 

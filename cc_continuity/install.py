@@ -75,7 +75,12 @@ claude() {
 }
 """
 
-LAUNCHER_STUB = '''#!/usr/bin/env python3
+#: The shebang pins the ABSOLUTE interpreter install ran under.
+#: `#!/usr/bin/env python3` looked portable but broke the Phase 10
+#: LaunchAgent: launchd's minimal PATH has no homebrew, so `env python3`
+#: resolved to the system Python (3.9), which cannot parse `dict | None`
+#: (TypeError at import → the watchdog crash-looped and never probed).
+LAUNCHER_STUB = f'''#!{sys.executable}
 """cc-continuity launcher (written by `cc-continuity install`)."""
 import sys
 from pathlib import Path

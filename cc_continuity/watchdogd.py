@@ -578,10 +578,21 @@ def plist_path(home: Path | str) -> Path:
             / f"{PLIST_LABEL}.plist")
 
 
-def plist_render(binary: str, home: Path | str) -> str:
+def plist_render(binary: str, home: Path | str,
+                 tmux_bin: str | None = None) -> str:
     """P10-P8: the LaunchAgent plist. The absolute ``cc-continuity``
-    path is baked at install time (doctor re-verifies it — R5)."""
+    path is baked at install time (doctor re-verifies it — R5); so is the
+    absolute tmux path (``CC_CONTINUITY_TMUX_BIN``) — launchd's minimal
+    PATH has no homebrew, so a bare ``tmux`` never resolves there and the
+    daemon logged ``tmux_unavailable`` on every tick."""
     logs = paths.logs_dir()
+    tmux_env = ""
+    if tmux_bin:
+        tmux_env = (
+            "  <key>EnvironmentVariables</key>\n  <dict>\n"
+            "    <key>CC_CONTINUITY_TMUX_BIN</key>\n"
+            f"    <string>{tmux_bin}</string>\n"
+            "  </dict>\n")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -593,6 +604,7 @@ def plist_render(binary: str, home: Path | str) -> str:
         f"    <string>{binary}</string>\n"
         "    <string>watchdog</string>\n    <string>run</string>\n"
         "  </array>\n"
+        f"{tmux_env}"
         "  <key>RunAtLoad</key>\n  <true/>\n"
         "  <key>KeepAlive</key>\n  <true/>\n"
         f"  <key>WorkingDirectory</key>\n  <string>{home}</string>\n"
@@ -627,7 +639,8 @@ def install_plist(home: Path | str, *, runner=subprocess.run,
         raise WatchdogError("cc-continuity not on PATH (install first)")
     p = plist_path(home)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(plist_render(binary, Path(home)), encoding="utf-8")
+    p.write_text(plist_render(binary, Path(home),
+                              tmux_bin=which("tmux")), encoding="utf-8")
     if not _launchctl(runner, "bootstrap", f"gui/{os.getuid()}", str(p)):
         raise WatchdogError(
             "launchctl bootstrap failed — see `cc-continuity doctor`")

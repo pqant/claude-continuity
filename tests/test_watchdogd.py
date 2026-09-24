@@ -541,6 +541,21 @@ def test_plist_render_shape(cc_home, tmp_path):
     assert str(tmp_path / "home") in xml
 
 
+def test_plist_render_bakes_tmux_bin_when_given(cc_home, tmp_path):
+    # launchd's minimal PATH has no homebrew, so a bare `tmux` on PATH
+    # never resolves there — the daemon logged `tmux_unavailable` every
+    # tick and could not see a single session. Bake the absolute tmux
+    # path in at install time (same pattern as the binary path).
+    xml = watchdogd.plist_render("/usr/local/bin/cc-continuity",
+                                 tmp_path / "home",
+                                 tmux_bin="/opt/homebrew/bin/tmux")
+    assert "<key>CC_CONTINUITY_TMUX_BIN</key>" in xml
+    assert "<string>/opt/homebrew/bin/tmux</string>" in xml
+    xml_none = watchdogd.plist_render("/usr/local/bin/cc-continuity",
+                                      tmp_path / "home")
+    assert "CC_CONTINUITY_TMUX_BIN" not in xml_none
+
+
 def test_install_uninstall_plist_with_fake_runner(cc_home, tmp_path,
                                                   monkeypatch):
     calls = []
