@@ -303,6 +303,22 @@ def test_animator_writes_full_width_frames(cc_home):
     assert _visible(written[0].decode("utf-8")).startswith("⟳ 9% ok")
 
 
+def test_animator_follows_terminal_resize(cc_home):
+    # the terminal (and thus the pane) can be resized while the animator
+    # runs: the frame width must be re-read every frame, or a frame wider
+    # than the pane wraps and the visible line becomes the padding tail
+    # ("··" — the bug the user saw after a 118 -> 116 resize)
+    cols = iter([80, 80, 40])
+    out = []
+    progress_pane.run_animator("12", _frames=3, _write=out.append,
+                               _now=lambda: 0.0,
+                               _size=lambda: _size_obj(next(cols)),
+                               _text=lambda: "◆ 61% ok",
+                               _mtime=lambda: 1, _sleep=lambda s: None)
+    widths = [len(_cells(w.decode("utf-8"))) for w in out]
+    assert widths == [80, 80, 40]
+
+
 def test_animator_reloads_text_on_mtime_change(cc_home):
     written = []
     state = {"mtime": 1, "text": "AAAAA"}

@@ -1039,10 +1039,13 @@ _RATIO = round(23170 / 262144, 4)  # what extract_metric yields for _payload
 def _fake_ensure(calls, window_id="@7"):
     def ensure(cfg):
         calls.append(cfg)
-        rec = {"created": False, "reason": "fake"}
         if window_id is not None:
-            rec["window_id"] = window_id
-        return rec
+            return {"created": False, "reason": "alive",
+                    "window_id": window_id}
+        # genuinely non-tmux: ensure can't even resolve a window —
+        # there, the status line is the ONLY display and keeps the
+        # segment
+        return {"created": False, "reason": "no-tmux-pane"}
     return ensure
 
 
@@ -1089,6 +1092,27 @@ def test_run_mode1_no_window_id_writes_no_data_file(cc_home, monkeypatch):
     assert not (paths.runtime_dir() / "progress-data.json").exists()
     assert not (paths.runtime_dir()
                 / "progress-data-@7.json").exists()
+
+
+def test_run_mode1_tmux_unreachable_drops_segment(cc_home, monkeypatch):
+    # tmux IS present ($TMUX_PANE set) but the server didn't answer the
+    # display-message (2 s timeout, e.g. while the user resizes the
+    # terminal): ensure reports no-window. The pane almost certainly still
+    # owns the display — drawing the fallback segment shows the same
+    # full-width line TWICE (the duplication screenshot). Drop the
+    # segment: at worst a display-less second, never a duplicate.
+    calls = []
+
+    def ensure(cfg):
+        calls.append(cfg)
+        return {"created": False, "reason": "no-window"}
+
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane", ensure)
+    line = statusline.run(json.dumps(_payload()).encode(),
+                          _cfg(progress_type=1))
+    assert len(calls) == 1
+    assert line == ""  # pane owns the display; no duplicate
+    assert not (paths.runtime_dir() / "progress-data-@7.json").exists()
 
 
 def test_run_mode1_idle_render_keeps_pane_real_text(cc_home, monkeypatch):
