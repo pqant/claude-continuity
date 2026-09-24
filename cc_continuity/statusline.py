@@ -682,6 +682,15 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                 progress_pane.write_progress_data(win, render_segment(
                     ratio, record, enabled, blocked=blocked, ansi=False))
             segment = ""
+        elif (isinstance(result, dict)
+              and result.get("reason") in ("no-window", "error")):
+            # tmux is present but the server did not answer THIS render
+            # (2 s display-message timeout, e.g. while the user resizes
+            # the terminal). The pane almost certainly still owns the
+            # display — the fallback segment would show the same line
+            # twice (the 21:59 duplication). Dropping it costs at most
+            # a display-less second, never a duplicate.
+            segment = ""
         else:
             segment = render_segment(ratio, record, enabled,
                                      blocked=blocked, ansi=ansi, now=now,

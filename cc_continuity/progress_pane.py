@@ -323,11 +323,15 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     mtime_fn = (_mtime if _mtime is not None
                 else (lambda: _progress_data_mtime(window_id)))
     try:
-        width = size().columns
         cur_text = text_fn()
         cur_mtime = mtime_fn()
         i = 0
         while True:
+            # per-frame: the terminal can be resized while the animator
+            # runs — a one-shot width makes frames wider than the pane,
+            # which wrap and leave the padding tail ("··") visible. One
+            # TIOCGWINSZ ioctl/frame is negligible at 20 fps.
+            width = size().columns
             mt = mtime_fn()
             if mt != cur_mtime:
                 # A file that DISAPPEARED (mtime None) is not a new text:
