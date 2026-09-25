@@ -138,6 +138,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_pane.add_argument("window_id", nargs="?", default=None,
                         help="tmux window id (default: resolve $TMUX_PANE)")
 
+    p_pp = sub.add_parser(
+        "power-plug",
+        help="Kasa HS100 power endpoint (Phase 13)")
+    pp_sub = p_pp.add_subparsers(dest="power_plug_command", metavar="<action>")
+    pp_sub.add_parser("state", help="read the relay state (one-shot)")
+    pp_sub.add_parser("on", help="relay on (one-shot, verified)")
+    pp_sub.add_parser("off", help="relay off (one-shot, verified)")
+    pp_sub.add_parser("cycle", help="off → sleep → on (one-shot)")
+    pp_sub.add_parser("serve",
+                      help="run the localhost HTTP endpoint (resident)")
+    pp_sub.add_parser("install", help="install the launchd LaunchAgent")
+    pp_sub.add_parser("uninstall", help="remove the LaunchAgent")
+    pp_sub.add_parser("start", help="kickstart the running LaunchAgent")
+    pp_sub.add_parser("stop", help="bootout the LaunchAgent")
+    pp_sub.add_parser("status", help="show the LaunchAgent status")
+
     p_sig = sub.add_parser("signal",
                            help="agent signal: needs-human / done (Phase 9)")
     p_sig.add_argument("kind", choices=["needs-human", "done"])
@@ -658,6 +674,61 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
     return 2
 
 
+def cmd_power_plug(args: argparse.Namespace, home: Path | None = None,
+                   runner=subprocess.run) -> int:
+    """Phase 13: the power-plug CLI — one-shot relay actions (also the
+    manual test tools) + the resident endpoint's plist lifecycle."""
+    from . import power_plug  # local import keeps cli import light
+    action = args.power_plug_command
+    if action in ("state", "on", "off", "cycle"):
+        cfg = config.load_config()
+        if action == "state":
+            res = power_plug.read_state(cfg)
+        elif action == "on":
+            res = power_plug.set_relay_state(cfg, on=True)
+        elif action == "off":
+            res = power_plug.set_relay_state(cfg, on=False)
+        else:
+            res = power_plug.cycle(cfg)
+        print(json.dumps(res))
+        return 0 if res.get("ok") else 1
+    if action == "serve":
+        power_plug.serve(config.load_config())
+        return 0
+    home = Path(home) if home is not None else Path.home()
+    if action == "install":
+        try:
+            p = power_plug.install_plist(home, runner=runner)
+        except power_plug.PowerPlugError as e:
+            print(f"cc-continuity power-plug install: {e}", file=sys.stderr)
+            return 1
+        print(f"power-plug endpoint installed: {p} "
+              "(launchd RunAtLoad + KeepAlive)")
+        return 0
+    if action == "uninstall":
+        power_plug.uninstall_plist(home, runner=runner)
+        print("power-plug endpoint uninstalled "
+              "(launchd bootout + plist removed)")
+        return 0
+    if action == "start":
+        ok = power_plug.start_plist(home, runner=runner)
+        msg = "power-plug endpoint started" if ok \
+            else "power-plug endpoint start failed (is it installed?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "stop":
+        ok = power_plug.stop_plist(home, runner=runner)
+        msg = "power-plug endpoint stopped" if ok \
+            else "power-plug endpoint stop failed (was it loaded?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "status":
+        out = power_plug.status_plist(home, runner=runner)
+        print("power-plug endpoint: not loaded" if out is None else out.rstrip())
+        return 0
+    return 2
+
+
 def cmd_uninstall(args: argparse.Namespace) -> int:
     from . import install
     try:
@@ -741,6 +812,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "watchdog":
         return cmd_watchdog(args)
+    if args.command == "power-plug":
+        return cmd_power_plug(args)
     return 2
 
 
