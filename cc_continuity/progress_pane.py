@@ -215,14 +215,24 @@ def _tmux_call(runner, bin_: str, argv_tail: list, timeout: float = 2.0):
     return proc.stdout.decode("utf-8", "replace").strip()
 
 
-def _pane_alive(runner, bin_: str, pid: str, win: str) -> bool:
-    """True when pane ``pid`` still exists and belongs to window ``win``."""
+def _pane_height(runner, bin_: str, pid: str, win: str) -> int | None:
+    """Pane height when pane ``pid`` still exists in window ``win``, else
+    None. One display-message is both the alive check (id + window must
+    match) and the height read — the alive branch uses the height to
+    self-restore a pane the user's border drag stretched off its designed
+    1 line (the 23-row pane of the Bug Z capture; folding it into the
+    alive check adds zero extra IPC)."""
     out = _tmux_call(runner, bin_, ["display-message", "-p", "-t", pid,
-                                    "#{pane_id} #{window_id}"])
+                                    "#{pane_id} #{window_id} #{pane_height}"])
     if not out:
-        return False
+        return None
     parts = out.split()
-    return len(parts) >= 2 and parts[0] == pid and parts[1] == win
+    if len(parts) != 3 or parts[0] != pid or parts[1] != win:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
 
 
 def _pid_alive(pid: str) -> bool:
@@ -342,9 +352,16 @@ def _ensure(cfg, runner, tmux) -> dict:
     entry = record.get(key)
     if isinstance(entry, dict):
         pid = entry.get("pane_id")
-        if pid and _pane_alive(runner, bin_, pid, win):
-            return {"created": False, "reason": "alive",
-                    "window_id": win}
+        if pid:
+            height = _pane_height(runner, bin_, pid, win)
+            if height is not None:
+                # a 1-line pane is the design (split -l 1); a border drag
+                # can stretch it — self-restore before returning alive
+                if height != 1:
+                    _tmux_call(runner, bin_,
+                               ["resize-pane", "-t", pid, "-y", "1"])
+                return {"created": False, "reason": "alive",
+                        "window_id": win}
     cli = _cli_path()
     if not cli:
         return {"created": False, "reason": "no-binary"}
@@ -374,8 +391,16 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _mtime=None, _sleep=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
-    Each frame is ``\\r\\x1b[2K`` + a full-width ``_frame`` + ``\\x1b[0m``
-    written to stdout. The segment text reloads when this window's
+    Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
+    + ``\\x1b[0m\\x1b[J`` written to stdout: home to row 1 col 1, clear the
+    line, paint, reset, clear below. The frame is ABSOLUTELY positioned
+    (Bug Z) — a resize transition can race the width read and wrap one
+    frame, dropping the pty cursor to the next row; ``\\r`` only returns to
+    col 0 of the CURRENT row and can never bring it back, so the upper
+    rows would stay frozen. ``\\x1b[H`` homes every frame (immune to cursor
+    drift) and ``\\x1b[J`` erases any wrapped tail within one 50 ms frame.
+
+    The segment text reloads when this window's
     ``progress-data-<window_id>.json`` mtime changes (the mode-1 status line
     rewrites it each render). ``window_id`` normally comes from the command
     line (``cc-continuity progress-pane <window_id>``); None falls back to
@@ -417,8 +442,12 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cur_text = text_fn()
                 cur_mtime = mt
             t = now()
-            write(("\r\x1b[2K" + _frame(width, cur_text, t)
-                   + "\x1b[0m").encode("utf-8"))
+            # \x1b[H homes to row 1 col 1 every frame: \r alone can't
+            # recover a pty cursor that a resize-race wrap dropped to a
+            # lower row (Bug Z — every such race froze one more rainbow
+            # line). \x1b[J then erases any wrapped tail/stale rows.
+            write(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
+                   + "\x1b[0m\x1b[J").encode("utf-8"))
             i += 1
             if _frames is not None and i >= _frames:
                 return
