@@ -30,13 +30,13 @@ def _cells(frame):
 
 
 def _visible(frame):
-    """Strip the CR + clear-line prefix, the reset suffix, and all SGR codes.
+    """Strip every CSI sequence (SGR, clear-line, cursor-home, clear-below)
+    and the CR, leaving only the visible characters.
 
     Handles both a raw ``_frame`` (SGR cells only) and an animator line
-    (``\\r\\x1b[2K`` + cells + ``\\x1b[0m``) down to its visible characters.
+    (``\\x1b[H\\x1b[2K`` + cells + ``\\x1b[0m\\x1b[J``).
     """
-    s = re.sub(r"\x1b\[2K", "", frame)      # clear-line (no 'm' terminator)
-    s = re.sub(r"\x1b\[[0-9;]*m", "", s)    # SGR color/reset codes
+    s = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", frame)  # all CSI sequences
     return s.replace("\r", "")
 
 
@@ -119,7 +119,8 @@ def _classify(argv):
         fmt = a[-1]
         if fmt == "#{window_id}":
             return "window"
-        if fmt == "#{pane_id} #{window_id}":
+        if fmt in ("#{pane_id} #{window_id}",
+                   "#{pane_id} #{window_id} #{pane_height}"):
             return "pane"
     return "other"
 
@@ -163,13 +164,51 @@ def test_ensure_alive_pane_is_noop(cc_home, monkeypatch):
                         lambda: "/fake/cc-continuity")
     rec = progress_pane.ensure_progress_pane(
         {},
-        runner=_fake_run({"window": "12", "pane": "%50 12"}, calls),
+        runner=_fake_run({"window": "12", "pane": "%50 12 1"}, calls),
         tmux=_env(TMUX_PANE="%7"))
     assert rec["created"] is False
     assert rec["reason"] == "alive"
     # the status line needs the window id to write its per-window data file
     assert rec["window_id"] == "12"
     assert not any("split-window" in c for c in calls)
+
+
+def test_ensure_restores_pane_height_to_one(cc_home, monkeypatch):
+    # a mode-1 pane is 1 line by design (split -l 1); the user's mouse
+    # drag can stretch it (the 23-row pane of the Bug Z capture — the big
+    # black area under the frozen rows). The alive branch must restore
+    # it to its 1 line, folded into the alive check (no extra IPC).
+    monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,3301,0")
+    p = paths.runtime_dir() / "progress-pane.json"
+    atomic.atomic_write_json(p, {"s3301@0": {"pane_id": "%2", "ts": 0}})
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    calls = []
+    rec = progress_pane.ensure_progress_pane(
+        {},
+        runner=_fake_run({"window": "@0", "pane": "%2 @0 23",
+                          "windows": "@0"}, calls),
+        tmux=_env(TMUX_PANE="%0"))
+    assert rec["reason"] == "alive"
+    assert ["tmux", "resize-pane", "-t", "%2", "-y", "1"] in calls
+
+
+def test_ensure_one_line_pane_never_resizes(cc_home, monkeypatch):
+    # height already 1: the design invariant holds — no resize call (a
+    # per-render resize on a healthy pane would churn tmux for nothing).
+    monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,3301,0")
+    p = paths.runtime_dir() / "progress-pane.json"
+    atomic.atomic_write_json(p, {"s3301@0": {"pane_id": "%2", "ts": 0}})
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    calls = []
+    rec = progress_pane.ensure_progress_pane(
+        {},
+        runner=_fake_run({"window": "@0", "pane": "%2 @0 1",
+                          "windows": "@0"}, calls),
+        tmux=_env(TMUX_PANE="%0"))
+    assert rec["reason"] == "alive"
+    assert not any("resize-pane" in c for c in calls)
 
 
 def test_ensure_dead_pane_recreates(cc_home, monkeypatch):
@@ -301,7 +340,7 @@ def test_ensure_sweeps_closed_window_entry_and_file(cc_home, monkeypatch):
                         lambda: "/fake/cc-continuity")
     rec = progress_pane.ensure_progress_pane(
         {},
-        runner=_fake_run({"window": "@0", "pane": "%2 @0",
+        runner=_fake_run({"window": "@0", "pane": "%2 @0 1",
                           "windows": "@0 @3"}, calls),
         tmux=_env(TMUX_PANE="%0"))
     assert rec["reason"] == "alive"
@@ -331,7 +370,7 @@ def test_ensure_sweeps_dead_server_entry_and_file(cc_home, monkeypatch):
                         lambda: "/fake/cc-continuity")
     rec = progress_pane.ensure_progress_pane(
         {},
-        runner=_fake_run({"window": "@0", "pane": "%2 @0",
+        runner=_fake_run({"window": "@0", "pane": "%2 @0 1",
                           "windows": "@0"}, calls),
         tmux=_env(TMUX_PANE="%0"))
     assert rec["reason"] == "alive"
@@ -357,7 +396,7 @@ def test_ensure_sweep_noop_when_list_windows_fails(cc_home, monkeypatch):
                         lambda: "/fake/cc-continuity")
     rec = progress_pane.ensure_progress_pane(
         {},
-        runner=_fake_run({"window": "@0", "pane": "%2 @0"}, calls),
+        runner=_fake_run({"window": "@0", "pane": "%2 @0 1"}, calls),
         tmux=_env(TMUX_PANE="%0"))
     assert rec["reason"] == "alive"
     on_disk = json.loads(p.read_text(encoding="utf-8"))
@@ -383,8 +422,15 @@ def test_animator_writes_full_width_frames(cc_home):
         _size=lambda: _size_obj(20), _text=lambda: "⟳ 9% ok",
         _mtime=lambda: 1, _sleep=lambda s: None)
     assert len(written) == 3
-    assert written[0].startswith(b"\r\x1b[2K")
-    assert written[0].endswith(b"\x1b[0m")
+    # Bug Z: a resize transition has a one-frame width race that can WRAP
+    # the frame and drop the pty cursor to the next row. "\r" only returns
+    # to col 0 of the CURRENT row, so every later frame paints that row and
+    # the upper rows stay frozen (the 4 frozen rainbow lines captured
+    # live). Each frame must home to row 1 col 1 (\x1b[H]) — immune to
+    # cursor drift — and clear below (\x1b[J]) so a wrapped tail dies
+    # within one 50 ms frame.
+    assert written[0].startswith(b"\x1b[H\x1b[2K")
+    assert written[0].endswith(b"\x1b[0m\x1b[J")
     assert len(_visible(written[0].decode("utf-8"))) == 20
     # the segment text is left-justified
     assert _visible(written[0].decode("utf-8")).startswith("⟳ 9% ok")
