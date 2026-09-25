@@ -193,3 +193,24 @@ def test_load_config_progress_type_merges(cc_home, tmp_path):
     cfg = config.load_config(cwd=tmp_path)
     assert cfg["progress_type"] == 2
     assert config.progress_mode(cfg) == 2
+
+
+# ------------------------------------------------- power plug (Phase 13)
+# The HS100 sits on the DGX power path; the IP is a placeholder default the
+# user overrides in config.json once the real plug LAN IP is known.
+
+
+def test_defaults_have_phase13_power_plug_keys():
+    assert config.DEFAULTS["power_plug_ip"] == "192.0.2.99"
+    assert config.DEFAULTS["power_plug_port"] == 9999
+    assert config.DEFAULTS["power_cycle_off_s"] == 8
+
+
+def test_load_config_merges_power_plug_keys(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({
+        "power_plug_ip": "192.0.2.77",
+        "power_cycle_off_s": 20}), encoding="utf-8")
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["power_plug_ip"] == "192.0.2.77"
+    assert cfg["power_cycle_off_s"] == 20
+    assert cfg["power_plug_port"] == 9999  # untouched default survives

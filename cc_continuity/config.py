@@ -63,6 +63,15 @@ DEFAULTS: dict = {
     # string disables the step. See setup_dgx_network_recovery.sh.
     "watchdog_network_recovery_cmd":
         "sudo -n /usr/local/libexec/dgx-network-recovery",
+    # Power-plug endpoint (Phase 13): the HS100 on the DGX power path,
+    # driven over the legacy Kasa LAN protocol. power_plug_ip is a
+    # placeholder — set the plug's real LAN IP in config.json; empty string
+    # degrades state/on/off/cycle to ok:False. power_plug_port is the
+    # PLUG's TCP port (not the local endpoint's, which is fixed 127.0.0.1:9999).
+    "power_plug_ip": "192.0.2.99",
+    "power_plug_port": 9999,
+    # Seconds the relay stays off during a cycle (DGX off-detection margin).
+    "power_cycle_off_s": 8,
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",
