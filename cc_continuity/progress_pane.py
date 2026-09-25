@@ -18,6 +18,9 @@ Multi-CC safety: the pane record is a dict keyed by tmux WINDOW id (the pane
 dies with its CC, the window is the stable identity), so several CC windows
 in one session never clobber each other. Self-heal: the pane dies on any I/O
 failure; the next status line render (``ensure_progress_pane``) recreates it.
+A closed window's pane dies with the window; its leftover record entry and
+data file are swept on the next ensure (per window — other open windows are
+never touched; a tmux that does not answer is left alone entirely).
 
 Both the data file and the pane-record key are ALSO scoped per tmux SERVER
 (the ``$TMUX`` server pid, ``_tmux_server_token``): window ids are
@@ -222,6 +225,72 @@ def _pane_alive(runner, bin_: str, pid: str, win: str) -> bool:
     return len(parts) >= 2 and parts[0] == pid and parts[1] == win
 
 
+def _pid_alive(pid: str) -> bool:
+    """True when a process with this pid exists (signal-0 probe)."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _live_window_set(runner, bin_: str) -> set | None:
+    """This server's live window ids (all sessions), or None on failure."""
+    out = _tmux_call(runner, bin_,
+                     ["list-windows", "-a", "-F", "#{window_id}"])
+    if not out:
+        return None
+    return set(out.split())
+
+
+def _sweep_closed_windows(runner, bin_: str) -> None:
+    """Drop the record entries + data files of windows that are gone.
+
+    When a window is closed tmux kills its panes (the animator process
+    dies with it) but the record entry and the progress-data file
+    survive as leftovers. Swept on every ensure, strictly per window:
+    a key is dropped only when it is PROVABLY dead — the window is not
+    in the server's live window list, or the server pid no longer
+    exists. A live window's entry/file is never touched, so closing
+    one window cannot affect the other open ones. If tmux does not
+    answer list-windows (the resize-stall case) there is NO sweep —
+    never act on an incomplete picture. Never raises.
+    """
+    token = _tmux_server_token()
+    if not token:
+        return
+    live = _live_window_set(runner, bin_)
+    if live is None:
+        return
+    try:
+        def stale(key: str) -> bool:
+            pid_part, sep, rest = key.partition("@")
+            if not sep or not rest:
+                return False  # unparseable — never drop what we can't attribute
+            win = sep + rest  # "@0" — the window id keeps its @
+            if pid_part == token:
+                return win not in live
+            if not (pid_part.startswith("s") and pid_part[1:].isdigit()):
+                return False
+            return not _pid_alive(pid_part[1:])
+        rec = _read_pane_record()
+        changed = False
+        for key in list(rec):
+            if stale(key):
+                rec.pop(key, None)
+                changed = True
+        if changed:
+            _write_pane_record(rec)
+        for path in paths.runtime_dir().glob(
+                _PROGRESS_DATA_PREFIX + "*.json"):
+            key = path.name[len(_PROGRESS_DATA_PREFIX):-len(".json")]
+            if not stale(key):
+                continue
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def resolve_window_id(runner=subprocess.run,
                       tmux=os.environ.get) -> str | None:
     """This process's tmux window id (from ``$TMUX_PANE``), or None.
@@ -261,6 +330,10 @@ def _ensure(cfg, runner, tmux) -> dict:
     win = resolve_window_id(runner, tmux)
     if not win:
         return {"created": False, "reason": "no-window"}
+    # a closed window leaves its record entry + data file behind (its
+    # pane is already gone with the window); sweep them — per window,
+    # other open windows are never touched
+    _sweep_closed_windows(runner, bin_)
     # record key is per-SERVER + window: two servers each have a window
     # "@0" — the bare window id made each render "find" the OTHER server's
     # pane, see it dead locally, and re-split forever
