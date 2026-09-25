@@ -113,6 +113,8 @@ def _classify(argv):
     a = list(argv)
     if "split-window" in a:
         return "split"
+    if "list-windows" in a:
+        return "windows"
     if "display-message" in a:
         fmt = a[-1]
         if fmt == "#{window_id}":
@@ -276,6 +278,91 @@ def test_ensure_never_raises_on_runner_error(cc_home, monkeypatch):
         {}, runner=boom, tmux=_env(TMUX_PANE="%7"))
     assert isinstance(rec, dict)
     assert rec["created"] is False
+
+
+# -------------------------------------------------- closed-window cleanup
+
+
+def test_ensure_sweeps_closed_window_entry_and_file(cc_home, monkeypatch):
+    # window @5 was CLOSED: tmux already killed its pane with the
+    # window, but its record entry + data file survive as leftovers.
+    # The sweep drops them. Window @0 is LIVE and open: its entry and
+    # file must stay untouched — closing one window must never affect
+    # the other open windows.
+    monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,3301,0")
+    p = paths.runtime_dir() / "progress-pane.json"
+    atomic.atomic_write_json(p, {"s3301@0": {"pane_id": "%2", "ts": 1.0},
+                                 "s3301@5": {"pane_id": "%9", "ts": 2.0}})
+    for win in ("@0", "@5"):
+        (paths.runtime_dir() / f"progress-data-s3301{win}.json").write_text(
+            json.dumps({"text": "x", "ts": 1.0}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    rec = progress_pane.ensure_progress_pane(
+        {},
+        runner=_fake_run({"window": "@0", "pane": "%2 @0",
+                          "windows": "@0 @3"}, calls),
+        tmux=_env(TMUX_PANE="%0"))
+    assert rec["reason"] == "alive"
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert "s3301@5" not in on_disk  # closed window: entry swept
+    assert on_disk.get("s3301@0") == {"pane_id": "%2", "ts": 1.0}
+    assert not (paths.runtime_dir() / "progress-data-s3301@5.json").exists()
+    assert (paths.runtime_dir() / "progress-data-s3301@0.json").exists()
+
+
+def test_ensure_sweeps_dead_server_entry_and_file(cc_home, monkeypatch):
+    # server 2278's pid no longer exists (the server was restarted):
+    # its entry and data file are garbage and get swept, while this
+    # server's own artifacts stay untouched.
+    monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,3301,0")
+    monkeypatch.setattr(progress_pane, "_pid_alive",
+                        lambda pid: pid != "2278", raising=False)
+    p = paths.runtime_dir() / "progress-pane.json"
+    atomic.atomic_write_json(p, {"s2278@0": {"pane_id": "%9", "ts": 1.0},
+                                 "s3301@0": {"pane_id": "%2", "ts": 2.0}})
+    (paths.runtime_dir() / "progress-data-s2278@0.json").write_text(
+        json.dumps({"text": "x", "ts": 1.0}), encoding="utf-8")
+    (paths.runtime_dir() / "progress-data-s3301@0.json").write_text(
+        json.dumps({"text": "y", "ts": 2.0}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    rec = progress_pane.ensure_progress_pane(
+        {},
+        runner=_fake_run({"window": "@0", "pane": "%2 @0",
+                          "windows": "@0"}, calls),
+        tmux=_env(TMUX_PANE="%0"))
+    assert rec["reason"] == "alive"
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert "s2278@0" not in on_disk  # dead server: entry swept
+    assert on_disk.get("s3301@0") == {"pane_id": "%2", "ts": 2.0}
+    assert not (paths.runtime_dir() / "progress-data-s2278@0.json").exists()
+    assert (paths.runtime_dir() / "progress-data-s3301@0.json").exists()
+
+
+def test_ensure_sweep_noop_when_list_windows_fails(cc_home, monkeypatch):
+    # tmux did not answer list-windows (the resize-stall case): the
+    # sweep must do NOTHING — never act on an incomplete picture. The
+    # @5 entry's window state is unknown, so it must survive.
+    monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,3301,0")
+    p = paths.runtime_dir() / "progress-pane.json"
+    atomic.atomic_write_json(p, {"s3301@0": {"pane_id": "%2", "ts": 1.0},
+                                 "s3301@5": {"pane_id": "%9", "ts": 2.0}})
+    (paths.runtime_dir() / "progress-data-s3301@5.json").write_text(
+        json.dumps({"text": "x", "ts": 1.0}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(progress_pane, "_cli_path",
+                        lambda: "/fake/cc-continuity")
+    rec = progress_pane.ensure_progress_pane(
+        {},
+        runner=_fake_run({"window": "@0", "pane": "%2 @0"}, calls),
+        tmux=_env(TMUX_PANE="%0"))
+    assert rec["reason"] == "alive"
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert "s3301@5" in on_disk  # no sweep on failure
+    assert (paths.runtime_dir() / "progress-data-s3301@5.json").exists()
 
 
 # --------------------------------------------------------------- run_animator
