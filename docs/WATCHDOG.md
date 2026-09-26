@@ -176,6 +176,12 @@ The watchdog's actions used to be invisible inside a Claude Code session
   message. No eligible session, unresolvable pane, or failed inject →
   the digest is still file-logged, and a failed inject records no push
   cap (next run retries).
+- **mid-turn protection (Phase 14)**: if that target session is
+  `turn_active` (mid-turn), the injection is SKIPPED and `last_ts` is held
+  back (no advance) — the next 2-min tick re-reads the notable window and
+  retries. The user wants the digest ACTIONED, not queued behind a busy
+  turn (an outage digest queued into a mid-turn session is lost the moment
+  a rotation runs).
 
 Display filtering: `capture_failed:*` / `unresolvable:*` events (the
 chronic dead-session noise, repeated every tick) are dropped from the
