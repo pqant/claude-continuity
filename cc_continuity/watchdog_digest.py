@@ -230,14 +230,20 @@ def inject_pane(target: str, text: str, *, runner=subprocess.run,
     into Claude Code's input box WITHOUT submitting them — a plain
     send-keys would press Enter on every newline and submit each line as
     its own prompt. One final Enter submits the whole digest as ONE
-    queued prompt (same mechanism as a mid-turn user message). Never
+    queued prompt (same mechanism as a mid-turn user message).
+
+    The buffer is loaded from a TEMP FILE, not stdin: tmux 3.7b rejects
+    ``load-buffer -b NAME`` with no file argument ("too few arguments")
+    — live-verified against the real tmux during deployment. Never
     raises; True only when all three steps landed."""
     tmux = (tmux_bin or os.environ.get("CC_CONTINUITY_TMUX_BIN")
             or "tmux")
     buf = "cc-continuity-digest"
+    tmp = paths.runtime_dir() / "watchdog-digest-paste.txt"
     try:
-        if runner([tmux, "load-buffer", "-b", buf],
-                  input=text.encode("utf-8"), timeout=10).returncode != 0:
+        tmp.write_text(text, encoding="utf-8")
+        if runner([tmux, "load-buffer", "-b", buf, str(tmp)],
+                  timeout=10).returncode != 0:
             return False
         if runner([tmux, "paste-buffer", "-b", buf, "-t", target],
                   timeout=10).returncode != 0:
@@ -246,6 +252,11 @@ def inject_pane(target: str, text: str, *, runner=subprocess.run,
                       timeout=10).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # --- the one-shot run (launchd StartInterval / CLI) -------------------------------------

@@ -7,6 +7,7 @@ the next TDD batch (run_once, inject_pane, plist)."""
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -367,21 +368,34 @@ class _P:
         self.stderr = b""
 
 
-def test_inject_pane_loads_pastes_enters():
+def test_inject_pane_loads_pastes_enters(cc_home):
+    # tmux 3.7b: `load-buffer -b NAME` with stdin FAILS
+    # ("too few arguments") — the text must go through a file argument
+    # (live-verified against the real tmux during deployment).
     calls = []
+    loaded = {}
 
     def runner(cmd, **kw):
-        calls.append((cmd, kw))
+        calls.append(cmd)
+        if cmd[1] == "load-buffer":
+            # argv: [tmux, load-buffer, -b, BUFFER, FILE]
+            loaded["text"] = Path(cmd[4]).read_text(encoding="utf-8")
         return _P(0)
 
     ok = wd.inject_pane("cc-proj-a-0a9b", "line1\nline2", runner=runner)
     assert ok is True
-    assert calls[0][0] == ["tmux", "load-buffer", "-b", "cc-continuity-digest"]
-    assert calls[0][1].get("input") == "line1\nline2".encode("utf-8")
-    assert calls[1][0] == ["tmux", "paste-buffer", "-b",
-                           "cc-continuity-digest", "-t", "cc-proj-a-0a9b"]
-    assert calls[2][0] == ["tmux", "send-keys", "-t",
-                           "cc-proj-a-0a9b", "Enter"]
+    assert loaded["text"] == "line1\nline2"
+    assert calls[0][:3] == ["tmux", "load-buffer", "-b"]
+    assert calls[0][3] == "cc-continuity-digest"
+    assert calls[0][4] == str(paths.runtime_dir()
+                              / "watchdog-digest-paste.txt")
+    assert calls[1] == ["tmux", "paste-buffer", "-b",
+                        "cc-continuity-digest", "-t", "cc-proj-a-0a9b"]
+    assert calls[2] == ["tmux", "send-keys", "-t",
+                        "cc-proj-a-0a9b", "Enter"]
+    # the temp file is cleaned up
+    assert not (paths.runtime_dir()
+                / "watchdog-digest-paste.txt").exists()
 
 
 def test_inject_pane_paste_failure_stops_before_enter():
