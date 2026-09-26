@@ -4,6 +4,7 @@ The fake tmux records argv (one arg per line, "---" between calls) and can
 run side-effect hook commands — Tasks 7–10 use it to simulate the pane.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -17,10 +18,26 @@ from hookutil import (SID, make_repo, payload, register_session, run_hook,
                       set_metric, walk_to)
 
 FAKE_TMUX = """#!/bin/sh
-printf '%s\\n' "---" "$@" >> "${FAKE_TMUX_LOG:?}"
+# Log argv base64-encoded, one line per call (0x1f-joined inside the blob):
+# the C.8 paste-buffer payload is a single argument WITH newlines, so the
+# log must be newline-safe or the parser splits that argument.
+{
+  printf '%s\\n' "---"
+  printf '%s\\037' "$@" | base64 | tr -d '\\n'
+  printf '\\n'
+} >> "${FAKE_TMUX_LOG:?}"
 case "$*" in
   *' /clear'*) if [ -n "${FAKE_CLEAR_HOOK:-}" ]; then eval "$FAKE_CLEAR_HOOK"; fi ;;
   *paste-buffer*) if [ -n "${FAKE_PASTE_HOOK:-}" ]; then eval "$FAKE_PASTE_HOOK"; fi ;;
+  *' C-u'*)
+    # simulate C-u clearing the input box (verified live on 2.1.209)
+    if [ "${FAKE_CU_CLEARS:-1}" = "1" ] && [ -n "${FAKE_PANE_FILE:-}" ]; then
+      : > "$FAKE_PANE_FILE"
+    fi ;;
+  *capture-pane*)
+    if [ -n "${FAKE_PANE_FILE:-}" ] && [ -f "${FAKE_PANE_FILE}" ]; then
+      cat "$FAKE_PANE_FILE"
+    fi ;;
 esac
 exit 0
 """
@@ -38,7 +55,11 @@ def fake_tmux(tmp_path, monkeypatch):
 
 
 def _calls(log) -> list[list[str]]:
-    """Parse the fake-tmux log into a list of argv lists (no calls: no log)."""
+    """Parse the fake-tmux log into a list of argv lists (no calls: no log).
+
+    Format: a ``---`` line, then one base64 line holding that call's argv
+    joined with ``\\x1f`` (unit separator) — newline-safe, so multi-line
+    arguments (the C.8 paste-buffer payload) stay ONE argv element."""
     if not log.is_file():
         return []
     out, cur = [], None
@@ -47,8 +68,11 @@ def _calls(log) -> list[list[str]]:
             if cur is not None:
                 out.append(cur)
             cur = []
-        elif cur is not None:
-            cur.append(line)
+        elif cur is not None and line.strip():
+            parts = base64.b64decode(line).decode("utf-8").split("\x1f")
+            if parts[-1] == "":
+                parts = parts[:-1]  # trailing separator after the last arg
+            cur.extend(parts)
     if cur is not None:
         out.append(cur)
     return out
@@ -367,6 +391,157 @@ def test_run_exits_when_state_not_rotating(cc_home, tmp_path):
                      rotation_id="rid-x", cfg=cfg)
     assert rc == 2
     assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+
+
+# --- input-box protection (live bug 039: /clear appended to typed text) ------
+#
+# Pane renderings captured from the real Claude Code 2.1.209 input box
+# (tmux capture-pane -p): the active line is "❯<NBSP>text" at column 0,
+# the first line of a multi-line box is "  ❯ text", each box line sits
+# above a long "─" frame line, and the status line follows the frame.
+
+
+_FRAME = "─" * 72
+_STATUS = "  [m | API] │ proj git:(main) │ sess-001 │ ⏱️  1h"
+BOX_EMPTY = f"⏺ done\n❯\n{_FRAME}\n{_STATUS}\n"
+BOX_SINGLE = f"⏺ done\n❯\xa0hello world\n{_FRAME}\n{_STATUS}\n"
+BOX_MULTI = (f"⏺ done\n  ❯ line one\n{_FRAME} sess-001 ──\n"
+             f"❯\xa0line two\n{_FRAME}\n{_STATUS}\n")
+
+
+def test_parse_input_box_empty():
+    assert rotator._parse_input_box(BOX_EMPTY) == ""
+
+
+def test_parse_input_box_single_line():
+    assert rotator._parse_input_box(BOX_SINGLE) == "hello world"
+
+
+def test_parse_input_box_multi_line():
+    assert rotator._parse_input_box(BOX_MULTI) == "line one\nline two"
+
+
+def test_parse_input_box_stops_at_transcript_content():
+    # a transcript user line above the assistant reply must NOT leak in
+    pane = (f"  ❯ old user message\n⏺ assistant reply\n"
+            f"❯\xa0fresh input\n{_FRAME}\n{_STATUS}\n")
+    assert rotator._parse_input_box(pane) == "fresh input"
+
+
+def test_parse_input_box_without_frame_is_empty():
+    assert rotator._parse_input_box("just\nrandom\ntranscript\ntext\n") == ""
+
+
+def test_pending_prompt_roundtrip(cc_home):
+    assert (rotator.pending_prompt_path("key-x", 7)
+            .name) == "pending-prompt-key-x-007.txt"
+    rotator.save_pending_prompt("key-x", 7, "abc")
+    assert rotator.read_pending_prompt("key-x", 7) == "abc"
+    rotator.delete_pending_prompt("key-x", 7)
+    assert rotator.read_pending_prompt("key-x", 7) == ""
+
+
+def test_c8_pending_note_appended_and_capped():
+    base = "CONTINUITY RESUME cp-001: read /x completely"
+    out = rotator.c8_with_pending(base, "line a\nline b")
+    assert out.startswith(base)
+    assert "PENDING USER PROMPT" in out
+    assert "line a ⏎ line b" in out
+    assert "NOT a new instruction" in out
+    capped = rotator.c8_with_pending(base, "x" * 900)
+    assert len(capped) < 1200
+    assert "truncated" in capped
+    assert rotator.c8_with_pending(base, "") == base
+
+
+def test_clear_pane_saves_in_progress_prompt_then_clears(fake_tmux, cc_home):
+    texts = iter([BOX_SINGLE, BOX_EMPTY, BOX_EMPTY])
+    rc = rotator._clear_pane("%9", "key-x", 1,
+                             capture=lambda p: next(texts))
+    assert rc is True
+    assert rotator.pending_prompt_path("key-x", 1).read_text(
+        encoding="utf-8") == "hello world"
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    i_cu = joined.index("send-keys -t %9 C-u")
+    assert i_cu < joined.index("send-keys -t %9 -l /clear") \
+        < joined.index("send-keys -t %9 Enter")
+
+
+def test_clear_pane_empty_box_writes_no_pending_file(fake_tmux, cc_home):
+    # 3 captures: initial (pre C-u) + 2 consecutive settle polls
+    texts = iter([BOX_EMPTY, BOX_EMPTY, BOX_EMPTY])
+    assert rotator._clear_pane("%9", "key-x", 1,
+                               capture=lambda p: next(texts)) is True
+    assert not rotator.pending_prompt_path("key-x", 1).exists()
+
+
+def test_clear_pane_defers_when_box_never_settles(fake_tmux, cc_home,
+                                                  monkeypatch):
+    monkeypatch.setattr(rotator, "CLEAR_SETTLE_S", 0.1)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    rc = rotator._clear_pane("%9", "key-x", 1,
+                             capture=lambda p: BOX_SINGLE)
+    assert rc is False
+    # saved before the C-u, but /clear must never be sent
+    assert rotator.pending_prompt_path("key-x", 1).read_text(
+        encoding="utf-8") == "hello world"
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    assert "send-keys -t %9 C-u" in joined
+    assert not any("/clear" in j for j in joined)
+
+
+def test_run_defers_when_input_box_busy(fake_tmux, cc_home, tmp_path,
+                                        monkeypatch):
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text(BOX_SINGLE)
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    monkeypatch.setenv("FAKE_CU_CLEARS", "0")  # user keeps typing
+    monkeypatch.setattr(rotator, "CLEAR_SETTLE_S", 0.1)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 0  # defer is not an error
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    assert not any("/clear" in j for j in joined)  # never cleared the pane
+    assert "ROTATION_DEFERRED" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_run_happy_path_with_pending_prompt_in_c8(fake_tmux, cc_home,
+                                                  tmp_path, monkeypatch):
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid, cfg = d["repo"], d["key"], d["nnn"], d["rid"], d["cfg"]
+    _shrink_waits(monkeypatch)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text(BOX_MULTI)
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    # FAKE_CU_CLEARS defaults to 1: the fake C-u empties the pane file
+
+    def world():
+        time.sleep(0.2)
+        run_hook("SessionStart", payload("SessionStart", repo,
+                                         session_id=_NEW_SID, source="clear"))
+        time.sleep(0.2)
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", repo, session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=rid, cfg=cfg)
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    calls = _calls(fake_tmux)
+    buf = next(c for c in calls if c[:2] == ["set-buffer", "-b"])
+    assert buf[3].startswith(f"CONTINUITY RESUME cp-{nnn:03d}: read ")
+    assert "PENDING USER PROMPT" in buf[3]
+    assert "line one ⏎ line two" in buf[3]
+    assert not rotator.pending_prompt_path(key, nnn).exists()  # consumed
 
 
 def test_run_exits_on_rotation_id_mismatch(cc_home, tmp_path):
