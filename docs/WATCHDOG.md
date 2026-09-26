@@ -93,7 +93,9 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
   (`waiting_for_dgx`): a nudge is a model call, and the model is what is
   down.
 - **UP again** → `dgx_up` push (high, with downtime) and the deferred
-  nudge fires.
+  nudge fires. Phase 15 additionally **nudges any eligible session still
+  mid-turn** (`turn_active`) whose ledger is fresh — a turn that died on the
+  outage's API error and `classify()` masks as ALIVE (see *Outage recovery*).
 
 ### Turn liveness (P10-D6, row order is binding)
 
@@ -117,6 +119,19 @@ Eligibility dominates age: a session whose state is not `ACTIVE`/`WARNED`
   `max_nudges`).
 - **Give up**: `max_nudges` (3) unverified nudges → `needs_human` push,
   then DONE until a human prompt lands.
+
+### Outage recovery (Phase 15)
+
+A turn that dies on the outage's API error leaves `turn_active` True with **no
+`stop`** — so `last_ledger_ts` stays at the turn-start prompt and, for an
+outage shorter than `stale_minutes`, `classify()` returns **ALIVE** (row 1)
+before any pane check. The normal nudge path (rows 3–4) never sees it, and it
+sat dead through `dgx_up` until a human prompt (regression: 2026-09-26 22:14
+outage, session 044). On the DOWN→UP **transition tick** the daemon now nudges
+each eligible session still `turn_active` with a **fresh** ledger (the
+ALIVE-masked set); a stale ledger is left to the normal TURN_DEAD/STALLED path
+so the two never double-nudge the same tick. The pass fires only on the
+transition tick, so a recovery turn in flight is not re-nudged.
 
 ### Network recovery (P10)
 

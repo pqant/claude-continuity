@@ -402,6 +402,70 @@ def test_tick_turn_dead_down_waits_then_up_nudges(cc_home, monkeypatch):
     assert ctx.episodes[("proj-a", 1)].waiting_health is True
 
 
+# --- tick: Phase 15 outage recovery (dgx_up nudge) ----------------------------
+#
+# A stuck mid-turn (API error, no stop) keeps turn_active=True and, for a
+# <stale-minute outage, a FRESH last_ts. classify() row 1 returns ALIVE for it
+# (fresh ledger) before any pane check, so the normal nudge path never runs and
+# the session never recovers when the DGX comes back. The recovery pass below
+# nudges it on the DOWN->UP transition. Regression: 2026-09-26 outage, 044 sat
+# ALIVE through the 22:14 dgx_up tick until a manual user_prompt.
+
+
+def test_tick_dgx_up_nudges_stuck_midturn_fresh_ledger(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=False)
+    sdir = _mk(turn_active=True)  # mid-turn when the outage hit
+    ledger.append(sdir, {"type": "user_prompt", "ts": 9_400.0})  # 10 min < 45
+    ctx = _ctx(io, now=10_000.0, down=True)
+    assert ctx.health.status == "DOWN"
+    line = watchdogd.tick(ctx)
+    # during the outage it is masked ALIVE (fresh ledger) -> no nudge (bug)
+    assert line["sessions"][0]["outcome"] == "ALIVE"
+    assert io.sends == []
+
+    io.ok = True  # DGX back -> one good probe -> DOWN->UP transition
+    ctx.now = 10_900.0  # 15-min outage; 9_400 still < 45 min (fresh)
+    line2 = watchdogd.tick(ctx)
+    assert "dgx_up" in line2["events"]
+    assert io.sends == [("cc-proj-a-0a9b", "continue", "Enter")]
+    assert "dgx_up_recovery:proj-a:001" in line2["events"]
+    assert ledger.read(sdir)[-1]["type"] == "watchdog_nudge"
+
+
+def test_tick_dgx_up_recovery_ignores_idle_and_ineligible(cc_home):
+    # Only eligible + turn_active sessions are nudged: an idle (turn_active
+    # False) session and a ROTATED one are left alone.
+    io = FakeIO(health_ok=False)
+    idle = _mk(key="idle-proj", nnn=1, turn_active=False)
+    rot = _mk(key="rot-proj", nnn=1, st="ROTATED", turn_active=True)
+    ledger.append(idle, {"type": "user_prompt", "ts": 9_400.0})
+    ledger.append(rot, {"type": "user_prompt", "ts": 9_400.0})
+    ctx = _ctx(io, now=10_000.0, down=True)
+    watchdogd.tick(ctx)
+    io.ok = True
+    ctx.now = 10_900.0
+    watchdogd.tick(ctx)
+    assert io.sends == []  # neither idle nor ROTATED is nudged
+
+
+def test_tick_dgx_up_recovery_fires_once_not_every_up_tick(cc_home):
+    # Runs only on the DOWN->UP transition tick, so a recovery turn in flight
+    # (still turn_active) is not re-nudged on a later, non-transition UP tick.
+    io = FakeIO(health_ok=False)
+    sdir = _mk(turn_active=True)
+    ledger.append(sdir, {"type": "user_prompt", "ts": 9_400.0})
+    ctx = _ctx(io, now=10_000.0, down=True)
+    watchdogd.tick(ctx)
+    io.ok = True
+    ctx.now = 10_900.0
+    watchdogd.tick(ctx)  # transition tick -> one nudge
+    assert len(io.sends) == 1
+    ctx.now = 11_000.0  # still UP, NOT a transition -> no re-nudge
+    watchdogd.tick(ctx)
+    assert len(io.sends) == 1
+
+
 def test_tick_verification_pushes_recovered(cc_home, monkeypatch):
     pushes = _capture_pushes(monkeypatch)
     io = FakeIO(health_ok=True)
