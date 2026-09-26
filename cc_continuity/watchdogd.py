@@ -487,6 +487,48 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
         line["events"].append(f"give_up:{key}:{nnn:03d}")
 
 
+def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict) -> None:
+    """P15: after a DOWN->UP transition, nudge each eligible session still
+    mid-turn (turn_active). A real DOWN (2-fail debounce) means the model was
+    down, so no turn could progress — a session still mid-turn is stuck on the
+    outage's API error. classify() keeps calling it ALIVE (last_ts fresh <
+    stale minutes), so the normal nudge path never sees it; the model is back,
+    so a nudge now resumes it. Reuses _nudge_path (health is now UP) so the
+    episode/ledger/push/verification machinery stays consistent. Runs only on
+    the transition tick (the caller gates it) so a recovery turn in flight is
+    not re-nudged next tick. Never raises (P10-D12)."""
+    now = ctx.now if ctx.now is not None else time.time()
+    stale_s = float(ctx.cfg.get("watchdog_stale_minutes", 45)) * 60
+    for key, nnn, rec in collect_live_sessions():
+        if rec.get("state") not in NUDGE_ELIGIBLE:
+            continue
+        if not rec.get("turn_active"):
+            continue  # not mid-turn -> not stuck on the outage
+        last_ts = last_ledger_ts(paths.session_dir(key, nnn))
+        # classify() masks a FRESH-ledger stuck turn as ALIVE (row 1) — that is
+        # exactly what the per-session loop will NOT nudge, so we own it here.
+        # A stale ledger classifies TURN_DEAD/STALLED and the loop's normal
+        # nudge path already resumes it on this same tick — skip it so we do
+        # not double-nudge.
+        if last_ts is None or now - last_ts > stale_s:
+            continue
+        slug = notify.project_slug(key)
+        target = resolve_pane(rec, slug, sessions)
+        if target is None:
+            line["events"].append(f"recovery_unresolvable:{key}:{nnn:03d}")
+            continue
+        try:
+            cap = ctx.capture(target)
+        except Exception:
+            _log_error("recovery_capture")
+            cap = None
+        if cap is None:
+            line["events"].append(f"recovery_capture_failed:{key}:{nnn:03d}")
+            continue
+        _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line)
+        line["events"].append(f"dgx_up_recovery:{key}:{nnn:03d}")
+
+
 def tick(ctx: TickCtx) -> dict:
     """One watchdog tick: probe → health transitions → per-live-session
     (verify → resolve → capture → classify → act). Returns the tick's
@@ -587,6 +629,14 @@ def tick(ctx: TickCtx) -> dict:
         sessions = None
     if sessions is None:
         line["events"].append("tmux_unavailable")
+
+    # 2b. outage recovery (Phase 15): the model just came back (transition
+    #     "up"). Nudge each eligible session still mid-turn (turn_active) — its
+    #     turn died on the outage's API error and classify() masks it as ALIVE
+    #     (fresh last_ts). Only on the transition tick, so a recovery turn in
+    #     flight is not re-nudged on a later UP tick.
+    if transition == "up":
+        _recover_stuck_turns(ctx, sessions, line)
 
     for key, nnn, rec in collect_live_sessions():
         sid = (key, nnn)
