@@ -238,6 +238,10 @@ def build_message(event: str, *, slug: str, nnn: int,
     elif event == "dgx_up":
         t, pr = "🔌 cc-continuity: model server back", "high"
         b = f"down for {_fmt_minutes(fields['downtime_s'])} — nudges resume"
+    elif event == "dgx_power_cycle":
+        t, pr = "🔌 cc-continuity: DGX power-cycling (auto)", "urgent"
+        b = (f"down for {_fmt_minutes(fields['downtime_s'])} — relay "
+             "cycled; expect ~15-20 min until models are loaded")
     elif event == "turn_dead":
         t, pr = "⟲ cc-continuity: turn died — recovering", "high"
         b = (f"proj={slug} {p} idle {fields['idle_minutes']}m — "

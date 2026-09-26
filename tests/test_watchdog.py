@@ -266,3 +266,44 @@ def test_nudge_action_max_one_nudge():
         == "NUDGE"
     ep = watchdog.Episode(n=1, nudge_ts=1.0)
     assert watchdog.nudge_action("UP", ep, False, 1) == "GIVE_UP"
+
+
+# --- power cycle (Phase 13 design 7899: sustained DOWN -> relay cycle) ------
+
+def test_power_cycle_not_due_when_up():
+    assert watchdog.power_cycle_due("UP", None, 10_000.0, None) is False
+
+
+def test_power_cycle_not_due_when_down_briefly():
+    # DOWN for 5 min < 10 min threshold (default after_s=600)
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 300.0,
+                                    10_000.0, None) is False
+
+
+def test_power_cycle_due_at_threshold():
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 600.0,
+                                    10_000.0, None) is True
+
+
+def test_power_cycle_not_due_with_missing_down_since():
+    assert watchdog.power_cycle_due("DOWN", None, 10_000.0, None) is False
+
+
+def test_power_cycle_blocked_by_active_cooldown():
+    # 20 min since last cycle < 30 min cooldown (default cooldown_s=1800)
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 2000.0, 10_000.0,
+                                    10_000.0 - 1200.0) is False
+
+
+def test_power_cycle_due_after_cooldown_expired():
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 2000.0, 10_000.0,
+                                    10_000.0 - 1800.0) is True
+
+
+def test_power_cycle_custom_thresholds():
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 100.0, 10_000.0,
+                                    None, after_s=60.0,
+                                    cooldown_s=30.0) is True
+    assert watchdog.power_cycle_due("DOWN", 10_000.0 - 30.0, 10_000.0,
+                                    None, after_s=60.0,
+                                    cooldown_s=30.0) is False

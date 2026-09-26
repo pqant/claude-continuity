@@ -30,6 +30,10 @@ class FakeIO:
         self.probe_calls = 0
         self.recover_calls = 0
         self.recover_result = None  # None = no recovery configured
+        self.cycle_calls = 0
+        self.cycle_result = None
+        self.last_cycle_ts_value = None
+        self.recorded_cycle = []
 
     def probe(self):
         self.probe_calls += 1
@@ -43,6 +47,16 @@ class FakeIO:
     def recover(self):
         self.recover_calls += 1
         return self.recover_result
+
+    def cycle(self):
+        self.cycle_calls += 1
+        return self.cycle_result
+
+    def last_cycle_ts(self):
+        return self.last_cycle_ts_value
+
+    def record_cycle_ts(self, ts):
+        self.recorded_cycle.append(ts)
 
     def capture(self, target):
         return self.pane
@@ -66,7 +80,9 @@ def _ctx(io, cfg_over=None, now=10_000.0, down=False):
     ctx = TickCtx(cfg=cfg, health=HealthState(), episodes={},
                   prev_captures={}, froze=set(), probe=io.probe,
                   capture=io.capture, list_sessions=io.list_sessions,
-                  send=io.send, recover=io.recover, now=now)
+                  send=io.send, recover=io.recover, cycle=io.cycle,
+                  last_cycle_ts=io.last_cycle_ts,
+                  record_cycle_ts=io.record_cycle_ts, now=now)
     if down:
         ctx.health.feed(False, now)
         ctx.health.feed(False, now)
@@ -585,3 +601,134 @@ def test_install_plist_refuses_without_binary(cc_home, tmp_path,
     monkeypatch.setattr(watchdogd.shutil, "which", lambda name: None)
     with pytest.raises(watchdogd.WatchdogError):
         watchdogd.install_plist(tmp_path / "home", runner=lambda *a: None)
+
+
+# --- auto power-cycle (Phase 13 design 7899) ---------------------------------
+
+
+class _P:
+    def __init__(self, code, out):
+        self.returncode = code
+        self.stdout = out
+        self.stderr = b""
+
+
+def test_cycle_power_posts_to_endpoint_and_parses_json():
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _P(0, b'{"ok": true, "state": "on"}')
+
+    res = watchdogd.cycle_power({}, runner=fake)
+    assert res == {"ok": True, "state": "on"}
+    assert "-X" in calls[0] and "POST" in calls[0]
+    assert any("/cycle" in c for c in calls[0])
+
+
+def test_cycle_power_endpoint_error_json_kept():
+    res = watchdogd.cycle_power(
+        {}, runner=lambda cmd, **kw: _P(
+            0, b'{"ok": false, "state": "off", "error": "relay stuck"}'))
+    assert res["ok"] is False
+    assert res["state"] == "off"
+    assert res["error"] == "relay stuck"
+
+
+def test_cycle_power_runner_raises_degrades():
+    def fake(cmd, **kw):
+        raise OSError("boom")
+
+    res = watchdogd.cycle_power({}, runner=fake)
+    assert res["ok"] is False
+    assert res["state"] == "unknown"
+
+
+def test_cycle_power_non_json_degrades():
+    res = watchdogd.cycle_power({}, runner=lambda cmd, **kw: _P(0, b"nope"))
+    assert res["ok"] is False
+    assert res["state"] == "unknown"
+
+
+def test_last_cycle_ts_roundtrip(cc_home):
+    assert watchdogd.load_last_cycle_ts() is None
+    watchdogd.save_last_cycle_ts(1234.5)
+    assert watchdogd.load_last_cycle_ts() == 1234.5
+
+
+def test_last_cycle_ts_corrupt_file_is_none(cc_home):
+    (paths.runtime_dir() / "power-cycle.json").write_text(
+        "{not json", encoding="utf-8")
+    assert watchdogd.load_last_cycle_ts() is None
+
+
+def _down_ctx(io, cfg_over, now=10_000.0, down_age_s=600.0):
+    """A ctx whose health went DOWN ``down_age_s`` seconds before now."""
+    ctx = _ctx(io, cfg_over=cfg_over, now=now)
+    ctx.health.feed(False, now - down_age_s - 100)
+    ctx.health.feed(False, now - down_age_s)  # 2nd fail -> DOWN at now-age
+    return ctx
+
+
+def test_tick_power_cycle_after_sustained_down(cc_home, monkeypatch):
+    io = FakeIO(health_ok=False)
+    io.cycle_result = {"ok": True, "state": "on"}
+    pushes = _capture_pushes(monkeypatch)
+    now = 10_000.0
+    ctx = _down_ctx(io, {"power_plug_ip": "192.0.2.34"}, now=now)
+    line = watchdogd.tick(ctx)
+    assert io.cycle_calls == 1
+    assert any(ev == "dgx_power_cycle" for ev, *_ in pushes)
+    assert line["power_cycle"]["ok"] is True
+    assert "power_cycle" in line["events"]
+    assert io.recorded_cycle == [now]
+
+
+def test_tick_no_power_cycle_before_threshold(cc_home, monkeypatch):
+    io = FakeIO(health_ok=False)
+    io.cycle_result = {"ok": True, "state": "on"}
+    _capture_pushes(monkeypatch)
+    now = 10_000.0
+    ctx = _down_ctx(io, {"power_plug_ip": "192.0.2.34"},
+                    now=now, down_age_s=100.0)  # 100s < 600s
+    line = watchdogd.tick(ctx)
+    assert io.cycle_calls == 0
+    assert "power_cycle" not in line
+
+
+def test_tick_power_cycle_blocked_by_cooldown(cc_home, monkeypatch):
+    io = FakeIO(health_ok=False)
+    io.cycle_result = {"ok": True, "state": "on"}
+    io.last_cycle_ts_value = 10_000.0 - 1200.0  # 20 min < 30 min cooldown
+    _capture_pushes(monkeypatch)
+    now = 10_000.0
+    ctx = _down_ctx(io, {"power_plug_ip": "192.0.2.34"}, now=now)
+    watchdogd.tick(ctx)
+    assert io.cycle_calls == 0
+    assert io.recorded_cycle == []
+
+
+def test_tick_power_cycle_failed_does_not_record_cooldown(
+        cc_home, monkeypatch):
+    io = FakeIO(health_ok=False)
+    io.cycle_result = {"ok": False, "state": "off",
+                       "error": "plug unreachable"}
+    pushes = _capture_pushes(monkeypatch)
+    now = 10_000.0
+    ctx = _down_ctx(io, {"power_plug_ip": "192.0.2.34"}, now=now)
+    line = watchdogd.tick(ctx)
+    assert io.cycle_calls == 1  # retried on the next tick, not cooldown
+    assert io.recorded_cycle == []
+    assert any(e.startswith("power_cycle_failed")
+               for e in line["events"])
+    assert not any(ev == "dgx_power_cycle" for ev, *_ in pushes)
+
+
+def test_tick_no_power_cycle_without_plug_ip(cc_home, monkeypatch):
+    io = FakeIO(health_ok=False)
+    io.cycle_result = {"ok": True, "state": "on"}
+    _capture_pushes(monkeypatch)
+    now = 10_000.0
+    ctx = _down_ctx(io, {}, now=now)  # no power_plug_ip in cfg
+    watchdogd.tick(ctx)
+    assert io.cycle_calls == 0
