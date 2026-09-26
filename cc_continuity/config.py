@@ -77,6 +77,10 @@ DEFAULTS: dict = {
     # load); at most one successful cycle per cooldown window (30 min).
     "power_cycle_after_s": 600,
     "power_cycle_cooldown_s": 1800,
+    # Phase 13 digest relay: the watchdog log piped into the most
+    # recently-active Claude Code session. At most one pane injection per
+    # this window (notable entries are always file-logged regardless).
+    "watchdog_digest_push_cap_s": 300,
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",

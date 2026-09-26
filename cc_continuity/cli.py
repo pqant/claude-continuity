@@ -131,6 +131,18 @@ def build_parser() -> argparse.ArgumentParser:
     wd_sub.add_parser("stop", help="bootout the LaunchAgent")
     wd_sub.add_parser("status", help="show the LaunchAgent status")
     wd_sub.add_parser("run", help="run the watchdog loop (foreground)")
+    p_wd_dig = wd_sub.add_parser(
+        "digest", help="watchdog log digest relay (Phase 13)")
+    dig_sub = p_wd_dig.add_subparsers(
+        dest="digest_command", metavar="<action>")
+    dig_sub.add_parser(
+        "run", help="run one digest pass (foreground)")
+    dig_sub.add_parser(
+        "install", help="install the launchd periodic agent")
+    dig_sub.add_parser("uninstall", help="remove the LaunchAgent")
+    dig_sub.add_parser("start", help="kickstart (run one pass now)")
+    dig_sub.add_parser("stop", help="bootout the LaunchAgent")
+    dig_sub.add_parser("status", help="show the LaunchAgent status")
 
     p_pane = sub.add_parser(
         "progress-pane",
@@ -634,6 +646,8 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
     from . import watchdogd  # local import keeps cli import light (P10-P1)
     home = Path(home) if home is not None else Path.home()
     action = args.watchdog_command
+    if action == "digest":
+        return cmd_watchdog_digest(args, home=home, runner=runner)
     if action == "run":
         return watchdogd.run_forever(config.load_config())
     if action == "install":
@@ -670,6 +684,50 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
     if action == "status":
         out = watchdogd.status_plist(home, runner=runner)
         print("watchdog: not loaded" if out is None else out.rstrip())
+        return 0
+    return 2
+
+
+def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
+                        runner=subprocess.run) -> int:
+    """Phase 13: the digest relay CLI — one foreground pass + the
+    launchd periodic agent's plist lifecycle."""
+    from . import watchdog_digest  # local import keeps cli light
+    home = Path(home) if home is not None else Path.home()
+    action = args.digest_command
+    if action == "run":
+        res = watchdog_digest.run_once()
+        print(json.dumps(res))
+        return 0
+    if action == "install":
+        try:
+            p = watchdog_digest.install_plist(home, runner=runner)
+        except watchdog_digest.DigestError as e:
+            print(f"cc-continuity watchdog digest install: {e}",
+                  file=sys.stderr)
+            return 1
+        print(f"digest agent installed: {p} "
+              "(launchd RunAtLoad + StartInterval 120 s)")
+        return 0
+    if action == "uninstall":
+        watchdog_digest.uninstall_plist(home, runner=runner)
+        print("digest agent uninstalled (launchd bootout + plist removed)")
+        return 0
+    if action == "start":
+        ok = watchdog_digest.start_plist(home, runner=runner)
+        msg = "digest agent kickstarted (one pass now)" if ok \
+            else "digest agent start failed (is it installed?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "stop":
+        ok = watchdog_digest.stop_plist(home, runner=runner)
+        msg = "digest agent stopped" if ok \
+            else "digest agent stop failed (was it loaded?)"
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "status":
+        out = watchdog_digest.status_plist(home, runner=runner)
+        print("digest agent: not loaded" if out is None else out.rstrip())
         return 0
     return 2
 
