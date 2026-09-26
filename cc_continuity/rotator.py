@@ -2,19 +2,31 @@
 
 Spawned detached by the Stop hook: project rotation lock (flock, stale
 takeover) → re-read state (must be ROTATING with the same rotation_id) →
-idle check (settle_ms, turn_active, no ledger activity) → ``C-u`` →
+idle check (settle_ms, turn_active, no ledger activity) → input-box
+protection: capture the pane, save any in-progress prompt to
+``runtime/pending-prompt-<key>-<NNN>.txt``, ``C-u``, wait for the box to
+settle EMPTY (defer when the user is still typing) →
 ``send-keys /clear`` + Enter → wait for ``runtime/<sid>.started`` →
 ``/rename <slug>-<NNN+1>`` → continuation prompt via
-``set-buffer``/``paste-buffer -p -d`` → verify ``CONTINUITY RESUME`` in the
-new session's ledger within 15 s → ROTATION_COMPLETED or (retry once)
-ROTATION_FAILED + notify. Never kills Claude Code, never deletes
-checkpoints.
+``set-buffer``/``paste-buffer -p -d`` (with a reference-only note carrying
+the saved in-progress prompt when there was one) → verify
+``CONTINUITY RESUME`` in the new session's ledger within 15 s →
+ROTATION_COMPLETED or (retry once) ROTATION_FAILED + notify. Never kills
+Claude Code, never deletes checkpoints.
+
+Live bug fixed here (session 039, 2026-09-26): the old ``C-u → /clear →
+Enter`` fired while the user was still typing, so ``/clear`` got appended
+to their in-progress prompt and submitted as one garbage prompt — the
+rotation failed and the user's message was mangled. ``C-u`` only clears
+what was typed BEFORE it; the fix captures the text first, saves it, and
+never sends ``/clear`` unless the box is verified settled-empty.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,7 +34,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import ledger, lock, naming, notify, paths, state, statusline, thresholds
+from . import (atomic, ledger, lock, naming, notify, paths, state,
+               statusline, thresholds)
 from .hooks.common import log_event
 
 #: PRD §11 wait windows (seconds). Module constants so tests can shrink
@@ -31,6 +44,25 @@ STARTED_WAIT_S = 10.0    # §11.6 — SessionStart(clear) .started marker
 VERIFY_WAIT_S = 15.0     # §11.9 — RESUME prompt in the successor ledger
 POLL_S = 0.25
 TMUX_BUFFER = "ccc"      # §11.8 paste-buffer name
+
+#: Input-box protection: how long to wait for the box to settle EMPTY
+#: after C-u, and how many consecutive empty captures "settled" requires.
+CLEAR_SETTLE_S = 2.0
+SETTLE_POLLS = 2
+
+#: Cap for the pending-prompt note appended to the C.8 continuation prompt.
+PENDING_NOTE_CAP = 800
+
+#: Input-box line: "❯" at column 0 (active line, NBSP after the symbol)
+#: or 2-space indented (first line of a multi-line box), then optional
+#: NBSP/space. Renderings captured from Claude Code 2.1.209.
+_INPUT_LINE_RE = re.compile(r"^ {0,2}❯([\xa0 ]|$)")
+
+
+def _is_frame_line(s: str) -> bool:
+    """True for the input box's long "─" frame lines."""
+    s2 = s.strip()
+    return len(s2) >= 30 and s2.count("─") >= 0.8 * len(s2)
 
 
 class RotatorSpawnError(RuntimeError):
@@ -160,11 +192,132 @@ def _handoff_path(key: str, nnn: int) -> str:
     return str(paths.session_dir(key, nnn) / "checkpoint" / "handoff.md")
 
 
-def _clear_pane(pane: str) -> None:
-    """PRD §11.4–5: clear any half-typed line (S9: C-u), then /clear."""
+# --- input-box protection (live bug 039: /clear appended to typed text) ------
+
+
+def _parse_input_box(pane_text: str) -> str:
+    """The text the user is typing in Claude Code's input box, or "".
+
+    The box is the bottom-most block of the pane: input lines (``❯`` at
+    column 0 or 2-space indented, NBSP or space after the symbol) sit
+    above a long ``─`` frame line, which sits above the status line.
+    Frame lines may appear BETWEEN box lines (multi-line box). The scan
+    walks up from the last frame line and stops at the first line that is
+    neither a frame nor an input line — transcript content above the box
+    (including transcript user lines, which share the ``❯`` format) is
+    never collected. A wrapped input line longer than the pane width
+    truncates the saved text at the wrap; the note is reference-only.
+    """
+    lines = pane_text.splitlines()
+    bottom = None
+    for i in range(len(lines) - 1, -1, -1):
+        if _is_frame_line(lines[i]):
+            bottom = i
+            break
+    if bottom is None:
+        return ""
+    out: list[str] = []
+    for i in range(bottom - 1, -1, -1):
+        s = lines[i]
+        if _is_frame_line(s):
+            continue
+        m = _INPUT_LINE_RE.match(s)
+        if m is None:
+            break
+        out.append(s[m.end():].rstrip())
+    return "\n".join(reversed(out))
+
+
+def capture_pane_text(pane: str) -> str:
+    """``capture-pane -p`` text, or "" when the call fails."""
+    try:
+        proc = subprocess.run([_tmux_bin(), "capture-pane", "-t", pane, "-p"],
+                              capture_output=True, timeout=10)
+        return proc.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def input_box_text(pane: str, *, capture=capture_pane_text) -> str:
+    """In-progress input-box text for ``pane`` ("" when the box is empty)."""
+    return _parse_input_box(capture(pane))
+
+
+def pending_prompt_path(key: str, nnn: int) -> Path:
+    return paths.runtime_dir() / f"pending-prompt-{key}-{nnn:03d}.txt"
+
+
+def save_pending_prompt(key: str, nnn: int, text: str) -> None:
+    atomic.atomic_write_text(pending_prompt_path(key, nnn), text)
+
+
+def read_pending_prompt(key: str, nnn: int) -> str:
+    p = pending_prompt_path(key, nnn)
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def delete_pending_prompt(key: str, nnn: int) -> None:
+    try:
+        pending_prompt_path(key, nnn).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def c8_with_pending(base: str, pending: str, cap: int = PENDING_NOTE_CAP,
+                    ) -> str:
+    """C.8 continuation prompt with a reference-only pending-prompt note.
+
+    The user's in-progress text is shown in the new session (screen
+    reminder) but is explicitly NOT an instruction — the successor
+    continues from the handoff. ``base`` is returned unchanged when
+    ``pending`` is empty."""
+    text = pending.strip()
+    if not text:
+        return base
+    if len(text) > cap:
+        text = text[:cap].rstrip() + " …(truncated)"
+    return (base + "\nPENDING USER PROMPT (reference only): the user was "
+            "typing this when the rotation fired; it was NOT submitted and "
+            "is NOT a new instruction. Continue from the handoff; the user "
+            "may re-send it.\n> " + text.replace("\n", " ⏎ "))
+
+
+def _clear_pane(pane: str, key: str, nnn: int, *,
+                capture=capture_pane_text) -> bool:
+    """PRD §11.4–5, hardened: save the in-progress prompt, then /clear ONLY
+    when the input box is verified settled-empty.
+
+    Live bug (session 039): the old blind ``C-u → /clear → Enter`` fired
+    while the user was still typing — C-u clears only what was typed
+    BEFORE it, so the user's continuing keys plus the literal ``/clear``
+    were submitted as one garbage prompt. Now: capture the box and save
+    the text (for the C.8 reminder), C-u, poll until the box is empty
+    ``SETTLE_POLLS`` times in a row (``CLEAR_SETTLE_S`` budget), and only
+    then send ``/clear`` + Enter. Returns False when the box never settles
+    (the user is still typing) — the caller defers; ``/clear`` is never
+    sent in that case."""
+    typed = _parse_input_box(capture(pane))
+    if typed:
+        save_pending_prompt(key, nnn, typed)
     _tmux("send-keys", "-t", pane, "C-u")
+    empty_streak = 0
+    deadline = time.monotonic() + CLEAR_SETTLE_S
+    while True:
+        if not _parse_input_box(capture(pane)):
+            empty_streak += 1
+            if empty_streak >= SETTLE_POLLS:
+                break
+        else:
+            empty_streak = 0
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_S)
     _tmux("send-keys", "-t", pane, "-l", "/clear")
     _tmux("send-keys", "-t", pane, "Enter")
+    return True
 
 
 def _verify_resume(key: str, nnn: int, cp_id: str, old_name: str) -> bool:
@@ -231,8 +384,14 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
         for attempt in (1, 2):  # §11.9: retry steps 3–9 once
             # §11.6 — remember existing markers BEFORE the keystrokes.
             before = _started_names()
-            # §11.4–5 — clear half-typed input, then /clear.
-            _clear_pane(pane)
+            # §11.4–5 — save in-progress input, then /clear only when the
+            # box is verified settled-empty; defer while the user types.
+            if not _clear_pane(pane, key, nnn):
+                state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+                log_event(f"rotator: ROTATION_DEFERRED key={key} "
+                          f"nnn={nnn:03d} (input box busy — user still "
+                          "typing; next Stop retries)")
+                return 0
             if not _wait_new_started(before):
                 log_event("rotator: SESSIONSTART_MISSING — continuing "
                           "anyway (F14; the continuation prompt is "
@@ -241,14 +400,18 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
             name_new = _successor_name(key, nnn, rec["name"])
             _tmux("send-keys", "-t", pane, "-l", f"/rename {name_new}")
             _tmux("send-keys", "-t", pane, "Enter")
-            # §11.8 — continuation prompt, byte-exact via paste-buffer.
-            _tmux("set-buffer", "-b", TMUX_BUFFER,
-                  thresholds.c8_text(cp_id, _handoff_path(key, nnn)))
+            # §11.8 — continuation prompt, byte-exact via paste-buffer
+            # (plus the reference-only pending-prompt note, when the user
+            # was typing at rotation time).
+            c8 = thresholds.c8_text(cp_id, _handoff_path(key, nnn))
+            c8 = c8_with_pending(c8, read_pending_prompt(key, nnn))
+            _tmux("set-buffer", "-b", TMUX_BUFFER, c8)
             _tmux("paste-buffer", "-p", "-d", "-b", TMUX_BUFFER, "-t", pane)
             _tmux("send-keys", "-t", pane, "Enter")
             # §11.9 — verify.
             if _verify_resume(key, nnn, cp_id, rec["name"]):
                 state.transition(key, nnn, "ROTATED")
+                delete_pending_prompt(key, nnn)  # consumed by the C.8 note
                 ledger.append(paths.session_dir(key, nnn),
                               {"type": "rotation_completed",
                                "successor": name_new})
