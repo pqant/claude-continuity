@@ -72,6 +72,11 @@ DEFAULTS: dict = {
     "power_plug_port": 9999,
     # Seconds the relay stays off during a cycle (DGX off-detection margin).
     "power_cycle_off_s": 8,
+    # Phase 13 auto-recovery (design 7899): the watchdog power-cycles the
+    # DGX after this much sustained DOWN (10 min covers box boot + model
+    # load); at most one successful cycle per cooldown window (30 min).
+    "power_cycle_after_s": 600,
+    "power_cycle_cooldown_s": 1800,
     "redact_patterns": [
         r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9]{20,}",

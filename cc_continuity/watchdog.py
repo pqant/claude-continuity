@@ -17,6 +17,7 @@ __all__ = [
     "ERROR_TAIL_RE", "PROMPT_RE",
     "Episode", "HealthState",
     "classify", "error_in_tail", "nudge_action", "pane_idle", "pane_pending",
+    "power_cycle_due",
 ]
 
 # --- liveness outcomes (P10-D6) ---------------------------------------------
@@ -197,3 +198,29 @@ def nudge_action(health: str, ep: Episode, pane_pending: bool,
     if pane_pending:
         return SEND_ENTER
     return RESEND if ep.n < max_nudges else GIVE_UP
+
+
+# --- auto power-cycle (Phase 13, design 7899) ---------------------------------
+
+
+def power_cycle_due(status: str, down_since: float | None, now: float,
+                    last_cycle_ts: float | None,
+                    after_s: float = 600.0,
+                    cooldown_s: float = 1800.0) -> bool:
+    """True when the daemon should power-cycle the DGX.
+
+    Two independent gates (design 7899): the server has been DOWN for
+    at least ``after_s`` (default 10 min — covers box boot + model
+    load, so a slow boot is never cycled) AND the last successful
+    cycle is at least ``cooldown_s`` old (default 30 min — no cycle
+    loops). ``status`` / ``down_since`` are :class:`HealthState`
+    fields; ``last_cycle_ts`` comes from runtime/power-cycle.json
+    (None = never cycled). Pure — the daemon owns the curl and the
+    file (P10-P1)."""
+    if status != "DOWN" or down_since is None:
+        return False
+    if now - down_since < after_s:
+        return False
+    if last_cycle_ts is not None and now - last_cycle_ts < cooldown_s:
+        return False
+    return True

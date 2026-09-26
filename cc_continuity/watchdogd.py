@@ -19,9 +19,9 @@ import time
 import traceback
 from pathlib import Path
 
-from . import ledger, notify, paths, state
+from . import ledger, notify, paths, power_plug, state
 from .watchdog import (Episode, HealthState, classify, nudge_action,
-                       pane_pending)
+                       pane_pending, power_cycle_due)
 
 #: P10-D2/P10-P8: the LaunchAgent label (plist file name minus .plist).
 PLIST_LABEL = "com.claude-continuity.watchdog"
@@ -157,6 +157,74 @@ def _recovery_log(cfg: dict, recovery: dict) -> None:
         with open(paths.runtime_dir() / "watchdog-recovery.log", "a",
                   encoding="utf-8") as f:
             f.write(body)
+    except OSError:
+        pass
+
+
+# --- auto power-cycle (Phase 13, design 7899) ---------------------------------
+
+#: The localhost power-plug endpoint's /cycle holds for
+#: power_cycle_off_s + two verified relay reads; the ceiling sits well
+#: above any sane off duration so a slow relay is reported, not cut off.
+_CYCLE_TIMEOUT_S = 60
+
+
+def cycle_power(cfg: dict, runner=subprocess.run) -> dict:
+    """POST ``/cycle`` to the localhost power-plug endpoint.
+
+    Returns the endpoint's JSON (``{"ok": ..., "state": ..., ...}``);
+    a dead endpoint / non-JSON reply degrades to
+    ``{"ok": False, "state": "unknown", "error": ...}`` (P10-D12:
+    never raises — the tick loop must survive)."""
+    url = (f"http://{power_plug.ENDPOINT_HOST}:"
+           f"{power_plug.ENDPOINT_PORT}/cycle")
+    try:
+        proc = runner(["curl", "-s", "-m", str(_CYCLE_TIMEOUT_S),
+                       "-X", "POST", url],
+                      capture_output=True,
+                      timeout=_CYCLE_TIMEOUT_S + 10)
+    except (OSError, subprocess.SubprocessError):
+        return {"ok": False, "state": "unknown",
+                "error": "endpoint call failed"}
+    try:
+        res = json.loads(proc.stdout.decode(errors="replace") or "{}")
+    except ValueError:
+        return {"ok": False, "state": "unknown",
+                "error": "endpoint returned non-JSON"}
+    if not isinstance(res, dict):
+        return {"ok": False, "state": "unknown",
+                "error": "endpoint returned non-object"}
+    res.setdefault("state", "unknown")
+    return res
+
+
+def _power_cycle_state_file() -> Path:
+    return paths.runtime_dir() / "power-cycle.json"
+
+
+def load_last_cycle_ts() -> float | None:
+    """ts of the last SUCCESSFUL auto power cycle, or None (missing /
+    corrupt file). File-based so the cooldown survives daemon restarts
+    (launchd KeepAlive) — otherwise a crash inside the 30-min window
+    would arm an immediate re-cycle."""
+    try:
+        data = json.loads(
+            _power_cycle_state_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ts = data.get("last_cycle_ts") if isinstance(data, dict) else None
+    return float(ts) if isinstance(ts, (int, float)) else None
+
+
+def save_last_cycle_ts(ts: float) -> None:
+    """Atomic write (tmp + rename); never raises."""
+    try:
+        p = _power_cycle_state_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"last_cycle_ts": ts}),
+                       encoding="utf-8")
+        os.replace(tmp, p)
     except OSError:
         pass
 
@@ -305,6 +373,9 @@ class TickCtx:
     send: object         # (target: str, *keys: str) -> bool
     now: float | None = None
     recover: object = None  # () -> dict (recover_network); None = no recovery
+    cycle: object = None  # () -> dict (cycle_power); None = no auto-cycle
+    last_cycle_ts: object = None  # () -> float | None (cooldown state)
+    record_cycle_ts: object = None  # (ts: float) -> None
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -466,6 +537,48 @@ def tick(ctx: TickCtx) -> dict:
               downtime_s=(now - down_since) if down_since else 0.0)
         line["events"].append("dgx_up")
 
+    # 1b. auto power-cycle (Phase 13, design 7899): sustained DOWN past
+    #     power_cycle_after_s + cooldown clear + plug configured ->
+    #     POST the localhost endpoint /cycle. A FAILED attempt does not
+    #     consume the cooldown (broken plug/endpoint): it retries next
+    #     tick; only a real relay cycle arms the 30-min window.
+    if (ctx.cycle is not None and ctx.health.status == "DOWN"
+            and str(ctx.cfg.get("power_plug_ip") or "").strip()):
+        try:
+            last = ctx.last_cycle_ts() if ctx.last_cycle_ts is not None \
+                else None
+        except Exception:
+            _log_error("last_cycle_ts")
+            last = None
+        if power_cycle_due(ctx.health.status, ctx.health.down_since, now,
+                           last,
+                           float(ctx.cfg.get("power_cycle_after_s", 600)),
+                           float(ctx.cfg.get("power_cycle_cooldown_s",
+                                          1800))):
+            try:
+                res = ctx.cycle()
+            except Exception:
+                _log_error("cycle")
+                res = None
+            res = res if isinstance(res, dict) else {}
+            downtime_s = now - (ctx.health.down_since or now)
+            line["power_cycle"] = {"ok": bool(res.get("ok")),
+                                   "state": res.get("state", "unknown"),
+                                   "downtime_s": downtime_s}
+            if res.get("ok"):
+                if ctx.record_cycle_ts is not None:
+                    try:
+                        ctx.record_cycle_ts(now)
+                    except Exception:
+                        _log_error("record_cycle")
+                _push(ctx.cfg, "dgx_power_cycle", slug="", nnn=0,
+                      host=notify.host(), downtime_s=downtime_s)
+                line["events"].append("power_cycle")
+            else:
+                line["events"].append(
+                    "power_cycle_failed:"
+                    + str(res.get("error", "unknown"))[:60])
+
     # 2. live sessions (P10-D5)
     try:
         sessions = ctx.list_sessions()
@@ -533,7 +646,9 @@ def tick(ctx: TickCtx) -> dict:
 
 def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 sleep=time.sleep, probe=None, capture=None,
-                list_sessions=None, send=None, recover=None) -> int:
+                list_sessions=None, send=None, recover=None,
+                cycle=None, last_cycle_ts=None,
+                record_cycle_ts=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
@@ -554,6 +669,12 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
         send=send if send is not None else send_keys,
         recover=(recover if recover is not None
                  else (lambda: recover_network(cfg))),
+        cycle=(cycle if cycle is not None
+               else (lambda: cycle_power(cfg))),
+        last_cycle_ts=(last_cycle_ts if last_cycle_ts is not None
+                       else load_last_cycle_ts),
+        record_cycle_ts=(record_cycle_ts if record_cycle_ts is not None
+                         else save_last_cycle_ts),
     )
     ticks = 0
     while True:
