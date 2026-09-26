@@ -1,8 +1,10 @@
 # LLM Watchdog (Phase 10)
 
 A watchdog daemon that keeps a watch over the local model server and the
-live Claude Code sessions running on it. It nudges, it never restarts, and
-it never touches the DGX box.
+live Claude Code sessions running on it. It nudges, it never restarts a
+session, and — since Phase 13 — it powers the DGX back on after a
+sustained outage (the one sanctioned box-side action; see **Auto
+power-cycle**).
 
 ## What it is
 
@@ -20,10 +22,13 @@ tick it:
 5. pushes events to the phone (ntfy).
 
 Recovery is a **prompt, never a restart**: the daemon never kills a
-session, never rotates, never reboots anything. **No box-side action of any
-kind** (P10-D1) — when the model server itself is unreachable, the daemon
-may run a user-configured *local* network-recovery command on the Mac
-(see below), but the DGX box is never acted upon.
+session, never rotates, never reboots a *session* host. The original
+P10-D1 rule ("no box-side action of any kind") is **superseded by Phase
+13**: when the model server itself is unreachable the daemon may run a
+user-configured *local* network-recovery command on the Mac (see below),
+and — when the outage outlasts `power_cycle_after_s` and a Kasa power
+plug is configured — it power-cycles the DGX through the plug
+(see **Auto power-cycle**, design 7899).
 
 ## Install
 
@@ -42,7 +47,19 @@ cc-continuity watchdog stop       # bootout
 cc-continuity watchdog status     # plist + launchd state + baked binary
 cc-continuity watchdog run        # foreground loop (development)
 cc-continuity watchdog uninstall  # remove the LaunchAgent
+
+# digest relay (Phase 13 — the watchdog log piped into Claude Code):
+cc-continuity watchdog digest run        # one digest pass (foreground)
+cc-continuity watchdog digest install    # launchd periodic agent (120 s)
+cc-continuity watchdog digest start      # kickstart (run one pass now)
+cc-continuity watchdog digest status     # plist + launchd state
+cc-continuity watchdog digest stop       # bootout
+cc-continuity watchdog digest uninstall  # remove the agent
 ```
+
+Note: `watchdog start` on an already-running `KeepAlive` agent is a
+**no-op** — a full restart is `watchdog stop` + `launchctl bootstrap
+gui/<uid> <plist>` (a kickstart does not re-spawn a running job).
 
 With no health URL (`--watchdog-health off` or empty) the daemon runs in
 **liveness-only mode**: health is treated as UP, no health pushes.
@@ -60,6 +77,11 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `watchdog_max_nudges` | **`3`** | unverified nudges before `needs_human` |
 | `watchdog_nudge_text` | **`"continue"`** | the nudge prompt sent to the pane |
 | `watchdog_network_recovery_cmd` | **`"sudo -n /usr/local/libexec/dgx-network-recovery"`** | local (Mac-side) route recovery run ONLY on a failed health probe; `""` = disabled |
+| `power_plug_ip` / `power_plug_port` | **`"192.0.2.99"` / `9999`** | the Kasa HS100 on the DGX power path (the plug's own LAN port); empty IP disables auto power-cycle |
+| `power_cycle_off_s` | **`8`** | relay-off duration during a cycle |
+| `power_cycle_after_s` | **`600`** | sustained DOWN before the auto power-cycle fires (10 min covers box boot + model load) |
+| `power_cycle_cooldown_s` | **`1800`** | minimum spacing between successful cycles (30 min — no cycle loops) |
+| `watchdog_digest_push_cap_s` | **`300`** | at most one digest injection per this window (file logging is uncapped) |
 
 ## Behavior
 
@@ -107,6 +129,58 @@ script's full `[DGX] ...` output is logged timestamped to
 `runtime/watchdog-recovery.log` so it is inspectable inside Claude Code.
 A healthy probe never triggers recovery; an empty command disables it.
 
+### Auto power-cycle (Phase 13, design 7899)
+
+A prolonged outage (a failed recovery means the box itself is dead, not
+just the route) is healed by cutting its power:
+
+- **Gate**: health DOWN for at least `power_cycle_after_s` (10 min —
+  covers box boot + model load, so a slow boot is never cycled) AND the
+  last successful cycle is at least `power_cycle_cooldown_s` old (30 min)
+  AND `power_plug_ip` is set.
+- **Action**: `POST http://127.0.0.1:9999/cycle` — the localhost
+  power-plug endpoint (its own LaunchAgent) drives the Kasa relay
+  off → `power_cycle_off_s` → on, every step verified.
+- **Cooldown is recorded ONLY on a successful cycle**
+  (`runtime/power-cycle.json`, file-based so a launchd restart cannot
+  arm an immediate re-cycle). A FAILED attempt (endpoint down, plug
+  unreachable) does NOT consume the cooldown — it retries next tick; a
+  broken plug must not block recovery for 30 minutes.
+- **Push**: `dgx_power_cycle` (urgent) only on a successful cycle start;
+  failures are log-line + event (surfaced via the digest relay) — one
+  push per failed attempt would spam the phone.
+
+### Digest relay (Phase 13 — the watchdog log in Claude Code)
+
+The watchdog's actions used to be invisible inside a Claude Code session
+(the user could not see the daemon act during an outage). A launchd
+**periodic** agent (`com.claude-continuity.watchdog-digest`,
+`StartInterval` 120 s, `RunAtLoad`, **no KeepAlive**) runs
+`cc-continuity watchdog digest run` every 2 min:
+
+- reads the new JSONL entries of `logs/watchdog.log` since the last
+  processed ts (first run **seeds to now** — a week of history is never
+  replayed);
+- keeps the **notable** ones: `health != UP` (DOWN, cold-start UNKNOWN,
+  error ticks), or a `dgx_down`/`dgx_up`/`power_cycle`/`power_cycle_*`
+  event, or a network recovery that ran;
+- formats a digest of ≤ 8 lines (header + ≤ 5 entry lines, most recent
+  first when truncated + footer);
+- **always** appends it to `runtime/watchdog-digest.log`;
+- then, outside the `watchdog_digest_push_cap_s` window (5 min), injects
+  it into the **ONE most-recently-active live session's pane**
+  (max `last_ledger_ts` among ACTIVE/WARNED; pane via the daemon's
+  `resolve_pane`) using tmux load-buffer + paste-buffer (bracketed
+  paste — newlines land in the input box without submitting) + one
+  Enter: a single queued prompt, same mechanism as a mid-turn user
+  message. No eligible session, unresolvable pane, or failed inject →
+  the digest is still file-logged, and a failed inject records no push
+  cap (next run retries).
+
+Display filtering: `capture_failed:*` / `unresolvable:*` events (the
+chronic dead-session noise, repeated every tick) are dropped from the
+digest display so they cannot drown the outage signal.
+
 ## Verification (the 11:30 lesson)
 
 A nudge counts as **recovered** only when the session's **ledger records a
@@ -123,6 +197,12 @@ line is submitted with a bare Enter on the next unchanged tick.
   continuity loop).
 - `~/.claude-continuity/runtime/watchdog-recovery.log` — full output of
   every network-recovery run (timestamp + cmd + exit + elapsed + output).
+- `~/.claude-continuity/runtime/watchdog-digest.log` — every digest
+  (always appended, injection or not).
+- `~/.claude-continuity/runtime/watchdog-digest-state.json` — the
+  relay's cursor (`last_ts`) and push-cap clock (`last_push_ts`).
+- `~/.claude-continuity/runtime/power-cycle.json` — ts of the last
+  successful auto power-cycle (the cooldown state).
 
 ## False-positive notes
 
@@ -152,4 +232,12 @@ line is submitted with a bare Enter on the next unchanged tick.
   evidence: pane capture (`you said: continue`), 3-push inbox
   (DOWN → back → turn died, exact order), watchdog.log
   (dgx_down / dgx_up / turn_dead, single daemon process), ledger
-  (`watchdog_nudge` n=1). DGX untouched (P10-D1).
+  (`watchdog_nudge` n=1). DGX untouched (P10-D1 — superseded below).
+- 2026-09-26: Phase 13 live — during the 07:58–08:41 DGX outage the
+  daemon ran 5 network recoveries (08:09/08:14/08:19/08:30/08:35, all
+  exit=0) and the health machine tracked the flap
+  (DOWN 08:14 → false UP 08:25 → DOWN 08:35 → UP 08:40); auto
+  power-cycle + digest relay deployed and verified live (forced digest
+  pass injected the outage timeline into a live session, `pushed: true`;
+  the tmux 3.7b `load-buffer` stdin rejection was caught by that live
+  run and fixed with the file-argument form).
