@@ -289,7 +289,8 @@ def test_run_once_pushes_notable_to_most_recent_pane(cc_home):
     # the ledger_ts fake gives both 999.0 — tie keeps the first in order,
     # so the a-pane must win here (deterministic)
     assert res == {"scanned": 1, "notable": 1,
-                   "target": "cc-proj-a-0a9b", "pushed": True}
+                   "target": "cc-proj-a-0a9b", "pushed": True,
+                   "skipped_busy": False}
     assert len(calls) == 1
     target, text = calls[0]
     assert target == "cc-proj-a-0a9b"
@@ -352,10 +353,75 @@ def test_run_once_quiet_entries_advance_last_ts_without_digest(cc_home):
         log_entries=[{"ts": NOW - 30, "health": "UP", "events": []}],
     )
     assert res == {"scanned": 1, "notable": 0,
-                   "target": None, "pushed": False}
+                   "target": None, "pushed": False,
+                   "skipped_busy": False}
     assert calls == []
     assert not wd.digest_log_path().exists()
     assert wd.load_state(wd.state_path())["last_ts"] == NOW - 30
+
+
+def test_run_once_busy_target_skips_inject_and_holds_last_ts(cc_home):
+    # the picked target is mid-turn: do NOT queue the digest in its input
+    # box (the user wants it ACTIONED now). Skip the injection, keep it
+    # file-logged, and hold last_ts back so the next 2-min tick retries.
+    a = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=True)
+    res, calls = _run(
+        cc_home,
+        state=(NOW - 120, None),
+        log_entries=[{"ts": NOW - 60, "health": "DOWN",
+                      "events": ["dgx_down"]}],
+        collect=[a],
+        sessions=["cc-proj-a-0a9b"],
+    )
+    assert res == {"scanned": 1, "notable": 1,
+                   "target": "cc-proj-a-0a9b", "pushed": False,
+                   "skipped_busy": True}
+    assert calls == []  # no tmux injection
+    # the digest is still always file-logged
+    assert "health=DOWN" in wd.digest_log_path().read_text(encoding="utf-8")
+    st = wd.load_state(wd.state_path())
+    assert st["last_ts"] == NOW - 120  # held back, NOT advanced to NOW-60
+    assert st["last_push_ts"] is None
+
+
+def test_run_once_idle_target_injects_and_advances(cc_home):
+    a = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=False)
+    res, calls = _run(
+        cc_home,
+        state=(NOW - 120, None),
+        log_entries=[{"ts": NOW - 60, "health": "DOWN",
+                      "events": ["dgx_down"]}],
+        collect=[a],
+        sessions=["cc-proj-a-0a9b"],
+    )
+    assert res == {"scanned": 1, "notable": 1,
+                   "target": "cc-proj-a-0a9b", "pushed": True,
+                   "skipped_busy": False}
+    assert len(calls) == 1 and calls[0][0] == "cc-proj-a-0a9b"
+    st = wd.load_state(wd.state_path())
+    assert st["last_ts"] == NOW - 60 and st["last_push_ts"] == NOW
+
+
+def test_run_once_busy_then_idle_retries_next_tick(cc_home):
+    # tick 1: target mid-turn → held back. tick 2: same target idle → the
+    # SAME notable (still > the held last_ts) is re-read and injected.
+    busy = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=True)
+    idle = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=False)
+    res1, calls1 = _run(
+        cc_home,
+        state=(NOW - 120, None),
+        log_entries=[{"ts": NOW - 60, "health": "DOWN",
+                      "events": ["dgx_down"]}],
+        collect=[busy],
+        sessions=["cc-proj-a-0a9b"],
+    )
+    assert res1["pushed"] is False and calls1 == []
+    assert wd.load_state(wd.state_path())["last_ts"] == NOW - 120
+    res2, calls2 = _run(cc_home, collect=[idle],
+                        sessions=["cc-proj-a-0a9b"])
+    assert res2["pushed"] is True and len(calls2) == 1
+    assert calls2[0][0] == "cc-proj-a-0a9b"
+    assert wd.load_state(wd.state_path())["last_ts"] == NOW - 60
 
 
 # --- inject_pane --------------------------------------------------------------------
@@ -495,7 +561,8 @@ def test_config_default_push_cap():
 def test_cli_watchdog_digest_run_prints_summary(cc_home, capsys,
                                                 monkeypatch):
     from cc_continuity import cli
-    res = {"scanned": 1, "notable": 1, "target": None, "pushed": False}
+    res = {"scanned": 1, "notable": 1, "target": None, "pushed": False,
+           "skipped_busy": False}
     monkeypatch.setattr(wd, "run_once", lambda **kw: res)
     rc = cli.main(["watchdog", "digest", "run"])
     assert rc == 0
@@ -505,9 +572,10 @@ def test_cli_watchdog_digest_run_prints_summary(cc_home, capsys,
 # --- pick_target --------------------------------------------------------------------
 
 
-def _cand(key="proj-a", nnn=1, st="ACTIVE", tmux="cc-proj-a-0a9b"):
+def _cand(key="proj-a", nnn=1, st="ACTIVE", tmux="cc-proj-a-0a9b",
+          turn_active=False):
     """A (key, nnn, rec) candidate — pick_target is pure over rec dicts."""
-    rec = {"state": st}
+    rec = {"state": st, "turn_active": turn_active}
     if tmux:
         rec["tmux_session"] = tmux
     return (key, nnn, rec)
@@ -550,3 +618,27 @@ def test_pick_target_unresolvable_returns_none():
 
 def test_pick_target_no_candidates_returns_none():
     assert wd.pick_target([], ["cc-proj-a-0a9b"]) is None
+
+
+# --- _target_turn_active ---------------------------------------------------------
+
+
+def test_target_turn_active_busy_rec_returns_true():
+    a = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=True)
+    assert wd._target_turn_active([(a[0], a[1], a[2], 100.0)]) is True
+
+
+def test_target_turn_active_idle_rec_returns_false():
+    a = _cand("proj-a", 1, "ACTIVE", "cc-proj-a-0a9b", turn_active=False)
+    assert wd._target_turn_active([(a[0], a[1], a[2], 100.0)]) is False
+
+
+def test_target_turn_active_no_candidates_returns_false():
+    assert wd._target_turn_active([]) is False
+
+
+def test_target_turn_active_skips_ineligible_and_stale():
+    # a busy rec that is ineligible or has no ledger ts is not the target
+    a = _cand("proj-a", 1, "CHECKPOINT_VERIFIED", "cc-proj-a-0a9b",
+              turn_active=True)
+    assert wd._target_turn_active([(a[0], a[1], a[2], None)]) is False

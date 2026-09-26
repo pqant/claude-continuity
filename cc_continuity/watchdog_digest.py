@@ -197,14 +197,13 @@ def push_allowed(last_push_ts: float | None, now: float,
 # --- pane targeting ------------------------------------------------------------------
 
 
-def pick_target(candidates: list[tuple[str, int, dict, float | None]],
-                tmux_sessions: list[str] | None) -> str | None:
-    """The ONE pane to inject into: the most-recently-active eligible
-    session (max ``last_ledger_ts`` among ACTIVE/WARNED; a None ts = no
-    chain activity → stale, skipped; ties keep the first in sort order).
-    Pane resolution is the daemon's ``resolve_pane`` (hook-recorded
-    ``tmux_session`` field, else exactly-one prefix match); None → the
-    digest is file-logged but NOT injected."""
+def _best_candidate(candidates: list[tuple[str, int, dict, float | None]]
+                    ) -> tuple[float, str, int, dict] | None:
+    """The one eligible, ledger-active candidate with the max
+    ``last_ledger_ts`` (max among ACTIVE/WARNED; a None ts = no chain
+    activity → stale, skipped; ties keep the first in sort order), as
+    ``(last_ts, key, nnn, rec)`` — or None. Single source of truth shared
+    by :func:`pick_target` and :func:`_target_turn_active`."""
     best = None  # (last_ts, key, nnn, rec)
     for key, nnn, rec, last_ts in candidates:
         if rec.get("state") not in NUDGE_ELIGIBLE:
@@ -214,6 +213,28 @@ def pick_target(candidates: list[tuple[str, int, dict, float | None]],
             continue
         if best is None or last_ts > best[0]:
             best = (last_ts, key, nnn, rec)
+    return best
+
+
+def _target_turn_active(candidates: list[tuple[str, int, dict, float | None]]
+                        ) -> bool:
+    """True when the session :func:`pick_target` would pick (the
+    most-recently-active eligible candidate) is mid-turn
+    (``turn_active``). run_once uses this to skip the injection and retry
+    on the next tick instead of queueing the digest in a busy session's
+    input box — the user wants it ACTIONED, not waiting behind a turn."""
+    best = _best_candidate(candidates)
+    return best is not None and bool(best[3].get("turn_active"))
+
+
+def pick_target(candidates: list[tuple[str, int, dict, float | None]],
+                tmux_sessions: list[str] | None) -> str | None:
+    """The ONE pane to inject into: the most-recently-active eligible
+    session's pane (see :func:`_best_candidate`). Pane resolution is the
+    daemon's ``resolve_pane`` (hook-recorded ``tmux_session`` field, else
+    exactly-one prefix match); None → the digest is file-logged but NOT
+    injected."""
+    best = _best_candidate(candidates)
     if best is None:
         return None
     return resolve_pane(best[3], notify.project_slug(best[1]),
@@ -269,17 +290,22 @@ def run_once(*, now: float | None = None,
              list_sessions=None, collect=None, ledger_ts=None,
              inject=None, cfg_over: dict | None = None) -> dict:
     """One digest pass. Returns a JSON-ready summary
-    ``{"scanned", "notable", "target", "pushed"}`` and NEVER raises —
-    the periodic agent must survive any failure (P10-D12 discipline).
+    ``{"scanned", "notable", "target", "pushed", "skipped_busy"}`` and
+    NEVER raises — the periodic agent must survive any failure
+    (P10-D12 discipline).
 
     Steps: read new watchdog.log entries since the state's ``last_ts``
     (first run SEEDS to now — a week of history is not replayed); keep
     the notable ones; if any, format + ALWAYS append to
     ``runtime/watchdog-digest.log``; then, outside the push cap, inject
     into the most-recently-active live pane (a failed inject or a missing
-    pane records NO ``last_push_ts`` — the next run retries). The state
-    advances to the newest ts seen (notable or not) so quiet ticks are
-    not re-scanned."""
+    pane records NO ``last_push_ts`` — the next run retries). If that
+    target is mid-turn (``turn_active``), the injection is SKIPPED
+    (``skipped_busy``) and ``last_ts`` is held back (no advance) so the
+    next 2-min tick re-reads the notable window and retries — the user
+    wants the digest ACTIONED, not queued behind a busy turn. Otherwise
+    the state advances to the newest ts seen (notable or not) so quiet
+    ticks are not re-scanned."""
     cfg = config.load_config()
     cfg.update(cfg_over or {})
     now = now if now is not None else time.time()
@@ -312,6 +338,7 @@ def run_once(*, now: float | None = None,
 
     target = None
     pushed = False
+    skipped_busy = False
     if notable_entries:
         digest = format_digest(notable_entries, now)
         try:
@@ -339,18 +366,30 @@ def run_once(*, now: float | None = None,
                 candidates = []
             target = pick_target(candidates, sessions)
             if target is not None:
-                try:
-                    ok = inject(target, digest)
-                except Exception:
-                    ok = False
-                if ok:
-                    pushed = True
-                    st["last_push_ts"] = now
+                if _target_turn_active(candidates):
+                    # Mid-turn protection: the target is mid-turn. Do NOT
+                    # queue the digest in its input box — the user wants it
+                    # ACTIONED now, and a busy session would sit on it until
+                    # its turn ends. Skip; last_ts is held back below so the
+                    # next 2-min tick re-reads these entries and retries.
+                    skipped_busy = True
+                else:
+                    try:
+                        ok = inject(target, digest)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        pushed = True
+                        st["last_push_ts"] = now
 
-    st["last_ts"] = new_last_ts
+    # Consume every entry seen — EXCEPT when the target was mid-turn: hold
+    # last_ts back (no advance) so the notable window is re-read on the next
+    # tick and retried (the user's "retry next tick" spec). Re-scanning the
+    # quiet entries before it is harmless.
+    st["last_ts"] = last_ts if skipped_busy else new_last_ts
     save_state(state_file, st)
     return {"scanned": len(entries), "notable": len(notable_entries),
-            "target": target, "pushed": pushed}
+            "target": target, "pushed": pushed, "skipped_busy": skipped_busy}
 
 
 # --- plist / launchctl (same pattern as power_plug / watchdogd) ----------------------
