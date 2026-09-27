@@ -417,6 +417,38 @@ def _restate(key: str, nnn: int) -> dict | None:
         return None
 
 
+def _focus_session() -> tuple[str, int] | None:
+    """The one most-recently-active NUDGE_ELIGIBLE session (max
+    ``last_ledger_ts``), as ``(key, nnn)`` or None. Mirrors the digest
+    relay's target definition (``watchdog_digest._best_candidate``): the
+    nudge restriction matches the digest target so only the session the
+    digest talks to may be revived. Used to gate nudges when
+    ``watchdog_nudge_only_most_recent`` is on — at most one session (the most
+    recent) may make progress per tick, capping the shared DGX model's load.
+    Never raises (P10-D12)."""
+    best = None  # (last_ts, key, nnn)
+    for key, nnn, rec in collect_live_sessions():
+        if rec.get("state") not in NUDGE_ELIGIBLE:
+            continue
+        ts = last_ledger_ts(paths.session_dir(key, nnn))
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            continue
+        if best is None or ts > best[0]:
+            best = (ts, key, nnn)
+    return None if best is None else (best[1], best[2])
+
+
+def _may_nudge(ctx: TickCtx, focus: tuple[str, int] | None,
+               key: str, nnn: int) -> bool:
+    """Whether this session may receive a nudge this tick. Config off
+    (default) -> every eligible session may (legacy behavior). Config on ->
+    only the focus session (the most-recently-active eligible one, matching
+    the digest target) may; the others stay dormant and do not burn nudges."""
+    if not bool(ctx.cfg.get("watchdog_nudge_only_most_recent", False)):
+        return True
+    return (key, nnn) == focus
+
+
 def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
                 last_ts: float | None, now: float, line: dict) -> None:
     """P10-D7 nudge state machine, executed with side effects (the
@@ -487,7 +519,8 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
         line["events"].append(f"give_up:{key}:{nnn:03d}")
 
 
-def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict) -> None:
+def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict,
+                         focus: tuple[str, int] | None) -> None:
     """P15: after a DOWN->UP transition, nudge each eligible session still
     mid-turn (turn_active). A real DOWN (2-fail debounce) means the model was
     down, so no turn could progress — a session still mid-turn is stuck on the
@@ -496,7 +529,9 @@ def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict) -> None:
     so a nudge now resumes it. Reuses _nudge_path (health is now UP) so the
     episode/ledger/push/verification machinery stays consistent. Runs only on
     the transition tick (the caller gates it) so a recovery turn in flight is
-    not re-nudged next tick. Never raises (P10-D12)."""
+    not re-nudged next tick. When ``watchdog_nudge_only_most_recent`` is on,
+    ``focus`` (the most-recently-active eligible session, the digest target)
+    is the only one recovered this tick. Never raises (P10-D12)."""
     now = ctx.now if ctx.now is not None else time.time()
     stale_s = float(ctx.cfg.get("watchdog_stale_minutes", 45)) * 60
     for key, nnn, rec in collect_live_sessions():
@@ -512,6 +547,8 @@ def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict) -> None:
         # not double-nudge.
         if last_ts is None or now - last_ts > stale_s:
             continue
+        if not _may_nudge(ctx, focus, key, nnn):
+            continue  # not the focus session -> stay dormant (config on)
         slug = notify.project_slug(key)
         target = resolve_pane(rec, slug, sessions)
         if target is None:
@@ -630,13 +667,22 @@ def tick(ctx: TickCtx) -> dict:
     if sessions is None:
         line["events"].append("tmux_unavailable")
 
+    # 2a. nudge focus (watchdog_nudge_only_most_recent): when the config is
+    #     on, at most one session may be nudged this tick — the
+    #     most-recently-active eligible one (the digest target). Computed once
+    #     here and passed to both nudge sites below. None when off (legacy:
+    #     every eligible session may be nudged).
+    focus = (_focus_session()
+             if bool(ctx.cfg.get("watchdog_nudge_only_most_recent", False))
+             else None)
+
     # 2b. outage recovery (Phase 15): the model just came back (transition
     #     "up"). Nudge each eligible session still mid-turn (turn_active) — its
     #     turn died on the outage's API error and classify() masks it as ALIVE
     #     (fresh last_ts). Only on the transition tick, so a recovery turn in
     #     flight is not re-nudged on a later UP tick.
     if transition == "up":
-        _recover_stuck_turns(ctx, sessions, line)
+        _recover_stuck_turns(ctx, sessions, line, focus)
 
     for key, nnn, rec in collect_live_sessions():
         sid = (key, nnn)
@@ -685,7 +731,8 @@ def tick(ctx: TickCtx) -> dict:
                 entry["tail"] = tail[:200]
 
         if outcome in ("TURN_DEAD", "STALLED"):
-            _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line)
+            if _may_nudge(ctx, focus, key, nnn):
+                _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line)
         elif outcome == "FROZEN" and sid not in ctx.froze:
             _push(ctx.cfg, "freeze_detected", slug=slug, nnn=nnn)
             ledger.append(sdir, {"type": "watchdog_freeze"})
