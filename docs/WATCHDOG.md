@@ -76,6 +76,7 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `watchdog_stale_minutes` | **`45`** | ledger-silence threshold for "stale" |
 | `watchdog_max_nudges` | **`3`** | unverified nudges before `needs_human` |
 | `watchdog_nudge_text` | **`"continue"`** | the nudge prompt sent to the pane |
+| `watchdog_nudge_only_most_recent` | **`false`** | when on, at most one session per tick may be nudged — the focus session (see *Nudge focus*, Phase 16); off = legacy nudge-all |
 | `watchdog_network_recovery_cmd` | **`"sudo -n /usr/local/libexec/dgx-network-recovery"`** | local (Mac-side) route recovery run ONLY on a failed health probe; `""` = disabled |
 | `power_plug_ip` / `power_plug_port` | **`"192.0.2.99"` / `9999`** | the Kasa HS100 on the DGX power path (the plug's own LAN port); empty IP disables auto power-cycle |
 | `power_cycle_off_s` | **`8`** | relay-off duration during a cycle |
@@ -132,6 +133,50 @@ each eligible session still `turn_active` with a **fresh** ledger (the
 ALIVE-masked set); a stale ledger is left to the normal TURN_DEAD/STALLED path
 so the two never double-nudge the same tick. The pass fires only on the
 transition tick, so a recovery turn in flight is not re-nudged.
+
+### Nudge focus (Phase 16)
+
+With `watchdog_nudge_only_most_recent` on, **at most one session per tick
+may be nudged**: the *focus* session — the most-recently-active
+NUDGE_ELIGIBLE session (max `last_ledger_ts`), which is exactly the session
+the digest relay talks to (the restriction mirrors
+`watchdog_digest._best_candidate` so only the session the digest talks to
+may be revived). Every other eligible session stays dormant and does not
+burn its `max_nudges` budget. The sessions share ONE DGX model: a tick that
+nudged every stalled session at once put concurrent load on that shared
+model, slowing — or destabilizing — exactly the session that matters (the
+active one). The focus gates BOTH nudge sites: the per-session
+TURN_DEAD/STALLED path and the Phase 15 dgx_up recovery pass (at most one
+stuck mid-turn session is recovered per transition tick — the one the
+digest would target anyway). Off (default) = legacy behavior: every
+eligible session may be nudged.
+
+### Pane resolution (Phase 17)
+
+The nudge target is the session's tmux pane. The hook-recorded
+`tmux_session` field wins **only while it still exists** in the live
+`tmux list-sessions` output. The regression (2026-09-27, sessions
+046/047): `claude --continue` resumes the old conversation in a **NEW**
+tmux session that the startup-only recording never saw — the field kept
+pointing at a dead session name while the live session had a different
+one, and every nudge/digest sat `CAPTURE_FAILED` for 40+ minutes while
+the session looked fine. Three parts:
+
+1. **Stale-field fallback** (`resolve_pane`): a field that no longer
+   exists in the live list falls through to the prefix match
+   `cc-<slug>-` — exactly one match → use it; zero, several, or no tmux
+   server → `None` (UNRESOLVABLE: log, never nudge). With no tmux server
+   the field's existence cannot be verified, so the field is kept (legacy
+   behavior) and the failed capture is logged `CAPTURE_FAILED` — the
+   honest label.
+2. **Re-recording**: `SessionStart` resume/fork re-records
+   `tmux_session` to the session that actually launched the conversation
+   (attach only — no registration, no state change).
+3. **Zombie cleanup**: `SessionEnd reason=resume` marks the abandoned
+   startup session off — `claude --continue` registers a new sid and then
+   abandons it when it resumes the earlier conversation, which would
+   otherwise leave an ACTIVE zombie that watchdog/digest scans keep
+   treating as a live candidate (session 047).
 
 ### Network recovery (P10)
 
