@@ -307,3 +307,19 @@ line is submitted with a bare Enter on the next unchanged tick.
   pass injected the outage timeline into a live session, `pushed: true`;
   the tmux 3.7b `load-buffer` stdin rejection was caught by that live
   run and fixed with the file-argument form).
+- 2026-09-27: **Phase 15 live re-test PASSED** — the first live proof
+  of the dgx_up recovery path (its regression, the 2026-09-26 22:14
+  outage, had left session 044 dead). The user unplugged the DGX ~19:20
+  while a daemon-injected digest prompt (19:19:59) had just started a
+  turn in session 051 — the turn died with the model and stayed
+  `turn_active`, classifying **ALIVE on every DOWN tick** (19:29–19:39,
+  fresh-ledger mask — exactly the 044 case the normal nudge path never
+  sees). All daemon-side, zero human input: `dgx_down` 19:23:44 → auto
+  `power_cycle` 19:34:15 (≈10 min sustained DOWN) → `dgx_up` 19:45:01 →
+  Phase 15 pass sent `continue` to the focus session
+  (`dgx_up_recovery:claude-continuity-5da1c3ab:051`, ledger
+  `watchdog_nudge` n=1 + `user_prompt` at the nudge ts) → the session
+  resumed on its own → `watchdog_verified` n=1, tick outcome
+  **VERIFIED** 19:50:01. Cut → recovered ≈ 25 min. The stale-route
+  network recoveries on the 19:18–19:39 failed-probe ticks (all
+  exit=0, 15 s) are expected bounded behavior.
