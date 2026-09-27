@@ -10,8 +10,8 @@ Reads the status line JSON from stdin and:
    consume; anything older than 10 minutes is stale, PRD §7);
 3. chains the user's previous status line command (``chained_statusline`` in
    config, saved by the installer) with the *same* stdin and a 2 s timeout,
-   then appends our segment: ``◆ 61% Active Usage`` / ``⟳ 63% PENDING→proj-002`` /
-   ``⟳ 73% HANDOFF!`` / ``⟳ off``.
+   then appends our segment: ``◆ 61% Active Usage`` / ``◆ 63% PENDING→proj-002`` /
+   ``◆ 73% HANDOFF!`` / ``◆ off``.
 
 ``window_tokens`` comes from config; when no config file sets it, the
 ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` environment value is the default (else
@@ -378,13 +378,13 @@ def render_segment(ratio: float | None, record: dict | None,
                    shimmer: bool = False,
                    shimmer_pos: float | None = None,
                    breathing: bool = False) -> str:
-    """Render our ``⟳ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
+    """Render our ``◆ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
-    Forms: ``⟳ off`` (disabled / session off), ``⟳ …`` (no metric),
-    ``◆ NN% Active Usage``, ``⟳ NN% PENDING→<successor>``, ``⟳ NN% ROTATING``,
-    ``⟳ NN% AMCL``, ``⟳ NN% HANDOFF!``.
+    Forms: ``◆ off`` (disabled / session off), ``◆ …`` (no metric),
+    ``◆ NN% Active Usage``, ``◆ NN% PENDING→<successor>``, ``◆ NN% ROTATING``,
+    ``◆ NN% AMCL``, ``◆ NN% HANDOFF!``.
     The percentage is an int via ceil (never understate: the PRD pairs
-    ratio 0.6036 with ``⟳ 61%``); the inner round kills IEEE-754 noise so
+    ratio 0.6036 with ``◆ 61%``); the inner round kills IEEE-754 noise so
     ``0.07`` renders ``7%``, not ``8%``.
     ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
     needs_human ledger entry is unconsumed — visible on any later attach
@@ -405,42 +405,42 @@ def render_segment(ratio: float | None, record: dict | None,
     blocked_text = f" ⛔ BLOCKED" if blocked else None
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
-            return "⟳ off"
+            return "◆ off"
         if ratio is None:
-            return "⟳ …" + (blocked_text or "")
+            return "◆ …" + (blocked_text or "")
         pct = math.ceil(round(ratio * 100, 6))
         state_name = (record or {}).get("state", "ACTIVE")
         if state_name == "ROTATION_PENDING":
             successor = naming.successor_name(record.get("name", ""))
-            return f"⟳ {pct}% PENDING→{successor}" + (blocked_text or "")
+            return f"◆ {pct}% PENDING→{successor}" + (blocked_text or "")
         if state_name == "ROTATING":
-            return f"⟳ {pct}% ROTATING" + (blocked_text or "")
+            return f"◆ {pct}% ROTATING" + (blocked_text or "")
         if state_name == "AWAITING_MANUAL_CLEAR":
-            return f"⟳ {pct}% AMCL" + (blocked_text or "")
+            return f"◆ {pct}% AMCL" + (blocked_text or "")
         if state_name in _HANDOFF_STATES:
-            return f"⟳ {pct}% HANDOFF!" + (blocked_text or "")
+            return f"◆ {pct}% HANDOFF!" + (blocked_text or "")
         return f"◆ {pct}% Active Usage" + (blocked_text or "")
 
     if not enabled or (record is not None and record.get("off")):
-        return _style("static", "⟳ off", None, now)
+        return _style("static", "◆ off", None, now)
     if ratio is None:
-        return _style("static", "⟳ …", blocked_text, now)
+        return _style("static", "◆ …", blocked_text, now)
     pct = math.ceil(round(ratio * 100, 6))
     state_name = (record or {}).get("state", "ACTIVE")
     breath = _breath_factor(now) if breathing else None
     if state_name == "ROTATION_PENDING":
         successor = naming.successor_name(record.get("name", ""))
-        return _style("pending", f"⟳ {pct}% PENDING→{successor}",
+        return _style("pending", f"◆ {pct}% PENDING→{successor}",
                       blocked_text, now, shimmer=shimmer, shimmer_pos=shimmer_pos,
                       breath=breath)
     if state_name == "ROTATING":
-        return _style("rotating", f"⟳ {pct}% ROTATING", blocked_text, now,
+        return _style("rotating", f"◆ {pct}% ROTATING", blocked_text, now,
                       shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     if state_name == "AWAITING_MANUAL_CLEAR":
-        return _style("amcl", f"⟳ {pct}% AMCL", blocked_text, now,
+        return _style("amcl", f"◆ {pct}% AMCL", blocked_text, now,
                       shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     if state_name in _HANDOFF_STATES:
-        return _style("handoff", f"⟳ {pct}% HANDOFF!", blocked_text, now,
+        return _style("handoff", f"◆ {pct}% HANDOFF!", blocked_text, now,
                       shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
     return _style("ok", f"◆ {pct}% Active Usage", blocked_text, now,
                   shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
@@ -672,7 +672,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         if win:
             # Feed the pane only when we have a real metric (ratio present).
             # A no-metric render (idle between turns — e.g. the instant a
-            # turn ends) would write the "⟳ …" placeholder into the data
+            # turn ends) would write the "◆ …" placeholder into the data
             # file and downgrade the pane from its last real text — the
             # 30-min-placeholder symptom resurfacing on the WRITER side
             # (Bug B only covered the pane reading a vanished file).

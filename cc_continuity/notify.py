@@ -197,7 +197,7 @@ def build_message(event: str, *, slug: str, nnn: int,
         b = (f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
              f"rotating at {fields['rotate_threshold'] * 100:.0f}%")
     elif event == "rotation_pending":
-        t, pr = "⟳ cc-continuity: rotation pending", "high"
+        t, pr = "◆ cc-continuity: rotation pending", "high"
         b = (f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
              "no interruption; rotates at turn end")
     elif event == "handoff_verified":

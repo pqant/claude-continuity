@@ -419,7 +419,7 @@ def test_animator_writes_full_width_frames(cc_home):
     written = []
     progress_pane.run_animator(
         _frames=3, _write=written.append, _now=lambda: 0.0,
-        _size=lambda: _size_obj(20), _text=lambda: "⟳ 9% ok",
+        _size=lambda: _size_obj(20), _text=lambda: "◆ 9% ok",
         _mtime=lambda: 1, _sleep=lambda s: None)
     assert len(written) == 3
     # Bug Z: a resize transition has a one-frame width race that can WRAP
@@ -433,7 +433,7 @@ def test_animator_writes_full_width_frames(cc_home):
     assert written[0].endswith(b"\x1b[0m\x1b[J")
     assert len(_visible(written[0].decode("utf-8"))) == 20
     # the segment text is left-justified
-    assert _visible(written[0].decode("utf-8")).startswith("⟳ 9% ok")
+    assert _visible(written[0].decode("utf-8")).startswith("◆ 9% ok")
 
 
 def test_animator_follows_terminal_resize(cc_home):
@@ -488,7 +488,7 @@ def test_animator_keeps_last_text_when_file_disappears(cc_home):
     def text():
         # what _read_progress_text returns: the placeholder when the
         # file is missing/corrupt
-        return state["text"] if state["mtime"] is not None else "⟳ …"
+        return state["text"] if state["mtime"] is not None else "◆ …"
 
     def sleep(s):
         flips["n"] += 1
@@ -503,7 +503,7 @@ def test_animator_keeps_last_text_when_file_disappears(cc_home):
         _size=lambda: _size_obj(5), _text=text,
         _mtime=lambda: state["mtime"], _sleep=sleep)
     v = [_visible(w.decode("utf-8")) for w in written]
-    # while the file is gone: keep the last real text (no "⟳ …")
+    # while the file is gone: keep the last real text (no "◆ …")
     assert v[0].startswith("AAAAA")
     assert v[2].startswith("AAAAA")
     assert v[3].startswith("AAAAA")
@@ -548,16 +548,16 @@ def test_animator_drift_compensates_sleep(cc_home):
 
 def test_read_progress_text_defaults_to_unknown(cc_home):
     # no data file yet -> the placeholder, never a crash
-    assert progress_pane._read_progress_text("12") == "⟳ …"
+    assert progress_pane._read_progress_text("12") == "◆ …"
 
 
 def test_read_progress_text_reads_file(cc_home):
     p = paths.runtime_dir() / "progress-data-12.json"
-    atomic.atomic_write_json(p, {"text": "⟳ 9% ok", "ts": time.time()})
-    assert progress_pane._read_progress_text("12") == "⟳ 9% ok"
+    atomic.atomic_write_json(p, {"text": "◆ 9% ok", "ts": time.time()})
+    assert progress_pane._read_progress_text("12") == "◆ 9% ok"
     # corrupt file -> placeholder
     p.write_text("{not json", encoding="utf-8")
-    assert progress_pane._read_progress_text("12") == "⟳ …"
+    assert progress_pane._read_progress_text("12") == "◆ …"
 
 
 def test_read_progress_text_isolated_per_window(cc_home):
@@ -565,22 +565,22 @@ def test_read_progress_text_isolated_per_window(cc_home):
     # pane show whatever ANOTHER window's status line wrote last
     atomic.atomic_write_json(
         paths.runtime_dir() / "progress-data-12.json",
-        {"text": "⟳ 61% ok", "ts": time.time()})
-    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
-    assert progress_pane._read_progress_text("15") == "⟳ …"
+        {"text": "◆ 61% ok", "ts": time.time()})
+    assert progress_pane._read_progress_text("12") == "◆ 61% ok"
+    assert progress_pane._read_progress_text("15") == "◆ …"
 
 
 def test_write_progress_data_roundtrip(cc_home):
-    progress_pane.write_progress_data("12", "⟳ 61% ok")
+    progress_pane.write_progress_data("12", "◆ 61% ok")
     p = paths.runtime_dir() / "progress-data-12.json"
     data = json.loads(p.read_text(encoding="utf-8"))
-    assert data["text"] == "⟳ 61% ok"
+    assert data["text"] == "◆ 61% ok"
     assert isinstance(data["ts"], float)
-    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
+    assert progress_pane._read_progress_text("12") == "◆ 61% ok"
 
 
 def test_drop_progress_data(cc_home):
-    progress_pane.write_progress_data("12", "⟳ 61% ok")
+    progress_pane.write_progress_data("12", "◆ 61% ok")
     progress_pane.drop_progress_data("12")
     assert not (paths.runtime_dir() / "progress-data-12.json").exists()
     # missing file is a no-op (never raises)
@@ -592,9 +592,9 @@ def test_progress_data_isolated_per_server(cc_home, monkeypatch):
     # shared progress-data-12.json made one server's pane show the OTHER
     # server's % (and churned the pane record)
     monkeypatch.setenv("TMUX", "/tmp/srv,1111,0")
-    progress_pane.write_progress_data("12", "⟳ 61% ok")
-    assert progress_pane._read_progress_text("12") == "⟳ 61% ok"
+    progress_pane.write_progress_data("12", "◆ 61% ok")
+    assert progress_pane._read_progress_text("12") == "◆ 61% ok"
     # a different server reading the same window id sees its own (empty)
     # file, not server 1111's data
     monkeypatch.setenv("TMUX", "/tmp/srv,2222,0")
-    assert progress_pane._read_progress_text("12") == "⟳ …"
+    assert progress_pane._read_progress_text("12") == "◆ …"

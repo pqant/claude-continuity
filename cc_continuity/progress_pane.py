@@ -125,14 +125,14 @@ def _read_progress_text(window_id: str | None) -> str:
     yields the placeholder (never a crash).
     """
     if not _valid_window_id(window_id):
-        return "⟳ …"
+        return "◆ …"
     try:
         data = json.loads(
             _progress_data_path(window_id).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return "⟳ …"
+        return "◆ …"
     text = data.get("text") if isinstance(data, dict) else None
-    return text if isinstance(text, str) and text else "⟳ …"
+    return text if isinstance(text, str) and text else "◆ …"
 
 
 def _progress_data_mtime(window_id: str | None) -> float | None:

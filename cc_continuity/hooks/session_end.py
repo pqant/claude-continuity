@@ -50,7 +50,7 @@ def handle(ctx: HookContext) -> dict | None:
 def _cleanup_progress_pane() -> None:
     """Phase 12 (mode 1): kill the 1-line progress pane of THIS tmux window
     and drop its record entry. The per-window data file is KEPT: the pane
-    is dead anyway, and dropping it leaves a recreated pane on the "⟳ …"
+    is dead anyway, and dropping it leaves a recreated pane on the "◆ …"
     placeholder until the next status line render — none comes while the
     model is down (a dropped file is how the pane sat on "…" through a
     30-minute server freeze). The next session's pane sees at most ~2 s of

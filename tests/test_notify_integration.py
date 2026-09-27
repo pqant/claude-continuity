@@ -102,7 +102,7 @@ def test_full_lifecycle_push_sequence(ntfy, cc_home, tmp_path, fake_tmux,
     assert got[:4] == [
         ("▶ cc-continuity: session started", "default"),       # 001
         ("⚠ cc-continuity: context warning", "default"),
-        ("⟳ cc-continuity: rotation pending", "high"),
+        ("◆ cc-continuity: rotation pending", "high"),
         ("✓ cc-continuity: handoff written & verified", "default"),
     ]
     # P9-D7: pushes are best-effort fire-and-forget (detached curl). The
