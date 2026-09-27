@@ -466,6 +466,108 @@ def test_tick_dgx_up_recovery_fires_once_not_every_up_tick(cc_home):
     assert len(io.sends) == 1
 
 
+# --- tick: nudge restriction to the most-recently-active session ---------------
+#
+# The DGX model is a single shared resource; reviving many sessions at once
+# (the per-session TURN_DEAD/STALLED nudge and the Phase 15 dgx_up recovery
+# both walk every eligible session) overloads it. When
+# ``watchdog_nudge_only_most_recent`` is on, at most ONE session may be
+# nudged per tick: the most-recently-active eligible one (max last_ledger_ts —
+# the same "most recently active" definition the digest relay uses to pick its
+# injection target). The others stay dormant (their nudge counter does not
+# advance). Config off = existing behavior (every eligible session may be
+# nudged), kept as the default for back-compat.
+
+
+def test_tick_only_most_recent_nudged_when_config_on(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True)
+    a = _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    b = _mk(key="proj-b", nnn=1, turn_active=True, tmux="cc-proj-b-0b9c")
+    # both TURN_DEAD (stale ledger); a is the more-recent of the two.
+    ledger.append(a, {"type": "user_prompt", "ts": 10_000.0 - 50 * 60})
+    ledger.append(b, {"type": "user_prompt", "ts": 10_000.0 - 100 * 60})
+    ctx = _ctx(io, cfg_over={"watchdog_nudge_only_most_recent": True},
+               now=10_000.0)
+    line = watchdogd.tick(ctx)
+    by = {(s["key"], s["nnn"]): s["outcome"] for s in line["sessions"]}
+    assert by[("proj-a", 1)] == "TURN_DEAD"
+    assert by[("proj-b", 1)] == "TURN_DEAD"
+    # only the most-recent eligible (a) is nudged; b stays dormant.
+    assert io.sends == [("cc-proj-a-0a9b", "continue", "Enter")]
+
+
+def test_tick_focus_healthy_most_recent_preempts_dead_older(cc_home, monkeypatch):
+    # The restriction is "only the most recent may progress", not "nudge the
+    # most recent of the dead": if the most-recent eligible session is ALIVE,
+    # an older TURN_DEAD one is NOT the focus and must not be nudged.
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True)
+    alive = _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    dead = _mk(key="proj-b", nnn=1, turn_active=True, tmux="cc-proj-b-0b9c")
+    ledger.append(alive, {"type": "user_prompt", "ts": 9_900.0})  # fresh -> ALIVE
+    ledger.append(dead, {"type": "user_prompt", "ts": 10_000.0 - 100 * 60})
+    ctx = _ctx(io, cfg_over={"watchdog_nudge_only_most_recent": True},
+               now=10_000.0)
+    line = watchdogd.tick(ctx)
+    by = {(s["key"], s["nnn"]): s["outcome"] for s in line["sessions"]}
+    assert by[("proj-a", 1)] == "ALIVE"
+    assert by[("proj-b", 1)] == "TURN_DEAD"
+    assert io.sends == []  # dead session is not the focus -> not nudged
+
+
+def test_tick_turn_dead_nudges_all_when_config_off(cc_home, monkeypatch):
+    # Back-compat: with the key off (the default), every TURN_DEAD eligible
+    # session is nudged, as before.
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True)
+    a = _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    b = _mk(key="proj-b", nnn=1, turn_active=True, tmux="cc-proj-b-0b9c")
+    ledger.append(a, {"type": "user_prompt", "ts": 10_000.0 - 50 * 60})
+    ledger.append(b, {"type": "user_prompt", "ts": 10_000.0 - 100 * 60})
+    ctx = _ctx(io, now=10_000.0)  # key not set -> off
+    watchdogd.tick(ctx)
+    assert {s[0] for s in io.sends} == {"cc-proj-a-0a9b", "cc-proj-b-0b9c"}
+
+
+def test_tick_dgx_up_recovery_only_most_recent_when_config_on(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=False)
+    a = _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    b = _mk(key="proj-b", nnn=1, turn_active=True, tmux="cc-proj-b-0b9c")
+    # both stuck mid-turn with fresh ledgers; a is the more-recent of the two.
+    ledger.append(a, {"type": "user_prompt", "ts": 9_500.0})
+    ledger.append(b, {"type": "user_prompt", "ts": 9_000.0})
+    ctx = _ctx(io, cfg_over={"watchdog_nudge_only_most_recent": True},
+               now=10_000.0, down=True)
+    watchdogd.tick(ctx)  # during the outage: masked ALIVE -> no nudge
+    io.ok = True
+    ctx.now = 10_900.0
+    line2 = watchdogd.tick(ctx)  # DOWN->UP transition
+    assert "dgx_up" in line2["events"]
+    assert io.sends == [("cc-proj-a-0a9b", "continue", "Enter")]
+    assert "dgx_up_recovery:proj-a:001" in line2["events"]
+    assert not any(e.startswith("dgx_up_recovery:proj-b")
+                   for e in line2["events"])
+
+
+def test_tick_dgx_up_recovery_nudges_all_when_config_off(cc_home, monkeypatch):
+    # Back-compat for Phase 15: with the key off, every stuck eligible
+    # session is recovered on dgx_up, as before.
+    _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=False)
+    a = _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    b = _mk(key="proj-b", nnn=1, turn_active=True, tmux="cc-proj-b-0b9c")
+    ledger.append(a, {"type": "user_prompt", "ts": 9_500.0})
+    ledger.append(b, {"type": "user_prompt", "ts": 9_000.0})
+    ctx = _ctx(io, now=10_000.0, down=True)  # key not set -> off
+    watchdogd.tick(ctx)
+    io.ok = True
+    ctx.now = 10_900.0
+    watchdogd.tick(ctx)
+    assert {s[0] for s in io.sends} == {"cc-proj-a-0a9b", "cc-proj-b-0b9c"}
+
+
 def test_tick_verification_pushes_recovered(cc_home, monkeypatch):
     pushes = _capture_pushes(monkeypatch)
     io = FakeIO(health_ok=True)

@@ -133,6 +133,9 @@ def test_defaults_have_phase10_keys():
     assert config.DEFAULTS["watchdog_stale_minutes"] == 45
     assert config.DEFAULTS["watchdog_max_nudges"] == 3
     assert config.DEFAULTS["watchdog_nudge_text"] == "continue"
+    # Most-recent-only nudge restriction (DGX is a single shared model): off
+    # by default = legacy behavior (every eligible session may be nudged).
+    assert config.DEFAULTS["watchdog_nudge_only_most_recent"] is False
     # P10 (network recovery): on a failed probe the daemon re-establishes the
     # DGX route (macOS root wrapper, passwordless sudo) before re-probing.
     # Empty string disables the step.

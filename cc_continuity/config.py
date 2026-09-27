@@ -58,6 +58,13 @@ DEFAULTS: dict = {
     "watchdog_stale_minutes": 45,
     "watchdog_max_nudges": 3,
     "watchdog_nudge_text": "continue",
+    # The DGX model is a single shared resource. When True, at most ONE
+    # session may be nudged per tick: the most-recently-active eligible one
+    # (max last_ledger_ts — the same "most recently active" the digest relay
+    # targets). Older eligible sessions stay dormant so many sessions cannot
+    # be revived at once and overload the model. False (default) = legacy
+    # behavior, every eligible session may be nudged.
+    "watchdog_nudge_only_most_recent": False,
     # On a failed health probe the daemon runs this (macOS root wrapper,
     # passwordless sudo) to re-establish the DGX route, then re-probes. Empty
     # string disables the step. See setup_dgx_network_recovery.sh.
