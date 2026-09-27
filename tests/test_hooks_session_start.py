@@ -451,6 +451,40 @@ def test_tmux_failure_is_swallowed(cc_home, tmp_path, monkeypatch):
     assert state.load_state(key, 1).get("tmux_session") is None
 
 
+@pytest.mark.parametrize("source", ["resume", "fork"])
+def test_resume_rerecords_tmux_session(cc_home, tmp_path, fake_tmux_name,
+                                       source):
+    # regression 2026-09-27 046: relaunch with --continue resumes the old
+    # conversation in a NEW tmux session; the resume re-attach must update
+    # the field, or it stays stale (dead pane) and every nudge/digest
+    # CAPTURE_FAILED while the session looks fine
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo))
+    key = project_key_for(repo)
+    assert state.load_state(key, 1)["tmux_session"] == "cc-spike-repo-0a9b"
+    # the conversation is resumed in a different tmux session
+    fake_tmux_name.write_text(
+        _FAKE_TMUX_NAME.replace("cc-spike-repo-0a9b", "cc-spike-repo-9665"))
+    p = fixture_payload("SessionStart", repo)
+    p["source"] = source
+    assert run_hook("SessionStart", p) == 0
+    rec = state.load_state(key, 1)
+    assert rec["tmux_session"] == "cc-spike-repo-9665"
+    assert rec["state"] == "ACTIVE"  # re-attach only — no state change
+
+
+def test_resume_unregistered_sid_is_silent(cc_home, tmp_path,
+                                           fake_tmux_name):
+    # resume of a sid the system never registered: nothing to re-record
+    repo = make_repo(tmp_path)
+    p = fixture_payload("SessionStart", repo,
+                        session_id="99999999-9999-9999-9999-999999999999")
+    p["source"] = "resume"
+    assert run_hook("SessionStart", p) == 0
+    assert not (paths.projects_dir() / project_key_for(repo)
+                / "project.json").exists()
+
+
 def test_clear_claim_records_tmux_session(cc_home, tmp_path, fake_tmux_name):
     repo = make_repo(tmp_path)
     key, _nnn = _verified_session(repo)

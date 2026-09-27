@@ -298,13 +298,21 @@ def collect_live_sessions() -> list[tuple[str, int, dict]]:
 def resolve_pane(rec: dict, slug: str,
                  sessions: list[str] | None) -> str | None:
     """P10-D9/P10-P6: the nudge target. The hook-recorded
-    ``tmux_session`` field wins; fallback = ``tmux list-sessions``
+    ``tmux_session`` field wins WHILE IT STILL EXISTS in the live
+    ``tmux list-sessions`` output; a stale field (session renamed or
+    killed out-of-band — regression 2026-09-27 046, a dead ``-637d``
+    pane made every nudge CAPTURE_FAILED) falls through to the prefix
+    fallback. With no tmux server (``sessions is None``) existence
+    cannot be verified, so the field is kept and the failed capture is
+    logged CAPTURE_FAILED (the honest label). Fallback = ``sessions``
     filtered by prefix ``cc-<slug>-`` — EXACTLY one match → use it;
     zero / several / no tmux server → None (UNRESOLVABLE: log, never
     nudge)."""
     t = rec.get("tmux_session")
     if isinstance(t, str) and t.strip():
-        return t.strip()
+        t = t.strip()
+        if sessions is None or t in sessions:
+            return t
     if sessions is None:
         return None
     prefix = f"cc-{slug}-"

@@ -177,10 +177,37 @@ def test_collect_live_sessions_filters(cc_home):
     assert got == {("proj-a", 1)}
 
 
-def test_resolve_pane_field_wins():
+def test_resolve_pane_field_wins_when_live():
+    # the field wins over the (ambiguous) prefix fallback — but only while
+    # it still exists in the live tmux session list
     rec = {"tmux_session": "cc-proj-a-0a9b"}
     assert watchdogd.resolve_pane(rec, "proj-a",
-                                  ["cc-proj-a-other"]) == "cc-proj-a-0a9b"
+                                  ["cc-proj-a-0a9b",
+                                   "cc-proj-a-other"]) == "cc-proj-a-0a9b"
+
+
+def test_resolve_pane_stale_field_falls_back_to_live_prefix():
+    # regression 2026-09-27 046: the hook-recorded field pointed at a dead
+    # tmux session (637d); the live one (9665) existed under the same prefix
+    # and must be found instead of returning the stale field verbatim
+    rec = {"tmux_session": "cc-proj-a-637d"}
+    assert watchdogd.resolve_pane(rec, "proj-a",
+                                  ["cc-other-x",
+                                   "cc-proj-a-9665"]) == "cc-proj-a-9665"
+
+
+def test_resolve_pane_stale_field_no_match_is_unresolvable():
+    rec = {"tmux_session": "cc-proj-a-637d"}
+    assert watchdogd.resolve_pane(rec, "proj-a",
+                                  ["cc-other-x"]) is None
+
+
+def test_resolve_pane_stale_field_no_server_keeps_legacy():
+    # tmux server unavailable (sessions is None): existence cannot be
+    # verified, so the field is returned as before — the capture then
+    # fails and is logged CAPTURE_FAILED (the honest outcome label)
+    rec = {"tmux_session": "cc-proj-a-637d"}
+    assert watchdogd.resolve_pane(rec, "proj-a", None) == "cc-proj-a-637d"
 
 
 def test_resolve_pane_fallback_exactly_one():

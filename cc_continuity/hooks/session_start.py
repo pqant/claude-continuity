@@ -7,7 +7,9 @@ var set by the Phase 7 wrapper, else the project counter). Plain
 startups register in ACTIVE; with a pending checkpoint (Phase 4
 ``pending_consumption``) the session starts in BOOTSTRAPPING and gets
 the C.5 notice. ``compact`` injects a short post-compaction state block
-(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1).
+(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1) that re-record the
+``tmux_session`` field (a resume may land in a NEW tmux session —
+regression 2026-09-27 046).
 ``clear`` claims the latest claimable session (ROTATING / AMCL /
 CHECKPOINT_VERIFIED, successor unset) — successor record + C.4
 injection + ``runtime/<sid>.started`` — or registers exactly like a
@@ -34,6 +36,16 @@ def handle(ctx: HookContext) -> dict | None:
         return _compact_notice(ctx)
     if source == "clear":
         return _clear(ctx)
+    if source in ("resume", "fork"):
+        # regression 2026-09-27 046: resuming a conversation in a NEW tmux
+        # session (relaunch with --continue) must re-record the pane, or
+        # the field stays stale (dead pane) and every nudge/digest
+        # CAPTURE_FAILED while the session looks fine. Re-attach only:
+        # no registration, no state change, no output.
+        if ctx.session is not None:
+            _record_tmux_session(ctx.session["project_key"],
+                                 int(ctx.session["nnn"]))
+        return None
     if source != "startup":
         return None
     cwd = ctx.payload.get("cwd")

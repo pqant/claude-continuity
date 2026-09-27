@@ -26,6 +26,28 @@ def test_fixture_session_end_entry(cc_home, tmp_path):
     assert entry["reason"] == "other"  # fixture's recorded reason
 
 
+def test_session_end_reason_resume_marks_session_off(cc_home, tmp_path):
+    # regression 2026-09-27 047: `claude --continue` first registers a new
+    # startup sid, then abandons it when the process resumes the earlier
+    # conversation — the abandoned startup must be switched off, else it
+    # lingers as a live zombie (ACTIVE, fresh ledger, same pane) that
+    # watchdog/digest scans keep treating as a real candidate
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    assert state.load_state(key, nnn)["off"] is False
+    run_hook("SessionEnd", payload("SessionEnd", repo, reason="resume"))
+    rec = state.load_state(key, nnn)
+    assert rec["off"] is True
+    assert rec["state"] == "ACTIVE"  # off flag only — no state transition
+
+
+def test_session_end_other_reasons_do_not_mark_off(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    run_hook("SessionEnd", payload("SessionEnd", repo, reason="clear"))
+    assert state.load_state(key, nnn)["off"] is False
+
+
 def test_clear_while_rotating_is_logged_to_events_log(cc_home, tmp_path):
     repo = make_repo(tmp_path)
     key, nnn = register_session(repo)
