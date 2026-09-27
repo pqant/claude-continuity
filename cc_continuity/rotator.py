@@ -348,6 +348,28 @@ def _notify(cfg: dict, slug: str, event: str) -> None:
         log_event(f"rotator: notify failed: {e}")
 
 
+def _defer_to_checkpoint(key: str, nnn: int, reason: str) -> None:
+    """Roll ``ROTATING`` back to ``CHECKPOINT_VERIFIED`` (next Stop retries).
+
+    Tolerates the state having advanced to ``ROTATED`` concurrently: bootstrap
+    closes the old session (ROTATED) when the successor's ``SessionStart/clear``
+    claims the rotation, which can land while a defer is being decided (the
+    continuation prompt already launched the successor). ``ROTATED`` is
+    terminal, so there is nothing to roll back — log and skip instead of
+    raising (regression 2026-09-27 049/050: InvalidTransitionError
+    ROTATED->CHECKPOINT_VERIFIED mid-rotation).
+    """
+    try:
+        state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+    except state.InvalidTransitionError as e:
+        rec = state.load_state(key, nnn)
+        log_event(f"rotator: defer no-op (state advanced to "
+                  f"{rec['state']!r}) key={key} nnn={nnn:03d} ({reason}): {e}")
+        return
+    log_event(f"rotator: ROTATION_DEFERRED key={key} nnn={nnn:03d} "
+              f"({reason})")
+
+
 def run(*, key: str, nnn: int, session_id: str, pane: str,
         rotation_id: str, cfg: dict) -> int:
     """PRD §11 — one full-auto rotation. Never kills Claude Code, never
@@ -376,21 +398,30 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
         # §11.3 — settle, then idle check.
         time.sleep(float(cfg.get("settle_ms", 1500)) / 1000.0)
         if not _idle(key, nnn):
-            state.transition(key, nnn, "CHECKPOINT_VERIFIED")
-            log_event(f"rotator: ROTATION_DEFERRED key={key} nnn={nnn:03d} "
-                      "(activity after Stop — next Stop retries)")
+            _defer_to_checkpoint(key, nnn,
+                                 "activity after Stop — next Stop retries")
             return 0
         cp_id = f"cp-{nnn:03d}"
         for attempt in (1, 2):  # §11.9: retry steps 3–9 once
+            # The retry is for a botched keystroke sequence, NOT a second
+            # rotation. If the state already advanced to ROTATED (bootstrap
+            # closed the old session when the successor's SessionStart/clear
+            # claimed the rotation — the previous attempt's continuation
+            # prompt already launched it), stop: re-driving the pane would
+            # fight the live successor, and ROTATED is terminal.
+            if state.load_state(key, nnn)["state"] == "ROTATED":
+                log_event(f"rotator: rotation already completed (ROTATED) "
+                          f"key={key} nnn={nnn:03d} attempt={attempt} — "
+                          "not re-driving")
+                return 0
             # §11.6 — remember existing markers BEFORE the keystrokes.
             before = _started_names()
             # §11.4–5 — save in-progress input, then /clear only when the
             # box is verified settled-empty; defer while the user types.
             if not _clear_pane(pane, key, nnn):
-                state.transition(key, nnn, "CHECKPOINT_VERIFIED")
-                log_event(f"rotator: ROTATION_DEFERRED key={key} "
-                          f"nnn={nnn:03d} (input box busy — user still "
-                          "typing; next Stop retries)")
+                _defer_to_checkpoint(key, nnn,
+                                     "input box busy — user still typing; "
+                                     "next Stop retries")
                 return 0
             if not _wait_new_started(before):
                 log_event("rotator: SESSIONSTART_MISSING — continuing "

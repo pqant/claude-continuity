@@ -509,6 +509,55 @@ def test_run_defers_when_input_box_busy(fake_tmux, cc_home, tmp_path,
     assert "ROTATION_DEFERRED" in (paths.logs_dir() / "events.log").read_text()
 
 
+def test_run_defer_tolerates_bootstrap_rotated(fake_tmux, cc_home, tmp_path,
+                                               monkeypatch):
+    # Regression 2026-09-27 049/050: bootstrap (the successor's
+    # SessionStart/clear claim) sets the old session to ROTATED while the
+    # rotator is deciding a defer. ROTATED is terminal, so the defer must
+    # NOT raise InvalidTransitionError, must NOT roll back, and returns 0.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+
+    def racing_clear(pane, k, n, **kw):
+        # the concurrent bootstrap closes the old session, then the box is
+        # still busy (take the defer path)
+        if state.load_state(k, n)["state"] == "ROTATING":
+            state.transition(k, n, "ROTATED")
+        return False
+    monkeypatch.setattr(rotator, "_clear_pane", racing_clear)
+
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 0  # a defer is not an error — and neither is the race
+    # NOT rolled back: ROTATED is terminal and the rotation already completed
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+
+
+def test_run_retry_does_not_redrive_when_bootstrap_rotated(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # Attempt 1 sends the continuation (the successor's SessionStart claims
+    # -> ROTATED) but _verify_resume misses it, so the retry loop re-enters.
+    # Attempt 2 must detect ROTATED and stop, NOT re-drive the pane.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    calls = {"n": 0}
+
+    def clear_once_then_rotated(pane, k, n, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1 and state.load_state(k, n)["state"] == "ROTATING":
+            state.transition(k, n, "ROTATED")  # bootstrap won after attempt 1
+        return True
+    monkeypatch.setattr(rotator, "_clear_pane", clear_once_then_rotated)
+    monkeypatch.setattr(rotator, "_verify_resume",
+                        lambda *a, **kw: False)  # force the retry
+
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    assert calls["n"] == 1  # attempt 2 did NOT re-drive the pane
+
+
 def test_run_happy_path_with_pending_prompt_in_c8(fake_tmux, cc_home,
                                                   tmp_path, monkeypatch):
     d = _rotating(cc_home, tmp_path)
