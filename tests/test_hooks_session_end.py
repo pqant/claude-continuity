@@ -160,7 +160,7 @@ def test_session_end_kills_progress_pane_and_drops_entry(
     assert "%31" in log
     # record entry dropped; the window's data file is KEPT — the pane is
     # dead anyway, and a dropped file leaves a recreated pane on the
-    # "⟳ …" placeholder until the next render (none comes while the
+    # "◆ …" placeholder until the next render (none comes while the
     # model is down). A new session's pane sees at most ~2 s of stale
     # text before its first render overwrites.
     rec = _json.loads(

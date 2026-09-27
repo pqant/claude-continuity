@@ -314,7 +314,7 @@ def cmd_statusline(args: argparse.Namespace) -> int:
     try:
         line = statusline.run(text.encode("utf-8"), config.load_config())
     except Exception:  # the status line must never break the TUI
-        line = "⟳ …"
+        line = "◆ …"
     print(line)
     return 0
 

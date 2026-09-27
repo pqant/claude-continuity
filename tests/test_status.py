@@ -179,7 +179,7 @@ def test_cli_statusline_garbage_stdin_exits_zero(cc_home, tmp_path,
                                                   monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", _text_stdin("not json at all"))
     assert cli.main(["statusline"]) == 0
-    assert "⟳ …" in capsys.readouterr().out
+    assert "◆ …" in capsys.readouterr().out
 
 
 def _text_stdin(text):

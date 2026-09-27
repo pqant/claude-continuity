@@ -66,7 +66,7 @@ def test_build_warned_and_pending():
     assert b == "proj=spike-repo 003 ratio=58.0% — rotating at 62%"
     t, b, p = notify.build_message(
         "rotation_pending", slug="spike-repo", nnn=3, ratio=0.65)
-    assert (t, p) == ("⟳ cc-continuity: rotation pending", "high")
+    assert (t, p) == ("◆ cc-continuity: rotation pending", "high")
     assert b == ("proj=spike-repo 003 ratio=65.0% — no interruption; "
                  "rotates at turn end")
     # stale/unknown ratio renders as an em-dash, never crashes

@@ -4,7 +4,7 @@ The status line is the *only* trusted context source (PRD §4 F4/F5):
 ``cc-continuity statusline`` reads the status line JSON on stdin, atomically
 writes ``runtime/<session_id>.json``, chains the user's previous status line
 command (same stdin, 2 s timeout), and appends our segment
-(``◆ 61% Active Usage`` / ``⟳ 63% PENDING→proj-002`` / ``⟳ 73% HANDOFF!`` / ``⟳ off``).
+(``◆ 61% Active Usage`` / ``◆ 63% PENDING→proj-002`` / ``◆ 73% HANDOFF!`` / ``◆ off``).
 """
 
 import json
@@ -207,24 +207,24 @@ def _cfg(**over):
 
 def test_segment_off_when_disabled(cc_home):
     assert statusline.render_segment(0.1, None, enabled=False,
-                                     ansi=False) == "⟳ off"
+                                     ansi=False) == "◆ off"
 
 
 def test_segment_off_when_session_flag_set(cc_home):
     rec = _make_session()
     rec["off"] = True
     assert statusline.render_segment(0.1, rec, enabled=True,
-                                     ansi=False) == "⟳ off"
+                                     ansi=False) == "◆ off"
 
 
 def test_segment_unknown_when_no_ratio(cc_home):
     assert statusline.render_segment(None, None, enabled=True,
-                                     ansi=False) == "⟳ …"
+                                     ansi=False) == "◆ …"
 
 
 def test_segment_ok_below_rotate(cc_home):
     rec = _make_session()  # BOOTSTRAPPING
-    # ceil, so we never understate (PRD pairs ratio 0.6036 with "⟳ 61%").
+    # ceil, so we never understate (PRD pairs ratio 0.6036 with "◆ 61%").
     assert statusline.render_segment(0.6036, rec, enabled=True,
                                      ansi=False) == "◆ 61% Active Usage"
     assert statusline.render_segment(0.60, rec, enabled=True,
@@ -235,7 +235,7 @@ def test_segment_pending_shows_successor(cc_home):
     rec = _make_session(state_to=["ACTIVE", "WARNED", "ROTATION_PENDING"])
     assert rec["state"] == "ROTATION_PENDING"
     assert statusline.render_segment(0.63, rec, enabled=True,
-                                     ansi=False) == "⟳ 63% PENDING→proj-002"
+                                     ansi=False) == "◆ 63% PENDING→proj-002"
 
 
 def test_segment_handoff_states(cc_home):
@@ -248,7 +248,7 @@ def test_segment_handoff_states(cc_home):
         state.transition(KEY + "-h", 1, target)
         rec = state.load_state(KEY + "-h", 1)
         assert statusline.render_segment(0.73, rec, enabled=True,
-                                         ansi=False) == "⟳ 73% HANDOFF!"
+                                         ansi=False) == "◆ 73% HANDOFF!"
 
 
 def test_segment_handoff_checkpoint_states(cc_home):
@@ -259,7 +259,7 @@ def test_segment_handoff_checkpoint_states(cc_home):
         state.transition(key, 1, s)
     rec = state.load_state(key, 1)
     assert statusline.render_segment(0.73, rec, enabled=True,
-                                     ansi=False) == "⟳ 73% HANDOFF!"
+                                     ansi=False) == "◆ 73% HANDOFF!"
 
 
 def test_segment_none_record_ok(cc_home):
@@ -348,14 +348,14 @@ def test_run_disabled_writes_nothing_and_shows_off(cc_home, monkeypatch):
     payload = _payload()
     line = statusline.run(json.dumps(payload).encode(),
                           _cfg(enabled=False, statusline_ansi=False))
-    assert line == "⟳ off"
+    assert line == "◆ off"
     assert not (paths.runtime_dir() / f"{payload['session_id']}.json").exists()
 
 
 def test_run_invalid_stdin_does_not_crash(cc_home):
     line = statusline.run(b"this is not json", _cfg(statusline_ansi=False))
     # No metric, no session, ratio unknown.
-    assert line == "⟳ …"
+    assert line == "◆ …"
 
 
 # ------------------------------------------------------- read + staleness
@@ -394,21 +394,21 @@ def test_render_segment_rotating_form(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
                                             "state": "ROTATING"}, True,
                                      ansi=False) \
-        == "⟳ 70% ROTATING"
+        == "◆ 70% ROTATING"
 
 
 def test_render_segment_amcl_form(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
                                             "state": "AWAITING_MANUAL_CLEAR"}, True,
                                      ansi=False) \
-        == "⟳ 70% AMCL"
+        == "◆ 70% AMCL"
 
 
 def test_render_segment_cv_stays_handoff(cc_home):
     assert statusline.render_segment(0.7, {"name": "proj-001",
                                             "state": "CHECKPOINT_VERIFIED"}, True,
                                      ansi=False) \
-        == "⟳ 70% HANDOFF!"
+        == "◆ 70% HANDOFF!"
 
 
 # ------------------------------------------------- Phase 9: ⛔ BLOCKED
@@ -421,9 +421,9 @@ def test_render_segment_blocked_suffix():
                                      blocked="drop db?", ansi=False) == \
         "◆ 50% Active Usage ⛔ BLOCKED"
     assert statusline.render_segment(None, rec, True,
-                                     blocked="x", ansi=False) == "⟳ … ⛔ BLOCKED"
+                                     blocked="x", ansi=False) == "◆ … ⛔ BLOCKED"
     assert statusline.render_segment(0.5, rec, False,
-                                     blocked="x", ansi=False) == "⟳ off"
+                                     blocked="x", ansi=False) == "◆ off"
 
 
 def test_run_shows_blocked_when_needs_human_pending(cc_home, tmp_path):
@@ -619,12 +619,12 @@ def test_segment_ansi_rainbow_is_state_independent():
     # segment text (and thus its length) varies by state.
     cases = [
         (0.63, {"name": "p-001", "state": "ROTATION_PENDING"},
-         "⟳ 63% PENDING→p-002"),
-        (0.7, {"name": "p-001", "state": "ROTATING"}, "⟳ 70% ROTATING"),
+         "◆ 63% PENDING→p-002"),
+        (0.7, {"name": "p-001", "state": "ROTATING"}, "◆ 70% ROTATING"),
         (0.7, {"name": "p-001", "state": "AWAITING_MANUAL_CLEAR"},
-         "⟳ 70% AMCL"),
+         "◆ 70% AMCL"),
         (0.73, {"name": "p-001", "state": "HANDOFF_REQUESTED"},
-         "⟳ 73% HANDOFF!"),
+         "◆ 73% HANDOFF!"),
     ]
     for ratio, rec, text in cases:
         assert statusline.render_segment(ratio, rec, True, now=0.0) == \
@@ -642,8 +642,8 @@ def test_segment_ansi_blocked_span_own_color():
 
 
 def test_segment_ansi_off_and_unknown_are_static_gray():
-    off = "\x1b[90m⟳ off" + _RESET
-    unknown = "\x1b[90m⟳ …" + _RESET
+    off = "\x1b[90m◆ off" + _RESET
+    unknown = "\x1b[90m◆ …" + _RESET
     rec_off = {"state": "ACTIVE", "name": "p-001", "off": True}
     for now in (0.0, 0.62, 1.0):  # static: never shimmers
         assert statusline.render_segment(0.1, None, False, now=now) == off
@@ -656,9 +656,9 @@ def test_segment_plain_mode_byte_identical_when_ansi_false():
     assert statusline.render_segment(0.5, rec, True, blocked="x",
                                      ansi=False) == "◆ 50% Active Usage ⛔ BLOCKED"
     assert statusline.render_segment(None, rec, True, blocked="x",
-                                     ansi=False) == "⟳ … ⛔ BLOCKED"
+                                     ansi=False) == "◆ … ⛔ BLOCKED"
     assert statusline.render_segment(None, None, True,
-                                     ansi=False) == "⟳ …"
+                                     ansi=False) == "◆ …"
     # plain mode emits no escape codes
     assert "\x1b" not in statusline.render_segment(0.5, rec, True,
                                                    blocked="x", ansi=False)
@@ -878,7 +878,7 @@ def test_run_disabled_never_reads_pane(cc_home, fake_tmux_pane):
     pane, log = fake_tmux_pane
     line = statusline.run(json.dumps(_payload()).encode(),
                           _cfg(enabled=False))
-    assert line == "\x1b[90m⟳ off" + _RESET
+    assert line == "\x1b[90m◆ off" + _RESET
     assert _pane_calls(log) == []
 
 
@@ -1118,7 +1118,7 @@ def test_run_mode1_tmux_unreachable_drops_segment(cc_home, monkeypatch):
 def test_run_mode1_idle_render_keeps_pane_real_text(cc_home, monkeypatch):
     # A render with NO usable token data (idle between turns — a turn
     # ending) must NOT overwrite the pane's last real text with the
-    # "⟳ …" placeholder: that is what flipped the live pane to ".." the
+    # "◆ …" placeholder: that is what flipped the live pane to ".." the
     # instant a turn ended (the 30-min-placeholder symptom resurfacing on
     # the WRITER side; Bug B only covered the pane reading a vanished file).
     # Skipping the write leaves the mtime unchanged, so the animator keeps
