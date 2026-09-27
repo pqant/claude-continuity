@@ -2,7 +2,10 @@
 
 Ledger entry with reason; if reason == ``clear`` while state is ``ROTATING``,
 log it to ``events.log`` (successor confirmation happens at SessionStart,
-Phase 6).
+Phase 6). If reason == ``resume``, the startup's process was abandoned
+when it resumed a different conversation (relaunch with --continue): mark
+the session ``off`` so it does not linger as a live zombie in scans
+(regression 2026-09-27 047).
 """
 
 from __future__ import annotations
@@ -10,8 +13,8 @@ from __future__ import annotations
 import os
 import subprocess
 
-from .. import ledger, notify
-from .common import HookContext, log_event
+from .. import ledger, notify, state
+from .common import HookContext, log_error, log_event
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -29,6 +32,17 @@ def handle(ctx: HookContext) -> dict | None:
             f"SessionEnd reason=clear while state=ROTATING "
             f"(project {ctx.session['project_key']}, session {ctx.session['nnn']:03d})"
         )
+    if reason == "resume":
+        # regression 2026-09-27 047: this startup's process was abandoned
+        # the moment it resumed a different conversation (relaunch with
+        # --continue registers a new sid first). Switch it off so it never
+        # lingers as a live zombie in watchdog/digest scans — off flag
+        # only, no state transition, no extra notify.
+        try:
+            state.update_fields(ctx.session["project_key"],
+                                int(ctx.session["nnn"]), off=True)
+        except Exception:
+            log_error("SessionEnd(resume): marking session off failed")
     _cleanup_progress_pane()
     return None
 
