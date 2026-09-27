@@ -257,7 +257,11 @@ line is submitted with a bare Enter on the next unchanged tick.
 ## Logs
 
 - `~/.claude-continuity/logs/watchdog.log` — one JSONL line per tick
-  (health, per-session outcome, events, recovery summary).
+  (health, per-session outcome, events, recovery summary). The line's
+  `health` field is the state at tick START (pre-transition): the tick
+  that fires `dgx_down` still logs `health=UP`, the one that fires
+  `dgx_up` still logs `health=DOWN` — the transition is the event, and
+  the new state is confirmed on the next tick's line.
 - `~/.claude-continuity/logs/errors.log` — tick exceptions; the loop
   **always continues** (P10-D12: a watchdog failure must never break the
   continuity loop).
