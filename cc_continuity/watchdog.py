@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from datetime import datetime
 
 __all__ = [
     "ALIVE", "FROZEN", "IDLE_WAITING", "SKIP", "STALLED", "TURN_DEAD",
@@ -16,8 +17,8 @@ __all__ = [
     "DONE", "GIVE_UP", "NUDGE", "RESEND", "SEND_ENTER", "WAIT_HEALTH",
     "ERROR_TAIL_RE", "PROMPT_RE",
     "Episode", "HealthState",
-    "classify", "error_in_tail", "nudge_action", "pane_idle", "pane_pending",
-    "power_cycle_due",
+    "build_nudge_text", "classify", "error_in_tail", "nudge_action",
+    "pane_idle", "pane_pending", "power_cycle_due",
 ]
 
 # --- liveness outcomes (P10-D6) ---------------------------------------------
@@ -143,14 +144,86 @@ def pane_pending(capture: str, nudge_text: str) -> bool:
     last non-empty line is a prompt line containing ``nudge_text``
     (P10-D7.3 — the 11:30 lost-Enter case; the daemon then sends a bare
     Enter instead of re-typing the text).
+
+    Phase 19 — multiline: a ``build_nudge_text`` nudge sits in the input
+    box with the ``❯`` glyph on the FIRST input line only; the capture's
+    last non-empty line is the nudge's own TAIL line (a long line may also
+    wrap, but the tail-match below covers the common case). So ALSO: the
+    nudge's last non-empty line (stripped) appears in the capture's last
+    non-empty line (stripped).
     """
     last = None
     for line in reversed(capture.splitlines()):
         if line.strip():
             last = line
             break
-    return (last is not None and bool(PROMPT_RE.match(last))
-            and nudge_text in last)
+    if (last is not None and bool(PROMPT_RE.match(last))
+            and nudge_text in last):
+        return True
+    nudge_last = None
+    for line in reversed(nudge_text.splitlines()):
+        if line.strip():
+            nudge_last = line.strip()
+            break
+    return (nudge_last is not None and last is not None
+            and nudge_last in last.strip())
+
+
+# --- nudge text (Phase 19: the bare "continue" is "too little") ----------------
+
+
+def _ts_hms(ts: float) -> str:
+    """Local ``HH:MM:SS`` for a ts (same local-time basis as the
+    watchdog.log lines the user reads)."""
+    return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
+def build_nudge_text(base: str, *, now: float,
+                     down_since: float | None = None,
+                     cycle_ts: float | None = None,
+                     idle_minutes: int | None = None,
+                     stalled: bool = False) -> str:
+    """Phase 19: the nudge prompt carries WHY the turn stopped, so the
+    session resumes with context instead of a bare ``continue``.
+
+    ``base``: the first line — ``watchdog_nudge_text`` (the user's
+    override wins). Two forms:
+
+    * OUTAGE (``down_since`` set): the model server went down and came
+      back; the in-flight turn died with the model. The text names the
+      window (``DOWN <ts> → UP <ts> (N min down)``) — with a
+      ``→ power_cycle <ts>`` segment ONLY when ``cycle_ts`` falls INSIDE
+      that window — and tells the session to check ``git status`` / the
+      last output before continuing.
+    * PLAIN (``down_since`` None): TURN_DEAD → the idle minutes;
+      STALLED (``stalled=True``) → the turn ended in error.
+
+    The context block is prefixed ``[cc-continuity watchdog]`` so the
+    session (and the user, scrolling) can see it is automation.
+    """
+    lines = [str(base), ""]
+    if down_since is not None:
+        if cycle_ts is not None and down_since <= cycle_ts <= now:
+            cycle_seg = f" → power_cycle {_ts_hms(cycle_ts)}"
+        else:
+            cycle_seg = ""
+        mins = int((now - down_since) // 60)
+        lines += [
+            "[cc-continuity watchdog] The model server is back online:",
+            f"DOWN {_ts_hms(down_since)}{cycle_seg} → UP {_ts_hms(now)}"
+            f" ({mins} min down)",
+            "The in-flight turn died with the model. "
+            "Continue from where you left off.",
+            "If unsure, check git status and the last output first.",
+        ]
+    elif stalled:
+        lines.append("[cc-continuity watchdog] "
+                     "The last turn ended in error — continue from where you left off.")
+    else:
+        lines.append(f"[cc-continuity watchdog] The turn stalled "
+                     f"({idle_minutes} min idle) — "
+                     f"Continue from where you left off.")
+    return "\n".join(lines)
 
 
 # --- nudge state machine (P10-D7) --------------------------------------------
@@ -185,15 +258,21 @@ def nudge_action(health: str, ep: Episode, pane_pending: bool,
     ``max_nudges``: ``watchdog_max_nudges``.
 
     First nudge (``n == 0``): NUDGE only when health is UP — a nudge is
-    a model call, so DOWN/UNKNOWN waits (P10-D7.1). Afterwards: pending
-    input → SEND_ENTER (a bare Enter is free even while DOWN); text
-    absent → RESEND (counts as the next attempt) until
-    ``n >= max_nudges`` → GIVE_UP (P10-D7.4). ``given_up`` → DONE until
-    a human ``user_prompt``.
+    a model call, so DOWN/UNKNOWN waits (P10-D7.1). EXCEPTION (Phase 19,
+    daemon restart): a FRESH episode (``n == 0``) with PENDING input →
+    SEND_ENTER — the nudge was sent before the restart (the ledger
+    remembers, the in-memory episode does not) and a bare Enter submits
+    it without re-pasting a duplicate. Afterwards: pending input →
+    SEND_ENTER (a bare Enter is free even while DOWN); text absent →
+    RESEND (counts as the next attempt) until ``n >= max_nudges`` →
+    GIVE_UP (P10-D7.4). ``given_up`` → DONE until a human
+    ``user_prompt``.
     """
     if ep.given_up:
         return DONE
     if ep.n == 0:
+        if pane_pending:
+            return SEND_ENTER
         return NUDGE if health == "UP" else WAIT_HEALTH
     if pane_pending:
         return SEND_ENTER

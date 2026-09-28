@@ -165,8 +165,19 @@ def test_e2e_dead_turn_down_wait_up_nudge_enter_verified(cc_home, tmp_path,
     assert l3["events"][0] == "dgx_up"
     assert any(e.startswith("turn_dead:") for e in l3["events"])
     sent = calls.read_text(encoding="utf-8").splitlines()
-    assert any(l.startswith("send-keys") and "continue" in l
-               and "Enter" in l for l in sent)
+    # Phase 19: a STANDALONE send-keys Escape force-cancels the stuck
+    # turn, then ONE send-keys call carries the enriched MULTI-LINE
+    # text + Enter. The fake tmux's `echo "$@"` logs that call as one
+    # line per text line — the first ends at the base line, the last
+    # ends at " Enter". (No new Turkish literals: "continue" is this
+    # test's configured base; the marker is ASCII.)
+    esc = next(i for i, l in enumerate(sent)
+               if l.startswith("send-keys") and l.endswith("Escape"))
+    txt = next(i for i, l in enumerate(sent)
+               if l.startswith("send-keys") and l.endswith(" continue"))
+    assert esc < txt
+    assert any(l.endswith(" Enter") for l in sent)
+    assert any("[cc-continuity watchdog]" in l for l in sent)
     assert ledger.read(sdir)[-1]["type"] == "watchdog_nudge"
     _wait(ntfy, 3)
     assert [p[0] for p in _ntfy_inbox(ntfy)] == [
@@ -174,17 +185,23 @@ def test_e2e_dead_turn_down_wait_up_nudge_enter_verified(cc_home, tmp_path,
         "🔌 cc-continuity: model server back",
         "⟲ cc-continuity: turn died — recovering"]
 
-    # 4: the Enter was lost — the text sits in the input line (11:30):
-    #    the next unchanged tick sends a BARE Enter (no new attempt)
-    nudge_ts = [e for e in ledger.read(sdir)
-                if e["type"] == "watchdog_nudge"][-1]["ts"]
-    pane.write_text("work output line\n❯ continue\n", encoding="utf-8")
+    # 4: the Enter was lost — the enriched (multi-line) nudge sits
+    #    unsubmitted in the input box (11:30): the ❯ glyph is on the
+    #    FIRST input line only, so the pane is NOT "at prompt" → WAIT
+    #    (not TURN_DEAD) and the pending check matches the SENT text's
+    #    tail line → a BARE Enter, no new attempt. The pane is derived
+    #    from the ledger's nudge text — no Turkish re-typed here.
+    nudge = [e for e in ledger.read(sdir)
+             if e["type"] == "watchdog_nudge"][-1]
+    nudge_ts = nudge["ts"]
+    pane.write_text("work output line\n❯ " + nudge["text"] + "\n",
+                    encoding="utf-8")
     ctx.now += 300
     l4 = watchdogd.tick(ctx)
     assert l4["sessions"][0]["outcome"] == "ALIVE"  # capture CHANGED
     ctx.now += 300
     l5 = watchdogd.tick(ctx)
-    assert l5["sessions"][0]["outcome"] == "TURN_DEAD"
+    assert l5["sessions"][0]["outcome"] == "WAIT"
     sent = calls.read_text(encoding="utf-8").splitlines()
     assert any(l.startswith("send-keys") and "continue" not in l
                and "Enter" in l for l in sent)

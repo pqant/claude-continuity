@@ -20,14 +20,20 @@ import traceback
 from pathlib import Path
 
 from . import ledger, notify, paths, power_plug, state
-from .watchdog import (Episode, HealthState, classify, nudge_action,
-                       pane_pending, power_cycle_due)
+from .watchdog import (Episode, HealthState, build_nudge_text, classify,
+                       nudge_action, pane_pending, power_cycle_due)
 
 #: P10-D2/P10-P8: the LaunchAgent label (plist file name minus .plist).
 PLIST_LABEL = "com.claude-continuity.watchdog"
 
 #: States whose sessions may receive a nudge (P10-D5).
 NUDGE_ELIGIBLE = frozenset({"ACTIVE", "WARNED"})
+
+#: Phase 19: pause between the force-cancel Escape and the nudge text —
+#: long enough for the in-flight turn (and any stale input-box line) to
+#: settle, short enough that a 5-min tick feels instant. Module constant
+#: (the user called it "ayarlanabilir"; a config key can follow v1).
+ESCAPE_SETTLE_S = 0.75
 
 #: P10-P9 refinement (binding): the daemon's own ledger writes are NOT
 #: chain activity — counting them would make every nudge look like a
@@ -341,6 +347,23 @@ def last_ledger_ts(session_dir: Path | str) -> float | None:
     return None
 
 
+def _last_nudge_text(sdir) -> str | None:
+    """Phase 19: the ``text`` of the LAST ``watchdog_nudge`` ledger entry
+    (None = the daemon never nudged this session). The pending check must
+    match what was SENT — every nudge's context block differs per tick
+    (idle minutes, outage window), so the text freshly built for THIS
+    tick would not match the text sitting in the input box."""
+    try:
+        entries = ledger.read(sdir)
+    except OSError:
+        return None
+    for e in reversed(entries):
+        if e.get("type") == "watchdog_nudge":
+            t = e.get("text")
+            return t if isinstance(t, str) and t else None
+    return None
+
+
 def _seed_froze() -> set:
     """P10-P7/D8: a freeze already announced before the daemon restart
     (a ``watchdog_freeze`` ledger entry not followed by a
@@ -384,6 +407,7 @@ class TickCtx:
     cycle: object = None  # () -> dict (cycle_power); None = no auto-cycle
     last_cycle_ts: object = None  # () -> float | None (cooldown state)
     record_cycle_ts: object = None  # (ts: float) -> None
+    sleep: object = None  # (s: float) -> None (settle pauses; tests pin)
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -458,23 +482,48 @@ def _may_nudge(ctx: TickCtx, focus: tuple[str, int] | None,
 
 
 def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
-                last_ts: float | None, now: float, line: dict) -> None:
+                last_ts: float | None, now: float, line: dict, *,
+                outage: float | None = None,
+                cycle_ts: float | None = None,
+                stalled: bool = False,
+                sent_text: str | None = None) -> None:
     """P10-D7 nudge state machine, executed with side effects (the
-    daemon owns them — the core stays pure, P10-P1)."""
+    daemon owns them — the core stays pure, P10-P1).
+
+    Phase 19: ``outage``/``cycle_ts`` build the OUTAGE-form nudge text
+    (dgx_up recovery — the model is back, the turn died with it);
+    otherwise the plain form (``stalled`` picks the STALLED line).
+    ``sent_text``: the text of the LAST nudge the daemon actually sent
+    (``_last_nudge_text``) — the pending check must match THAT, because
+    the freshly built text's context block differs per tick. On the
+    first physical send (action NUDGE) a force-cancel ``Escape`` +
+    settle precede the text: it kills the stuck in-flight turn and a
+    stale duplicate line left in the input box (RESEND/SEND_ENTER must
+    NOT ESC — that would kill the pending nudge it is submitting)."""
     cfg = ctx.cfg
     sid = (key, nnn)
     sdir = paths.session_dir(key, nnn)
     max_nudges = int(cfg.get("watchdog_max_nudges", 3))
-    text = str(cfg.get("watchdog_nudge_text") or "continue")
+    base = str(cfg.get("watchdog_nudge_text") or "continue")
     slug = notify.project_slug(key)
+    idle_minutes = (int((now - last_ts) // 60)
+                    if last_ts is not None
+                    else int(cfg.get("watchdog_stale_minutes", 45)))
+    if outage is not None:
+        text = build_nudge_text(base, now=now, down_since=outage,
+                                cycle_ts=cycle_ts)
+    else:
+        text = build_nudge_text(base, now=now, idle_minutes=idle_minutes,
+                                stalled=stalled)
+    pending = pane_pending(cap, text) or (
+        sent_text is not None and pane_pending(cap, sent_text))
 
     ep = ctx.episodes.get(sid)
     if ep is None:
         ep = ctx.episodes[sid] = Episode(
             waiting_health=ctx.health.status != "UP")
 
-    action = nudge_action(ctx.health.status, ep,
-                          pane_pending(cap, text), max_nudges)
+    action = nudge_action(ctx.health.status, ep, pending, max_nudges)
     if action == "WAIT_HEALTH":
         line["events"].append(f"waiting_for_dgx:{key}:{nnn:03d}")
         return
@@ -487,6 +536,14 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
         if fresh is None or fresh.get("state") not in NUDGE_ELIGIBLE:
             line["events"].append(f"skip_state:{key}:{nnn:03d}")
             return
+        if action == "NUDGE":
+            # Phase 19 item 2: force-cancel the stuck in-flight turn
+            # first, let it settle, THEN the enriched text lands.
+            try:
+                ctx.send(target, "Escape")
+            except Exception:
+                _log_error("send")
+            (ctx.sleep or time.sleep)(ESCAPE_SETTLE_S)
         try:
             ok = ctx.send(target, text, "Enter")
         except Exception:
@@ -500,9 +557,6 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
         ep.n += 1
         ep.nudge_ts = now
         if action == "NUDGE":
-            idle_minutes = (int((now - last_ts) // 60)
-                            if last_ts is not None
-                            else int(cfg.get("watchdog_stale_minutes", 45)))
             _push(cfg, "turn_dead", slug=slug, nnn=nnn,
                   idle_minutes=idle_minutes, max_nudges=max_nudges)
             line["events"].append(f"turn_dead:{key}:{nnn:03d}")
@@ -528,7 +582,8 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
 
 
 def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict,
-                         focus: tuple[str, int] | None) -> None:
+                         focus: tuple[str, int] | None,
+                         down_since: float | None = None) -> None:
     """P15: after a DOWN->UP transition, nudge each eligible session still
     mid-turn (turn_active). A real DOWN (2-fail debounce) means the model was
     down, so no turn could progress — a session still mid-turn is stuck on the
@@ -539,9 +594,25 @@ def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict,
     the transition tick (the caller gates it) so a recovery turn in flight is
     not re-nudged next tick. When ``watchdog_nudge_only_most_recent`` is on,
     ``focus`` (the most-recently-active eligible session, the digest target)
-    is the only one recovered this tick. Never raises (P10-D12)."""
+    is the only one recovered this tick.
+
+    Phase 19: the nudge carries the OUTAGE context (down_since + the
+    power_cycle ts when it falls inside the window) so the session knows
+    the turn died WITH the model and what to check first. Never raises
+    (P10-D12)."""
     now = ctx.now if ctx.now is not None else time.time()
     stale_s = float(ctx.cfg.get("watchdog_stale_minutes", 45)) * 60
+    # The power_cycle that caused this outage (if any): only a cycle ts
+    # INSIDE the outage window belongs in the nudge text.
+    cycle_ts = None
+    if down_since is not None and ctx.last_cycle_ts is not None:
+        try:
+            cts = ctx.last_cycle_ts()
+        except Exception:
+            _log_error("last_cycle_ts")
+            cts = None
+        if cts is not None and down_since <= cts <= now:
+            cycle_ts = cts
     for key, nnn, rec in collect_live_sessions():
         if rec.get("state") not in NUDGE_ELIGIBLE:
             continue
@@ -570,7 +641,8 @@ def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict,
         if cap is None:
             line["events"].append(f"recovery_capture_failed:{key}:{nnn:03d}")
             continue
-        _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line)
+        _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
+                    outage=down_since, cycle_ts=cycle_ts)
         line["events"].append(f"dgx_up_recovery:{key}:{nnn:03d}")
 
 
@@ -690,7 +762,7 @@ def tick(ctx: TickCtx) -> dict:
     #     (fresh last_ts). Only on the transition tick, so a recovery turn in
     #     flight is not re-nudged on a later UP tick.
     if transition == "up":
-        _recover_stuck_turns(ctx, sessions, line, focus)
+        _recover_stuck_turns(ctx, sessions, line, focus, down_since)
 
     for key, nnn, rec in collect_live_sessions():
         sid = (key, nnn)
@@ -728,6 +800,7 @@ def tick(ctx: TickCtx) -> dict:
 
         sdir = paths.session_dir(key, nnn)
         last_ts = last_ledger_ts(sdir)
+        sent_text = _last_nudge_text(sdir)
         stale_s = float(ctx.cfg.get("watchdog_stale_minutes", 45)) * 60
         outcome = classify(rec, last_ts, cap,
                            prev[0] if prev is not None else None,
@@ -740,7 +813,18 @@ def tick(ctx: TickCtx) -> dict:
 
         if outcome in ("TURN_DEAD", "STALLED"):
             if _may_nudge(ctx, focus, key, nnn):
-                _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line)
+                _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
+                            stalled=(outcome == "STALLED"),
+                            sent_text=sent_text)
+        elif (outcome in ("WAIT", "FROZEN") and sent_text is not None
+              and pane_pending(cap, sent_text)
+              and _may_nudge(ctx, focus, key, nnn)):
+            # Phase 19: a pending MULTI-LINE nudge makes classify() see a
+            # non-idle pane (the ❯ glyph is on the FIRST input line only)
+            # → WAIT/FROZEN → the normal path would never submit it (it
+            # rots in the input box). Submit it with a bare Enter.
+            _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
+                        sent_text=sent_text)
         elif outcome == "FROZEN" and sid not in ctx.froze:
             _push(ctx.cfg, "freeze_detected", slug=slug, nnn=nnn)
             ledger.append(sdir, {"type": "watchdog_freeze"})

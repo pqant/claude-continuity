@@ -78,9 +78,9 @@ def test_format_digest_single_down_entry():
         f"{datetime.fromtimestamp(now).strftime('%H:%M')}]")
     assert lines[1] == (
         f"{_t(ts)} health=DOWN recovery(exit=0,15s) ev=[dgx_down]")
-    assert lines[2] == (
-        "(auto-injected by cc-continuity watchdog digest "
-        "— a short ack is enough)")
+    # Phase 19: the digest is a LOG (display-popup), not a prompt — no
+    # ack is expected
+    assert lines[2] == "(cc-continuity watchdog digest — log only, not a prompt)"
     assert len(lines) == 3
 
 
@@ -250,7 +250,7 @@ def _run(cc_home, *, state=None, log_entries=(), collect=(),
                                else []),
         collect=lambda: list(collect),
         ledger_ts=lambda sdir: 999.0,
-        inject=inject,
+        display=inject,  # Phase 19: the display callable (was inject=)
         cfg_over=cfg_over,
     )
     return res, calls
@@ -265,7 +265,7 @@ def test_run_once_first_run_seeds_no_backlog(cc_home):
         encoding="utf-8")
     inject, calls = _fake_inject()
     res = wd.run_once(now=NOW, list_sessions=lambda: [], collect=lambda: [],
-                      ledger_ts=lambda sdir: 999.0, inject=inject)
+                      ledger_ts=lambda sdir: 999.0, display=inject)
     assert res["scanned"] == 0 and res["notable"] == 0
     assert res["pushed"] is False and calls == []
     st = wd.load_state(wd.state_path())
@@ -424,7 +424,15 @@ def test_run_once_busy_then_idle_retries_next_tick(cc_home):
     assert wd.load_state(wd.state_path())["last_ts"] == NOW - 60
 
 
-# --- inject_pane --------------------------------------------------------------------
+# --- show_popup (Phase 19: display-popup — a LOG, never a prompt) ------------------
+#
+# The digest is shown via tmux display-popup on the target client for ~8
+# s and closed from the daemon side. The input box is NEVER touched, so
+# a digest can never become a queued model turn. Popups CANNOT display on
+# a control client (tmux -CC — tmux's own regress test) — no client →
+# log-only (False). The opener is a DIRECT subprocess.Popen: the
+# display-popup <cmd> CLI blocks until the popup closes, so it must not
+# go through runner (tests monkeypatch it separately).
 
 
 class _P:
@@ -434,66 +442,144 @@ class _P:
         self.stderr = b""
 
 
-def test_inject_pane_loads_pastes_enters(cc_home):
-    # tmux 3.7b: `load-buffer -b NAME` with stdin FAILS
-    # ("too few arguments") — the text must go through a file argument
-    # (live-verified against the real tmux during deployment).
-    calls = []
-    loaded = {}
+def _digest_tmp():
+    return paths.runtime_dir() / "watchdog-digest-paste.txt"
+
+
+def _fake_popen(monkeypatch, records, raise_exc=None, result=0):
+    """subprocess.Popen stand-in: records the opener cmd and the tmp
+    file content (at Popen time); wait() returns ``result``."""
+
+    def fake(cmd, **kw):
+        if raise_exc is not None:
+            raise raise_exc
+        rec = {"cmd": cmd, "tmp_text": None}
+        for a in cmd:
+            if a.startswith("cat "):
+                p = a.split("cat ", 1)[1].split(";")[0]
+                rec["tmp_text"] = Path(p).read_text(encoding="utf-8")
+                break
+        records.append(rec)
+
+        class _Opener:
+            def wait(self, timeout=None):
+                return result
+
+        return _Opener()
+
+    monkeypatch.setattr(wd.subprocess, "Popen", fake)
+    return records
+
+
+def _client_runner(records, target_client=None, any_client=None,
+                   target_rc=0, any_rc=0):
+    """runner stand-in answering list-clients (target-specific and
+    generic) plus the close call; records every cmd."""
 
     def runner(cmd, **kw):
-        calls.append(cmd)
-        if cmd[1] == "load-buffer":
-            # argv: [tmux, load-buffer, -b, BUFFER, FILE]
-            loaded["text"] = Path(cmd[4]).read_text(encoding="utf-8")
+        records.append(cmd)
+        if cmd[1] == "list-clients":
+            if "-t" in cmd:
+                return _P(target_rc, (target_client or "").encode())
+            return _P(any_rc, (any_client or "").encode())
         return _P(0)
 
-    ok = wd.inject_pane("cc-proj-a-0a9b", "line1\nline2", runner=runner)
+    return runner
+
+
+def test_show_popup_opens_sleeps_closes(cc_home, monkeypatch):
+    runner_calls = []
+    popen_calls = []
+    slept = []
+    _fake_popen(monkeypatch, popen_calls)
+    runner = _client_runner(runner_calls, target_client="dev/pts-1")
+    ok = wd.show_popup("cc-proj-a-0a9b", "line1\nline2", runner=runner,
+                       sleep=lambda s: slept.append(s))
     assert ok is True
-    assert loaded["text"] == "line1\nline2"
-    assert calls[0][:3] == ["tmux", "load-buffer", "-b"]
-    assert calls[0][3] == "cc-continuity-digest"
-    assert calls[0][4] == str(paths.runtime_dir()
-                              / "watchdog-digest-paste.txt")
-    assert calls[1] == ["tmux", "paste-buffer", "-b",
-                        "cc-continuity-digest", "-t", "cc-proj-a-0a9b"]
-    assert calls[2] == ["tmux", "send-keys", "-t",
-                        "cc-proj-a-0a9b", "Enter"]
-    # the temp file is cleaned up
-    assert not (paths.runtime_dir()
-                / "watchdog-digest-paste.txt").exists()
+    assert popen_calls[0]["cmd"] == [
+        "tmux", "display-popup", "-c", "dev/pts-1",
+        "-t", "cc-proj-a-0a9b", "-T", wd.POPUP_TITLE,
+        "-w", "110", "-h", "16",
+        f"cat {_digest_tmp()}; sleep 8"]
+    # the digest text is in the tmp file AT Popen time, cleaned after
+    assert popen_calls[0]["tmp_text"] == "line1\nline2"
+    assert not _digest_tmp().exists()
+    assert slept == [8.0]
+    assert runner_calls == [
+        ["tmux", "list-clients", "-t", "cc-proj-a-0a9b",
+         "-F", "#{client_name}"],
+        ["tmux", "display-popup", "-x", "-c", "dev/pts-1"],
+    ]
 
 
-def test_inject_pane_paste_failure_stops_before_enter():
-    calls = []
+def test_show_popup_prefers_target_specific_client(cc_home, monkeypatch):
+    runner_calls = []
+    popen_calls = []
+    _fake_popen(monkeypatch, popen_calls)
+    runner = _client_runner(runner_calls, target_client="dev/pts-1",
+                            any_client="dev/pts-2")
+    ok = wd.show_popup("cc-proj-a-0a9b", "t", runner=runner,
+               sleep=lambda s: None)
+    assert ok is True
+    cmd = popen_calls[0]["cmd"]
+    assert cmd[cmd.index("-c") + 1] == "dev/pts-1"
+    # the generic list-clients (no -t) was never needed
+    assert [c for c in runner_calls if c[1] == "list-clients"] == [
+        ["tmux", "list-clients", "-t", "cc-proj-a-0a9b",
+         "-F", "#{client_name}"]]
 
-    def runner(cmd, **kw):
-        calls.append(cmd)
-        return _P(0) if cmd[1] == "load-buffer" else _P(1)
 
-    ok = wd.inject_pane("pane1", "text", runner=runner)
+def test_show_popup_falls_back_to_any_client_on_target_rc_nonzero(
+        cc_home, monkeypatch):
+    # list-clients -t rc != 0 (no client attached to the session) →
+    # the generic fallback
+    runner_calls = []
+    popen_calls = []
+    _fake_popen(monkeypatch, popen_calls)
+    runner = _client_runner(runner_calls, target_client="dev/pts-1",
+                            target_rc=1, any_client="dev/pts-9")
+    ok = wd.show_popup("cc-proj-a-0a9b", "t", runner=runner,
+               sleep=lambda s: None)
+    assert ok is True
+    cmd = popen_calls[0]["cmd"]
+    assert cmd[cmd.index("-c") + 1] == "dev/pts-9"
+
+
+def test_show_popup_no_client_is_log_only(cc_home, monkeypatch):
+    # no client anywhere (control client / detached) → False, no Popen,
+    # tmp cleaned on the early return
+    popen_calls = []
+    _fake_popen(monkeypatch, popen_calls)
+    runner = _client_runner([], target_client="", any_client="\n")
+    ok = wd.show_popup("cc-proj-a-0a9b", "t", runner=runner,
+               sleep=lambda s: None)
     assert ok is False
-    assert len(calls) == 2  # no send-keys after a failed paste
-    assert "send-keys" not in calls[1]
+    assert popen_calls == []
+    assert not _digest_tmp().exists()
 
 
-def test_inject_pane_runner_raises_returns_false():
-    def runner(cmd, **kw):
-        raise OSError("no tmux")
+def test_show_popup_popen_raises_is_false_and_cleans_tmp(cc_home, monkeypatch):
+    popen_calls = []
+    _fake_popen(monkeypatch, popen_calls, raise_exc=OSError("no tmux"))
+    runner = _client_runner([], target_client="dev/pts-1")
+    ok = wd.show_popup("cc-proj-a-0a9b", "t", runner=runner,
+               sleep=lambda s: None)
+    assert ok is False
+    assert popen_calls == []
+    assert not _digest_tmp().exists()
 
-    assert wd.inject_pane("pane1", "text", runner=runner) is False
 
-
-def test_inject_pane_uses_env_tmux_bin(monkeypatch):
-    calls = []
-
-    def runner(cmd, **kw):
-        calls.append(cmd)
-        return _P(0)
-
+def test_show_popup_uses_env_tmux_bin(cc_home, monkeypatch):
+    runner_calls = []
+    popen_calls = []
+    _fake_popen(monkeypatch, popen_calls)
     monkeypatch.setenv("CC_CONTINUITY_TMUX_BIN", "/opt/homebrew/bin/tmux")
-    wd.inject_pane("pane1", "text", runner=runner)
-    assert all(c[0] == "/opt/homebrew/bin/tmux" for c in calls)
+    runner = _client_runner(runner_calls, target_client="dev/pts-1")
+    ok = wd.show_popup("cc-proj-a-0a9b", "t", runner=runner,
+               sleep=lambda s: None)
+    assert ok is True
+    assert all(c[0] == "/opt/homebrew/bin/tmux" for c in runner_calls)
+    assert popen_calls[0]["cmd"][0] == "/opt/homebrew/bin/tmux"
 
 
 # --- plist / launchctl ------------------------------------------------------------------
