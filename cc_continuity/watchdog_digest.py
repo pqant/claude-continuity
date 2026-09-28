@@ -7,13 +7,17 @@ Code session — so the actions went unseen. A launchd PERIODIC agent
 every ~2 min: it reads the new JSONL entries of ``logs/watchdog.log``
 since the last processed ts, keeps the NOTABLE ones (health != UP, or a
 dgx_down/dgx_up/power_cycle* event, or a network recovery that ran), and
-injects a short digest (≤ 8 lines) into the ONE most-recently-active
-live session's pane (tmux paste-buffer + Enter — a queued prompt, same
-mechanism as a mid-turn user message). Every digest is ALSO appended to
-``runtime/watchdog-digest.log`` regardless of injection, so the history
-is always inspectable. Pushes are capped at one per 5 min (config
-``watchdog_digest_push_cap_s``) — notable entries keep being file-logged
-inside the window, they just do not consume a model turn.
+shows a short digest (≤ 8 lines) via ``tmux display-popup`` on the ONE
+most-recently-active live session's client. Phase 19: the digest is a
+LOG, not a prompt — visible ~8 s, auto-closed by the daemon, and the
+input box is NEVER touched, so it can never become a queued model turn
+(the Phase 13 paste-buffer+Enter injection is gone). Popups CANNOT
+display on a control client (tmux -CC — tmux's own regress test); with
+no attached client the digest is file-logged only. Every digest is ALSO
+appended to ``runtime/watchdog-digest.log`` regardless of display, so
+the history is always inspectable. Displays are capped at one per 5 min
+(config ``watchdog_digest_push_cap_s``) — notable entries keep being
+file-logged inside the window, they just do not consume a popup.
 """
 
 from __future__ import annotations
@@ -40,11 +44,16 @@ DEFAULT_PUSH_CAP_S = 300.0
 #: The digest is ≤ 8 lines: header + optional truncation note + at most
 #: this many entry lines + footer.
 MAX_ENTRY_LINES = 5
-#: Footer: tells the model it is an automated injection (a short ack is
-#: enough — a long reply would burn a turn on bookkeeping).
-_DIGEST_FOOTER = (
-    "(auto-injected by cc-continuity watchdog digest "
-    "— a short ack is enough)")
+#: Footer: Phase 19 — the digest is a LOG (display-popup), not a prompt:
+#: no ack is expected.
+_DIGEST_FOOTER = ("(cc-continuity watchdog digest — log only, not a prompt)")
+#: Phase 19: display-popup geometry and lifetime. Module constants for
+#: v1 (the user asked "ayarlanabilir" — config keys can follow; see
+#: docs/WATCHDOG.md).
+POPUP_WIDTH = 110
+POPUP_HEIGHT = 16
+POPUP_DURATION_S = 8.0
+POPUP_TITLE = "cc-continuity watchdog digest"
 #: Event prefixes that repeat on EVERY tick for dead/stale sessions (the
 #: chronic CAPTURE_FAILED open problem). They never trigger notable()
 #: (it keys on health / dgx_* / power_cycle* / recovery.ran); they are
@@ -186,9 +195,9 @@ def read_new_entries(log_file: Path | str,
 
 def push_allowed(last_push_ts: float | None, now: float,
                  cap_s: float) -> bool:
-    """At most one pane injection per ``cap_s`` (None = never pushed).
-    An UNsuccessful injection does not arm the window — the caller only
-    records ``last_push_ts`` when the send landed."""
+    """At most one pane display per ``cap_s`` (None = never displayed).
+    An UNsuccessful display does not arm the window — the caller only
+    records ``last_push_ts`` when the popup landed."""
     if last_push_ts is None:
         return True
     return now - last_push_ts >= cap_s
@@ -220,20 +229,21 @@ def _target_turn_active(candidates: list[tuple[str, int, dict, float | None]]
                         ) -> bool:
     """True when the session :func:`pick_target` would pick (the
     most-recently-active eligible candidate) is mid-turn
-    (``turn_active``). run_once uses this to skip the injection and retry
-    on the next tick instead of queueing the digest in a busy session's
-    input box — the user wants it ACTIONED, not waiting behind a turn."""
+    (``turn_active``). run_once uses this to skip the display and retry
+    on the next tick instead of showing the popup over a busy session —
+    the popup steals keystrokes while it is up, and the user wants the
+    digest ACTIONED, not arriving mid-turn."""
     best = _best_candidate(candidates)
     return best is not None and bool(best[3].get("turn_active"))
 
 
 def pick_target(candidates: list[tuple[str, int, dict, float | None]],
                 tmux_sessions: list[str] | None) -> str | None:
-    """The ONE pane to inject into: the most-recently-active eligible
-    session's pane (see :func:`_best_candidate`). Pane resolution is the
-    daemon's ``resolve_pane`` (hook-recorded ``tmux_session`` field, else
-    exactly-one prefix match); None → the digest is file-logged but NOT
-    injected."""
+    """The ONE pane whose client shows the popup: the most-recently-active
+    eligible session's pane (see :func:`_best_candidate`). Pane resolution
+    is the daemon's ``resolve_pane`` (hook-recorded ``tmux_session``
+    field, else exactly-one prefix match); None → the digest is
+    file-logged but NOT displayed."""
     best = _best_candidate(candidates)
     if best is None:
         return None
@@ -241,36 +251,72 @@ def pick_target(candidates: list[tuple[str, int, dict, float | None]],
                         tmux_sessions)
 
 
-# --- pane injection -------------------------------------------------------------------
+# --- pane display (Phase 19: display-popup — a LOG, never a prompt) ---------------
 
 
-def inject_pane(target: str, text: str, *, runner=subprocess.run,
-                tmux_bin: str | None = None) -> bool:
-    """Type a MULTI-LINE digest into a pane: load-buffer → paste-buffer →
-    send-keys Enter. paste-buffer (bracketed paste) inserts the newlines
-    into Claude Code's input box WITHOUT submitting them — a plain
-    send-keys would press Enter on every newline and submit each line as
-    its own prompt. One final Enter submits the whole digest as ONE
-    queued prompt (same mechanism as a mid-turn user message).
+def _pick_client(runner, tmux: str, target: str) -> str | None:
+    """The client to display on: a client attached to ``target``
+    (``list-clients -t``) wins; else ANY attached client; else None
+    (popups cannot display on a control client — log-only). Never
+    raises."""
+    for cmd in ([tmux, "list-clients", "-t", target, "-F",
+                 "#{client_name}"],
+                [tmux, "list-clients", "-F", "#{client_name}"]):
+        try:
+            proc = runner(cmd)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            continue
+        out = proc.stdout or b""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        for line in out.splitlines():
+            if line.strip():
+                return line.strip()
+    return None
 
-    The buffer is loaded from a TEMP FILE, not stdin: tmux 3.7b rejects
-    ``load-buffer -b NAME`` with no file argument ("too few arguments")
-    — live-verified against the real tmux during deployment. Never
-    raises; True only when all three steps landed."""
+
+def show_popup(target: str, text: str, *,
+               duration_s: float = POPUP_DURATION_S,
+               runner=subprocess.run, tmux_bin: str | None = None,
+               sleep=time.sleep) -> bool:
+    """Phase 19: show the digest as a tmux display-popup — a LOG, never
+    a prompt. The input box is not touched at all, so the digest can
+    never become a queued model turn (the Phase 13 paste-buffer+Enter
+    injection is gone).
+
+    Mechanics (verified live on tmux 3.7c): the opener is a DIRECT
+    :func:`subprocess.Popen` — the ``display-popup <cmd>`` CLI BLOCKS
+    until the popup closes, so it cannot go through ``runner``. The
+    popup shell ``cat <tmp>; sleep N`` keeps the popup up for
+    ``duration_s``; the daemon then closes it early with
+    ``display-popup -x`` (harmless no-op if it already closed) and
+    reaps the opener. The client is picked via ``list-clients``
+    (target-specific, else any); with NO client (control client /
+    detached) the digest is file-logged only → False. The text rides a
+    temp file (the popup shell cats it); the file is cleaned in
+    ``finally``. Never raises; True only when the popup opened AND the
+    opener exited 0."""
     tmux = (tmux_bin or os.environ.get("CC_CONTINUITY_TMUX_BIN")
             or "tmux")
-    buf = "cc-continuity-digest"
     tmp = paths.runtime_dir() / "watchdog-digest-paste.txt"
     try:
         tmp.write_text(text, encoding="utf-8")
-        if runner([tmux, "load-buffer", "-b", buf, str(tmp)],
-                  timeout=10).returncode != 0:
+        client = _pick_client(runner, tmux, target)
+        if client is None:
             return False
-        if runner([tmux, "paste-buffer", "-b", buf, "-t", target],
-                  timeout=10).returncode != 0:
+        opener = subprocess.Popen(
+            [tmux, "display-popup", "-c", client, "-t", target,
+             "-T", POPUP_TITLE, "-w", str(POPUP_WIDTH),
+             "-h", str(POPUP_HEIGHT),
+             f"cat {tmp}; sleep {duration_s:.0f}"])
+        sleep(duration_s)
+        runner([tmux, "display-popup", "-x", "-c", client])
+        try:
+            return opener.wait(timeout=duration_s + 10) == 0
+        except subprocess.SubprocessError:
             return False
-        return runner([tmux, "send-keys", "-t", target, "Enter"],
-                      timeout=10).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
     finally:
@@ -288,7 +334,7 @@ def run_once(*, now: float | None = None,
              state_file: Path | str | None = None,
              digest_log: Path | str | None = None,
              list_sessions=None, collect=None, ledger_ts=None,
-             inject=None, cfg_over: dict | None = None) -> dict:
+             display=None, cfg_over: dict | None = None) -> dict:
     """One digest pass. Returns a JSON-ready summary
     ``{"scanned", "notable", "target", "pushed", "skipped_busy"}`` and
     NEVER raises — the periodic agent must survive any failure
@@ -297,15 +343,16 @@ def run_once(*, now: float | None = None,
     Steps: read new watchdog.log entries since the state's ``last_ts``
     (first run SEEDS to now — a week of history is not replayed); keep
     the notable ones; if any, format + ALWAYS append to
-    ``runtime/watchdog-digest.log``; then, outside the push cap, inject
-    into the most-recently-active live pane (a failed inject or a missing
-    pane records NO ``last_push_ts`` — the next run retries). If that
-    target is mid-turn (``turn_active``), the injection is SKIPPED
-    (``skipped_busy``) and ``last_ts`` is held back (no advance) so the
-    next 2-min tick re-reads the notable window and retries — the user
-    wants the digest ACTIONED, not queued behind a busy turn. Otherwise
-    the state advances to the newest ts seen (notable or not) so quiet
-    ticks are not re-scanned."""
+    ``runtime/watchdog-digest.log``; then, outside the push cap, show it
+    as a ~8 s display-popup on the most-recently-active live session's
+    client (Phase 19: a visible LOG that never touches the input box —
+    a failed display, a missing pane, or no attached client records NO
+    ``last_push_ts`` — the next run retries). If that target is
+    mid-turn (``turn_active``), the display is SKIPPED (``skipped_busy``)
+    and ``last_ts`` is held back (no advance) so the next 2-min tick
+    re-reads the notable window and retries — the user wants the digest
+    ACTIONED, not arriving mid-turn. Otherwise the state advances to the
+    newest ts seen (notable or not) so quiet ticks are not re-scanned."""
     cfg = config.load_config()
     cfg.update(cfg_over or {})
     now = now if now is not None else time.time()
@@ -321,8 +368,8 @@ def run_once(*, now: float | None = None,
         collect = collect_live_sessions
     if ledger_ts is None:
         ledger_ts = last_ledger_ts
-    if inject is None:
-        inject = inject_pane
+    if display is None:
+        display = show_popup
 
     st = load_state(state_file)
     last_ts = st["last_ts"]
@@ -367,15 +414,15 @@ def run_once(*, now: float | None = None,
             target = pick_target(candidates, sessions)
             if target is not None:
                 if _target_turn_active(candidates):
-                    # Mid-turn protection: the target is mid-turn. Do NOT
-                    # queue the digest in its input box — the user wants it
-                    # ACTIONED now, and a busy session would sit on it until
-                    # its turn ends. Skip; last_ts is held back below so the
-                    # next 2-min tick re-reads these entries and retries.
+                    # Mid-turn protection (Phase 14, kept): a popup shown
+                    # over a mid-turn session steals its keystrokes. Do
+                    # NOT display it mid-turn — the user wants it ACTIONED
+                    # now. Skip; last_ts is held back below so the next
+                    # 2-min tick re-reads these entries and retries.
                     skipped_busy = True
                 else:
                     try:
-                        ok = inject(target, digest)
+                        ok = display(target, digest)
                     except Exception:
                         ok = False
                     if ok:

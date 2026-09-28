@@ -215,6 +215,72 @@ def test_pane_pending_submitted_text_is_not_pending():
     assert watchdog.pane_pending(cap, "continue") is False
 
 
+def test_pane_pending_multiline_nudge_in_input_box():
+    # Phase 19: the nudge is MULTI-LINE — the ❯ glyph sits on the FIRST
+    # input line, the capture's last line is the nudge's own tail line.
+    cap = ("output\n❯ continue\n"
+           "[cc-continuity watchdog] The model server is back online:\n"
+           "DOWN 02:46:40 → UP 02:55:00 (15 min down)\n"
+           "The in-flight turn died with the model. Continue from where you left off.\n"
+           "If unsure, check git status and the last output first.")
+    text = ("continue\n\n[cc-continuity watchdog] The model server is back online:\n"
+            "DOWN 02:46:40 → UP 02:55:00 (15 min down)\n"
+            "The in-flight turn died with the model. Continue from where you left off.\n"
+            "If unsure, check git status and the last output first.")
+    assert watchdog.pane_pending(cap, text) is True
+
+
+def test_pane_pending_multiline_tail_mismatch_is_false():
+    # the pane's tail line is NOT the sent nudge's tail -> not pending
+    cap = "output\n❯ continue\nsome other tail line"
+    text = ("continue\n\n[cc-continuity watchdog] "
+            "The turn stalled (50 min idle) — Continue from where you left off.")
+    assert watchdog.pane_pending(cap, text) is False
+
+
+# --- build_nudge_text (Phase 19: the bare "continue" is "too little") ---------
+
+
+def test_build_nudge_text_outage_block():
+    text = watchdog.build_nudge_text("continue", now=10_900.0,
+                                     down_since=10_000.0,
+                                     cycle_ts=10_500.0)
+    lines = text.splitlines()
+    assert lines[0] == "continue"
+    assert lines[1] == ""
+    assert lines[2] == "[cc-continuity watchdog] The model server is back online:"
+    assert lines[3].startswith("DOWN ")
+    assert " → power_cycle " in lines[3]
+    assert " → UP " in lines[3]
+    assert "(15 min down)" in lines[3]
+    assert lines[4] == ("The in-flight turn died with the model. "
+                        "Continue from where you left off.")
+    assert lines[5] == "If unsure, check git status and the last output first."
+    assert len(lines) == 6
+
+
+def test_build_nudge_text_outage_without_cycle():
+    text = watchdog.build_nudge_text("continue", now=10_600.0,
+                                     down_since=10_000.0)
+    assert "power_cycle" not in text
+    assert "(10 min down)" in text
+
+
+def test_build_nudge_text_plain_turn_dead():
+    text = watchdog.build_nudge_text("continue", now=10_000.0,
+                                     idle_minutes=50)
+    assert text == ("continue\n\n[cc-continuity watchdog] "
+                    "The turn stalled (50 min idle) "
+                    "— Continue from where you left off.")
+
+
+def test_build_nudge_text_stalled():
+    text = watchdog.build_nudge_text("continue", now=10_000.0,
+                                     idle_minutes=50, stalled=True)
+    assert text == ("continue\n\n[cc-continuity watchdog] "
+                    "The last turn ended in error — continue from where you left off.")
+
+
 # --- Episode + nudge_action (P10-D7 table) ----------------------------------
 
 
@@ -242,6 +308,16 @@ def test_nudge_action_pending_input_send_enter_even_when_down():
     ep = watchdog.Episode(n=1, nudge_ts=1.0)
     for health in ("UP", "DOWN"):
         assert watchdog.nudge_action(health, ep, True, 3) == "SEND_ENTER"
+
+
+def test_nudge_action_fresh_episode_pending_submits():
+    # Phase 19 (daemon restart): the episode is GONE (in-memory) but a
+    # nudge sits unsubmitted in the input box — a fresh episode with
+    # pending input must Enter-submit it, NOT re-paste (re-pasting would
+    # duplicate the nudge in the box).
+    ep = watchdog.Episode()
+    assert ep.n == 0
+    assert watchdog.nudge_action("UP", ep, True, 3) == "SEND_ENTER"
 
 
 def test_nudge_action_unverified_resend_counts_as_next_attempt():

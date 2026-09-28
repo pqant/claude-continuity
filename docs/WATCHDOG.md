@@ -48,7 +48,7 @@ cc-continuity watchdog status     # plist + launchd state + baked binary
 cc-continuity watchdog run        # foreground loop (development)
 cc-continuity watchdog uninstall  # remove the LaunchAgent
 
-# digest relay (Phase 13 — the watchdog log piped into Claude Code):
+# digest relay (Phase 13 — the watchdog log shown in Claude Code):
 cc-continuity watchdog digest run        # one digest pass (foreground)
 cc-continuity watchdog digest install    # launchd periodic agent (120 s)
 cc-continuity watchdog digest start      # kickstart (run one pass now)
@@ -178,6 +178,47 @@ the session looked fine. Three parts:
    otherwise leave an ACTIVE zombie that watchdog/digest scans keep
    treating as a live candidate (session 047).
 
+### Nudge enrichment + force-cancel (Phase 19)
+
+A bare `continue` gave the session no context about WHY its turn
+stopped (the user called it eksik — too thin to resume on). Since
+Phase 19 every nudge
+is an ENRICHED prompt (`watchdog.build_nudge_text`): the base line (the
+configured `watchdog_nudge_text`) + a context block prefixed
+`[cc-continuity watchdog]`, in two forms:
+
+- **OUTAGE form** (the dgx_up recovery pass): names the outage window
+  — `DOWN <HH:MM:SS> → UP <HH:MM:SS> (N min down)` — with a
+  `→ power_cycle <HH:MM:SS>` segment ONLY when the last auto
+  power-cycle ts falls INSIDE that window, and tells the session its
+  in-flight turn died with the model and to check `git status` / the
+  last output before continuing.
+- **PLAIN form** (the normal TURN_DEAD/STALLED path): `The turn stalled
+  (N min idle)` for a dead turn — or the stalled variant when the
+  turn ended in error.
+
+Before the text lands, the first physical nudge of an episode sends a
+**standalone `send-keys Escape`** (force-cancel) and settles
+`ESCAPE_SETTLE_S` (0.75 s): it kills the stuck in-flight turn and any
+stale duplicate line left in the input box. RESEND and SEND_ENTER must
+NOT escape — they submit the nudge already sitting in the box.
+
+**Multi-line pending** (the 11:30 case, generalized): an unsubmitted
+enriched nudge is MULTI-LINE — the `❯` glyph is on the FIRST input
+line only, so `classify()` sees a non-idle pane (WAIT/FROZEN) and the
+old single-line pending check never matched; the nudge would rot in
+the input box. `pane_pending` now also matches the SENT text's TAIL
+line (the sent text is re-read from the ledger's last `watchdog_nudge`
+— the freshly built text's context block differs per tick), and on
+WAIT/FROZEN with pending input the daemon submits it with a **bare
+Enter** (no new attempt; SEND_ENTER never counts against
+`max_nudges`). A FRESH episode (daemon restart) with pending input
+also starts at SEND_ENTER, never at a re-paste.
+
+`ESCAPE_SETTLE_S` (and the popup geometry/duration in the digest
+relay) are v1 **module constants**, not config keys — "ayarlanabilir"
+was the directive; they become config when a second value is needed.
+
 ### Network recovery (P10)
 
 A failed health probe may be a **stale route** (after a DGX or Mac
@@ -225,23 +266,30 @@ The watchdog's actions used to be invisible inside a Claude Code session
   error ticks), or a `dgx_down`/`dgx_up`/`power_cycle`/`power_cycle_*`
   event, or a network recovery that ran;
 - formats a digest of ≤ 8 lines (header + ≤ 5 entry lines, most recent
-  first when truncated + footer);
+  first when truncated + footer:
+  `(cc-continuity watchdog digest — log only, not a prompt)`);
 - **always** appends it to `runtime/watchdog-digest.log`;
-- then, outside the `watchdog_digest_push_cap_s` window (5 min), injects
-  it into the **ONE most-recently-active live session's pane**
-  (max `last_ledger_ts` among ACTIVE/WARNED; pane via the daemon's
-  `resolve_pane`) using tmux load-buffer + paste-buffer (bracketed
-  paste — newlines land in the input box without submitting) + one
-  Enter: a single queued prompt, same mechanism as a mid-turn user
-  message. No eligible session, unresolvable pane, or failed inject →
-  the digest is still file-logged, and a failed inject records no push
-  cap (next run retries).
-- **mid-turn protection (Phase 14)**: if that target session is
-  `turn_active` (mid-turn), the injection is SKIPPED and `last_ts` is held
-  back (no advance) — the next 2-min tick re-reads the notable window and
-  retries. The user wants the digest ACTIONED, not queued behind a busy
-  turn (an outage digest queued into a mid-turn session is lost the moment
-  a rotation runs).
+- then, outside the `watchdog_digest_push_cap_s` window (5 min), SHOWS
+  it as a **~8 s tmux `display-popup`** (110×16, title
+  `cc-continuity watchdog digest`) on the attached client of the
+  **ONE most-recently-active live session** (max `last_ledger_ts` among
+  ACTIVE/WARNED; pane via the daemon's `resolve_pane`, client via
+  `list-clients -t <pane>` with a bare `list-clients` fallback).
+  Phase 19: the digest is a VISIBLE LOG, never a prompt — the popup
+  shows the text and closes itself; it never touches the input box
+  (the old load-buffer + paste-buffer + Enter made the digest a queued
+  PROMPT, indistinguishable from user input, that a rotation could
+  eat). No attached client, unresolvable pane, or failed display → the
+  digest is still file-logged, and a failed display records no push
+  cap (next run retries). A popup cannot be shown to a tmux CONTROL
+  client (`-CC`) — a tmux limitation (its own regress test), so on a
+  control-client setup the digest is file-logged only.
+- **mid-turn protection (Phase 14, kept)**: if that target session is
+  `turn_active` (mid-turn), the display is SKIPPED (`skipped_busy`) and
+  `last_ts` is held back (no advance) — the next 2-min tick re-reads
+  the notable window and retries. A popup over a mid-turn session
+  steals its keystrokes, and the user wants the digest ACTIONED, not
+  arriving mid-turn.
 
 Display filtering: `capture_failed:*` / `unresolvable:*` events (the
 chronic dead-session noise, repeated every tick) are dropped from the
@@ -268,7 +316,7 @@ line is submitted with a bare Enter on the next unchanged tick.
 - `~/.claude-continuity/runtime/watchdog-recovery.log` — full output of
   every network-recovery run (timestamp + cmd + exit + elapsed + output).
 - `~/.claude-continuity/runtime/watchdog-digest.log` — every digest
-  (always appended, injection or not).
+  (always appended, displayed or not).
 - `~/.claude-continuity/runtime/watchdog-digest-state.json` — the
   relay's cursor (`last_ts`) and push-cap clock (`last_push_ts`).
 - `~/.claude-continuity/runtime/power-cycle.json` — ts of the last
@@ -327,3 +375,13 @@ line is submitted with a bare Enter on the next unchanged tick.
   **VERIFIED** 19:50:01. Cut → recovered ≈ 25 min. The stale-route
   network recoveries on the 19:18–19:39 failed-probe ticks (all
   exit=0, 15 s) are expected bounded behavior.
+- 2026-09-28: **Phase 19 deployed** — enriched nudges (outage/plain
+  context in the prompt), ESC force-cancel (0.75 s settle) before the
+  physical nudge, multi-line pending → bare Enter, digest shown via
+  `display-popup` (visible, never a prompt). 963 tests pass. Post
+  kickstart the daemon's tick lines are normal (cold-start
+  `health=UNKNOWN` baseline, then UP); the first notable digest after
+  deploy hit `skipped_busy` (target mid-turn) — correct hold-back;
+  the popup display itself is covered by the 52-test digest suite and
+  will appear at the next notable digest on an idle target. No DGX
+  staging (outage-test protocol: no staging).
