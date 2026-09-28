@@ -16,7 +16,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import atomic, ledger, naming, paths, state, thresholds, validate
+from . import (atomic, checkpoint, ledger, naming, paths, state, thresholds,
+               validate)
 
 
 def _now() -> str:
@@ -60,6 +61,56 @@ def write_started(session_id: str) -> Path:
     path = paths.runtime_dir() / f"{session_id}.started"
     atomic.atomic_write_text(path, "started\n")
     return path
+
+
+def _new_work_since_handoff(cp_dir: Path, key: str,
+                            old_nnn: int) -> list[str]:
+    """The user prompts typed AFTER the checkpoint snapshot was written —
+    the rotation window (handoff finalizing / old session still live):
+    they land in the OLD session's live ledger, but the handoff is already
+    frozen and can no longer contain them, so they would be lost to the
+    successor ("rotation swallows the new work", 2026-09-28 053→054).
+
+    Marker: the snapshot's ``created`` (epoch; falls back to the
+    checkpoint dir mtime when missing). The snapshot's ``user_prompts``
+    marks what the handoff already captured, so a prompt present in BOTH
+    (``ts >= created`` and captured — the same-second race) is not
+    re-sent: no double-count. ``CONTINUITY RESUME`` prompts (bootstrap
+    hand-off) and subagent prompts (``agent_id``) are not user work.
+    Bounded: the last 5, each cut to the snapshot's own prompt width.
+    Never raises."""
+    try:
+        snap = json.loads((cp_dir / "snapshot.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        snap = {}
+    captured = {str(p) for p in snap.get("user_prompts") or []}
+    cut = int(getattr(checkpoint, "PROMPT_CHARS", 500))
+    try:
+        created = datetime.fromisoformat(str(snap["created"])).timestamp()
+    except (KeyError, TypeError, ValueError):
+        try:
+            created = cp_dir.stat().st_mtime
+        except OSError:
+            return []
+    out: list[str] = []
+    try:
+        entries = ledger.read(paths.session_dir(key, old_nnn))
+    except OSError:
+        return []
+    for e in entries:
+        if e.get("type") != "user_prompt" or e.get("agent_id"):
+            continue
+        ts = e.get("ts")
+        if not isinstance(ts, (int, float)) or ts < created:
+            continue
+        text = str(e.get("text", ""))
+        if text.startswith("CONTINUITY RESUME"):
+            continue
+        if text[:cut] in captured:
+            continue
+        out.append(text[:cut])
+    return out[-5:]
 
 
 def try_claim(key: str, *, new_session_id: str, cfg: dict) -> dict | None:
@@ -111,7 +162,8 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict) -> dict | None:
     text = thresholds.c4_text(
         new_name=name_new, old_name=old["name"], status=status,
         details=details, handoff=handoff, handoff_path=str(handoff_file),
-        inline_max=int(cfg.get("inline_handoff_max_chars", 12000)))
+        inline_max=int(cfg.get("inline_handoff_max_chars", 12000)),
+        new_work=_new_work_since_handoff(cp_dir, key, old_nnn))
     ledger.append(paths.session_dir(key, nnn_new),
                   {"type": "session_start", "source": "clear",
                    "claimed": old["name"], "validation": status})

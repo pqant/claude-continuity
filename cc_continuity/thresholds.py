@@ -196,12 +196,16 @@ def advance(key: str, nnn: int, target: str, *,
 
 def c4_text(*, new_name: str, old_name: str, status: str,
             details: list, handoff: str, handoff_path: str,
-            inline_max: int) -> str:
+            inline_max: int, new_work: list | None = None) -> str:
     """Appendix C.4 — the SessionStart(clear) bootstrap block.
 
     ``details``: validation detail lines (may be empty). ``handoff`` is
     inlined when non-empty and <= ``inline_max`` chars, otherwise the path
     is shown instead (PRD §9; S5: 12K inline is safe for the local model).
+    ``new_work``: user prompts that landed in the old session's live
+    ledger AFTER the handoff was written (the rotation window) — they
+    are not in the handoff, so they are appended as a separate section
+    (empty/None → the text is exactly the old format).
     """
     lines = [f"CONTINUITY BOOTSTRAP: you are {new_name}, continuing "
              f"{old_name}. VALIDATION: {status}"]
@@ -214,6 +218,12 @@ def c4_text(*, new_name: str, old_name: str, status: str,
         lines.append(handoff.rstrip())
     else:
         lines.append(handoff_path)
+    if new_work:
+        lines.append("---")
+        lines.append("NEW WORK SINCE HANDOFF (arrived after the handoff "
+                     "was written; not in the handoff — add these to your "
+                     "task list):")
+        lines.extend(f"  > {w}" for w in new_work)
     return "\n".join(lines)
 
 

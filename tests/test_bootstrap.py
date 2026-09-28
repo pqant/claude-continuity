@@ -77,6 +77,175 @@ def test_c4_text_long_handoff_shows_path_only():
     assert "xxxx" not in t.split("---", 1)[1]
 
 
+def _snapshot_created(key: str, nnn: int) -> float:
+    """Epoch of the checkpoint snapshot's ``created`` — the marker for
+    "arrived after the handoff was written"."""
+    from datetime import datetime
+    snap = json.loads(
+        (paths.session_dir(key, nnn) / "checkpoint" / "snapshot.json")
+        .read_text(encoding="utf-8"))
+    return datetime.fromisoformat(snap["created"]).timestamp()
+
+
+def test_c4_text_new_work_section():
+    from cc_continuity import thresholds
+    t = thresholds.c4_text(new_name="p-002", old_name="p-001", status="OK",
+                           details=[], handoff="# Handoff\nbody",
+                           handoff_path="/x/handoff.md", inline_max=12000,
+                           new_work=["do A", "do B"])
+    assert t.endswith(
+        "# Handoff\nbody\n---\nNEW WORK SINCE HANDOFF (arrived after the "
+        "handoff was written; not in the handoff — add these to your task "
+        "list):\n  > do A\n  > do B")
+
+
+def test_c4_text_new_work_default_unchanged():
+    # back-compat: no new_work (and an empty list) → the old text verbatim
+    from cc_continuity import thresholds
+    kw = dict(new_name="p-002", old_name="p-001", status="OK",
+              details=["d"], handoff="# H\nb", handoff_path="/x/handoff.md",
+              inline_max=12000)
+    assert thresholds.c4_text(**kw) == thresholds.c4_text(new_work=[], **kw)
+
+
+def test_new_work_after_handoff_transferred(cc_home, tmp_path):
+    # (a) a prompt that lands in the OLD session's live ledger after the
+    #     snapshot was written → the successor's bootstrap text carries it
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    created = _snapshot_created(key, nnn)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "user_prompt", "ts": created + 10.0,
+                   "text": "ADD THE NEW FEATURE TO THE SPIKE"})
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None and res["validation"] == "OK"
+    t = res["bootstrap_text"]
+    assert "NEW WORK SINCE HANDOFF" in t
+    assert "  > ADD THE NEW FEATURE TO THE SPIKE" in t
+
+
+def test_new_work_before_handoff_not_transferred(cc_home, tmp_path):
+    # (b) ts < created → the prompt predates the handoff marker; not new
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    created = _snapshot_created(key, nnn)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "user_prompt", "ts": created - 10.0,
+                   "text": "STALE PROMPT BEFORE HANDOFF"})
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert "NEW WORK SINCE HANDOFF" not in res["bootstrap_text"]
+
+
+def test_new_work_in_snapshot_not_retransferred(cc_home, tmp_path):
+    # (b, double-count guard — the same-second race): a prompt the
+    #     snapshot ALREADY captured is not "new" even when its ts >=
+    #     created (a back-dated future ts simulates the prompt landing the
+    #     same second as the snapshot).
+    import time
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    sdir = paths.session_dir(key, nnn)
+    ledger.append(sdir, {"type": "user_prompt", "ts": time.time() + 5.0,
+                         "text": "RACED PROMPT ALREADY IN SNAPSHOT"})
+    (sdir / "handoff.draft.md").write_text(_valid_draft())
+    checkpoint.finalize(key, nnn, cfg=config.load_config(cwd=repo),
+                        root=project.resolve_root(repo))
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    snap = json.loads(
+        (sdir / "checkpoint" / "snapshot.json").read_text(encoding="utf-8"))
+    assert snap["user_prompts"] == ["RACED PROMPT ALREADY IN SNAPSHOT"]
+    assert _snapshot_created(key, nnn) <= time.time() < time.time() + 5.0
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert "NEW WORK SINCE HANDOFF" not in res["bootstrap_text"]
+
+
+def test_new_work_excludes_resume_and_subagent(cc_home, tmp_path):
+    # (c) CONTINUITY RESUME prompts (bootstrap hand-off, not user work)
+    #     and subagent prompts (agent_id) are never "new work"
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    created = _snapshot_created(key, nnn)
+    sdir = paths.session_dir(key, nnn)
+    ledger.append(sdir, {"type": "user_prompt", "ts": created + 1.0,
+                         "text": "CONTINUITY RESUME cp-001: read /x fully"})
+    ledger.append(sdir, {"type": "user_prompt", "ts": created + 2.0,
+                         "text": "SUBAGENT TASK TEXT", "agent_id": "s1"})
+    ledger.append(sdir, {"type": "user_prompt", "ts": created + 3.0,
+                         "text": "THE REAL NEW WORK"})
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    t = res["bootstrap_text"]
+    assert "  > THE REAL NEW WORK" in t
+    assert "SUBAGENT TASK TEXT" not in t
+    assert "CONTINUITY RESUME cp-001" not in t
+
+
+def test_new_work_empty_text_unchanged(cc_home, tmp_path):
+    # (d) no post-handoff prompt → the bootstrap text is exactly the old
+    #     format (no NEW WORK section; ends at the inlined handoff)
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert "NEW WORK SINCE HANDOFF" not in res["bootstrap_text"]
+    handoff = (paths.session_dir(key, nnn) / "checkpoint" / "handoff.md")
+    assert res["bootstrap_text"].endswith(handoff.read_text().rstrip())
+
+
+def test_new_work_capped_at_last_five_truncated(cc_home, tmp_path):
+    # bounded: at most the LAST 5 post-handoff prompts, each cut to 500
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    created = _snapshot_created(key, nnn)
+    sdir = paths.session_dir(key, nnn)
+    long_text = "L" * 600
+    for i in range(7):
+        text = long_text if i == 6 else f"POST HANDOFF PROMPT {i}"
+        ledger.append(sdir, {"type": "user_prompt",
+                             "ts": created + float(i), "text": text})
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    t = res["bootstrap_text"]
+    assert "  > POST HANDOFF PROMPT 0" not in t  # 7 prompts → only 2..6
+    assert "  > POST HANDOFF PROMPT 1" not in t
+    assert "  > POST HANDOFF PROMPT 2" in t
+    assert "  > " + "L" * 500 in t  # truncated at 500
+    assert "L" * 501 not in t
+
+
+def test_new_work_created_missing_falls_back_to_dir_mtime(cc_home, tmp_path):
+    # the marker degrades to the checkpoint dir mtime when snapshot.json
+    # has no usable `created` (never raises)
+    import time
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    sdir = paths.session_dir(key, nnn)
+    snap_path = sdir / "checkpoint" / "snapshot.json"
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    del snap["created"]
+    snap_path.write_text(json.dumps(snap), encoding="utf-8")
+    ledger.append(sdir, {"type": "user_prompt", "ts": time.time() + 10.0,
+                         "text": "LATE PROMPT AFTER DEGRADED MARKER"})
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert "  > LATE PROMPT AFTER DEGRADED MARKER" in res["bootstrap_text"]
+
+
 def test_try_claim_from_rotating(cc_home, tmp_path):
     repo, key, nnn = _verified(cc_home, tmp_path)
     state.transition(key, nnn, "ROTATING", rotation_id="r1")
