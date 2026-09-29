@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import traceback
@@ -21,7 +22,9 @@ from pathlib import Path
 
 from . import ledger, notify, paths, power_plug, state
 from .watchdog import (Episode, HealthState, build_nudge_text, classify,
-                       nudge_action, pane_pending, power_cycle_due)
+                       exit_hang_due, find_claude_pid, find_exit_marker_ts,
+                       nudge_action, parse_entry_ts, pane_pending,
+                       power_cycle_due, transcript_slug)
 
 #: P10-D2/P10-P8: the LaunchAgent label (plist file name minus .plist).
 PLIST_LABEL = "com.claude-continuity.watchdog"
@@ -270,6 +273,196 @@ def send_keys(target: str, *keys: str) -> bool:
     return proc.returncode == 0
 
 
+# --- exit-hang killer (Phase 21) -------------------------------------------------
+#
+# CC 2.1.209 can hang on /exit: the marker entry is written but the
+# process never dies. The 5s fast pass (check_exit_hangs) finds the
+# hung pane's topmost claude process and kills it after the grace.
+# No-op passes write ZERO log lines (the 5s cadence must not bloat the
+# log); a kill is one ntfy push + one log line.
+
+#: Phase 21: cadence of the fast pass inside run_forever.
+EXIT_HANG_POLL_S = 5.0
+#: Phase 21: default /exit grace in seconds (override:
+#: ``CC_CONTINUITY_EXIT_HANG_LIMIT``).
+EXIT_HANG_DEFAULT_LIMIT_S = 30.0
+#: Phase 21: transcript tail size — a hung CC stops writing, so the
+#: marker is always near the end; the head is never read.
+_TRANSCRIPT_TAIL_BYTES = 512 * 1024
+#: Phase 21: kill_process poll step between SIGTERM and the SIGKILL
+#: deadline.
+_KILL_POLL_S = 0.2
+
+
+def exit_hang_limit_s() -> float:
+    """Phase 21: the /exit grace in seconds (env
+    ``CC_CONTINUITY_EXIT_HANG_LIMIT``). Empty / broken / ``<= 0`` falls
+    back to the default — a 0/negative grace would kill a mid-/exit
+    (the user may still retry)."""
+    raw = os.environ.get("CC_CONTINUITY_EXIT_HANG_LIMIT", "").strip()
+    if not raw:
+        return EXIT_HANG_DEFAULT_LIMIT_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return EXIT_HANG_DEFAULT_LIMIT_S
+    return val if val > 0 else EXIT_HANG_DEFAULT_LIMIT_S
+
+
+def kill_process(pid: int, *, term_wait_s: float = 5.0,
+                 sleep=time.sleep, clock=time.monotonic,
+                 kill=os.kill) -> str:
+    """Phase 21: SIGTERM, wait ``term_wait_s``, then SIGKILL.
+
+    Returns ``"term"`` (TERM won), ``"kill"`` (KILL was needed), or
+    ``"dead"`` (already gone before the first signal — or a signal
+    itself failed: EPERM etc. degrade to "dead", P10-D12 — a false
+    "killed" push is worse than silence). NEVER raises."""
+    try:
+        kill(pid, 0)
+    except OSError:
+        return "dead"
+    try:
+        kill(pid, signal.SIGTERM)
+    except OSError:
+        return "dead"
+    deadline = clock() + term_wait_s
+    while clock() < deadline:
+        sleep(_KILL_POLL_S)
+        try:
+            kill(pid, 0)
+        except OSError:
+            return "term"
+    try:
+        kill(pid, signal.SIGKILL)
+    except OSError:
+        return "term"  # at the deadline, TERM won
+    return "kill"
+
+
+def pid_alive(pid: int) -> bool:
+    """Phase 21: liveness via ``os.kill(pid, 0)``. ProcessLookupError →
+    False (gone). Any other OSError (EPERM — a process we cannot
+    signal) → True (it exists; we just cannot touch it). A zombie also
+    answers True — the killed-set in check_exit_hangs is the guard."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def ps_tree(runner=subprocess.run) -> dict | None:
+    """Phase 21: the whole-machine process map ``{pid: (ppid, command)}``
+    (``ps -axo pid=,ppid=,command=``). The command column is the REST of
+    the line (it may contain spaces). rc != 0 / runner error → None
+    (the fast pass degrades, it never raises); a malformed row is
+    skipped."""
+    try:
+        proc = runner(["ps", "-axo", "pid=,ppid=,command="],
+                      capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out: dict[int, tuple[int, str]] = {}
+    for row in proc.stdout.decode(errors="replace").splitlines():
+        parts = row.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        out[pid] = (ppid, parts[2])
+    return out
+
+
+def list_tmux_panes(session: str,
+                    runner=subprocess.run) -> list[dict] | None:
+    """Phase 21: the session's panes as ``{"pane", "pid", "path"}``.
+    The path column may contain spaces → split from the LEFT (first
+    two tokens, the rest is the path). rc != 0 / runner error → None;
+    a malformed row (pid not an int) is skipped."""
+    try:
+        proc = runner([_tmux_bin(), "list-panes", "-t", session, "-F",
+                       "#{pane_id} #{pane_pid} #{pane_current_path}"],
+                      capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    panes: list[dict] = []
+    for row in proc.stdout.decode(errors="replace").splitlines():
+        parts = row.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        panes.append({"pane": parts[0], "pid": pid, "path": parts[2]})
+    return panes
+
+
+def read_transcript_entries(cwd: str) -> list | None:
+    """Phase 21: the newest transcript under
+    ``<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<slug>`` as
+    ``(ts, etype, text)`` rows. Only the TAIL (512 KB) is read — a hung
+    CC stops writing, so the marker is always near the end (the partial
+    first line after the seek is dropped, same rule as any bad row).
+    No directory / no files / unreadable → None."""
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
+    d = Path(cfg_dir) / "projects" / transcript_slug(cwd)
+    try:
+        files = [f for f in d.glob("*.jsonl") if f.is_file()]
+    except OSError:
+        return None
+    if not files:
+        return None
+    newest = max(files, key=lambda f: f.stat().st_mtime)
+    try:
+        size = newest.stat().st_size
+        with open(newest, "rb") as f:
+            if size > _TRANSCRIPT_TAIL_BYTES:
+                f.seek(size - _TRANSCRIPT_TAIL_BYTES)
+            data = f.read()
+    except OSError:
+        return None
+    out: list[tuple[float, str, str]] = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        etype = row.get("type")
+        if not isinstance(etype, str) or not etype:
+            continue
+        ts = parse_entry_ts(row.get("timestamp"))
+        if ts is None:
+            continue
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            body = content
+        elif isinstance(content, list):
+            body = "\n".join(
+                b["text"] for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+                and isinstance(b.get("text"), str))
+        else:
+            body = ""
+        out.append((ts, etype, body))
+    return out
+
+
 # --- session scan + pane resolution (P10-D5/D9) --------------------------------
 
 
@@ -408,6 +601,16 @@ class TickCtx:
     last_cycle_ts: object = None  # () -> float | None (cooldown state)
     record_cycle_ts: object = None  # (ts: float) -> None
     sleep: object = None  # (s: float) -> None (settle pauses; tests pin)
+    # Phase 21: the exit-hang fast pass (check_exit_hangs). None = the
+    # fast pass is disabled. exit_hang_killed is the daemon-lifetime
+    # re-kill/re-push guard: a zombie keeps kill(pid, 0) succeeding, so
+    # a killed pid is skipped for the rest of the daemon's life.
+    list_panes: object = None  # (target: str) -> list[dict] | None
+    ps_snapshot: object = None  # () -> dict | None (the process map)
+    read_transcript: object = None  # (cwd: str) -> list | None
+    is_alive: object = None  # (pid: int) -> bool
+    kill: object = None  # (pid: int) -> str ("term"/"kill"/"dead")
+    exit_hang_killed: set = dataclasses.field(default_factory=set)
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -833,15 +1036,113 @@ def tick(ctx: TickCtx) -> dict:
     return line
 
 
+def check_exit_hangs(ctx: TickCtx) -> list[dict]:
+    """Phase 21: the 5-second fast pass (P10-D12: every I/O wrapped, a
+    failure degrades — it never raises into the loop).
+
+    Sequence (pinned by tests): live tmux sessions → live records →
+    pane target (the HIGHEST nnn wins per target — an in-place
+    rotation shares the pane) → the turn guard BEFORE the ps scan
+    (all mid-turn means zero ps) → ONE process map for the whole pass
+    → per pane: topmost claude → liveness → transcript marker + grace
+    + activity rule → kill. A ``"dead"`` kill lost the race: the pid
+    still joins the killed-set (the zombie guard) but gets NO push and
+    NO log. A no-op pass writes ZERO log lines (the 5s cadence must not
+    bloat the log). Returns the actions taken (one dict per kill)."""
+    try:
+        sessions = ctx.list_sessions()
+    except Exception:
+        _log_error("exit_hang list_sessions")
+        return []
+    if sessions is None:
+        return []
+    # live records → target; per target the highest nnn wins
+    by_target: dict[str, tuple[str, int, dict, str]] = {}
+    for key, nnn, rec in collect_live_sessions():
+        slug = notify.project_slug(key)
+        target = resolve_pane(rec, slug, sessions)
+        if target is None:
+            continue
+        prev = by_target.get(target)
+        if prev is None or nnn > prev[1]:
+            by_target[target] = (key, nnn, rec, slug)
+    # the turn guard BEFORE the ps scan: a mid-turn /exit waits for the
+    # Stop hook to clear turn_active — all mid-turn means no ps at all
+    eligible = [(target, key, nnn, slug)
+                for target, (key, nnn, rec, slug) in by_target.items()
+                if not rec.get("turn_active")]
+    if not eligible:
+        return []
+    try:
+        procmap = ctx.ps_snapshot()
+    except Exception:
+        _log_error("exit_hang ps_snapshot")
+        return []
+    if not procmap:
+        return []
+    now = ctx.now if ctx.now is not None else time.time()
+    limit_s = exit_hang_limit_s()
+    actions: list[dict] = []
+    for target, key, nnn, slug in eligible:
+        try:
+            panes = ctx.list_panes(target)
+        except Exception:
+            _log_error("exit_hang list_panes")
+            continue
+        if not panes:
+            continue
+        for pane in panes:
+            pid = find_claude_pid(pane["pid"], procmap)
+            if pid is None or pid in ctx.exit_hang_killed:
+                continue
+            try:
+                alive = bool(ctx.is_alive(pid))
+                entries = ctx.read_transcript(pane["path"])
+            except Exception:
+                _log_error("exit_hang transcript")
+                continue
+            if not alive:
+                continue
+            if entries is None or not exit_hang_due(entries, now, limit_s):
+                continue
+            age_s = now - find_exit_marker_ts(entries)
+            try:
+                mode = ctx.kill(pid)
+            except Exception:
+                _log_error("exit_hang kill")
+                continue
+            ctx.exit_hang_killed.add(pid)
+            if mode == "dead":
+                continue  # lost the race: no push, NO log
+            _push(ctx.cfg, "exit_hang", slug=slug, nnn=nnn,
+                  age_s=age_s, mode=mode)
+            action = {"key": key, "nnn": nnn, "pane": target, "pid": pid,
+                      "mode": mode, "age_s": age_s}
+            _log_line({"ts": now, "events": [f"exit_hang_killed:{key}"],
+                       **action})
+            actions.append(action)
+    return actions
+
+
 def run_forever(cfg: dict, *, max_ticks: int | None = None,
-                sleep=time.sleep, probe=None, capture=None,
-                list_sessions=None, send=None, recover=None,
-                cycle=None, last_cycle_ts=None,
-                record_cycle_ts=None) -> int:
+                sleep=time.sleep, now=time.time, probe=None,
+                capture=None, list_sessions=None, send=None,
+                recover=None, cycle=None, last_cycle_ts=None,
+                record_cycle_ts=None, list_panes=None,
+                ps_snapshot=None, read_transcript=None, kill=None,
+                is_alive=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
-    Any tick exception → one errors.log line + continue (P10-D12)."""
+    Any fast-pass or tick exception → one errors.log line + continue
+    (P10-D12).
+
+    Phase 21 — one loop, two cadences: EVERY iteration runs the
+    exit-hang fast pass (``EXIT_HANG_POLL_S`` = 5s); the full tick
+    (probe + session scan) only when ``watchdog_interval_s`` has
+    elapsed. The first iteration ticks immediately (the old
+    every-iteration-was-a-tick startup behavior). ``max_ticks`` counts
+    full ticks."""
     if not cfg.get("watchdog_enabled"):
         return 0
     interval = float(cfg.get("watchdog_interval_s", 300))
@@ -864,20 +1165,33 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                        else load_last_cycle_ts),
         record_cycle_ts=(record_cycle_ts if record_cycle_ts is not None
                          else save_last_cycle_ts),
+        list_panes=list_panes if list_panes is not None else list_tmux_panes,
+        ps_snapshot=ps_snapshot if ps_snapshot is not None else ps_tree,
+        read_transcript=(read_transcript if read_transcript is not None
+                         else read_transcript_entries),
+        is_alive=is_alive if is_alive is not None else pid_alive,
+        kill=kill if kill is not None else kill_process,
     )
     ticks = 0
+    last_tick = None
     while True:
-        ctx.now = time.time()
+        ctx.now = now()
         try:
-            line = tick(ctx)
+            check_exit_hangs(ctx)
         except Exception:
-            _log_error("tick")
-            line = {"ts": ctx.now, "error": "tick exception"}
-        _log_line(line)
-        ticks += 1
-        if max_ticks is not None and ticks >= max_ticks:
-            return 0
-        sleep(interval)
+            _log_error("exit_hang")
+        if last_tick is None or ctx.now - last_tick >= interval:
+            last_tick = ctx.now
+            try:
+                line = tick(ctx)
+            except Exception:
+                _log_error("tick")
+                line = {"ts": ctx.now, "error": "tick exception"}
+            _log_line(line)
+            ticks += 1
+            if max_ticks is not None and ticks >= max_ticks:
+                return 0
+        sleep(EXIT_HANG_POLL_S)
 
 
 # --- plist / launchctl (P10-D2/P10-P8) -----------------------------------------

@@ -255,6 +255,15 @@ def test_build_message_freeze_detected():
     assert b == "proj=spike-repo 007 pane stuck, input closed — no auto-fix"
 
 
+# --- Phase 21 exit-hang event (cp-059 design, exact strings) ------------------
+
+def test_build_message_exit_hang():
+    t, b, pr = notify.build_message("exit_hang", slug="spike-repo", nnn=7,
+                                    age_s=31.4, mode="kill")
+    assert (t, pr) == ("💥 cc-continuity: /exit hang — killed", "high")
+    assert b == "proj=spike-repo 007 /exit hung 31s — killed (kill)"
+
+
 def test_fmt_minutes():
     assert notify._fmt_minutes(0) == "0m"
     assert notify._fmt_minutes(59 * 60) == "59m"
@@ -270,6 +279,7 @@ def test_watchdog_bodies_under_200_chars():
         ("turn_dead", dict(idle_minutes=10 ** 9, max_nudges=99)),
         ("turn_recovered", dict(nudge=99)),
         ("freeze_detected", {}),
+        ("exit_hang", dict(age_s=10 ** 6, mode="kill")),
     ]:
         _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
         assert len(b) <= 200, ev

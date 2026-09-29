@@ -8,6 +8,7 @@ The daemon feeds this core once per tick and acts on its answers (P10-D12).
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 from datetime import datetime
 
@@ -19,6 +20,9 @@ __all__ = [
     "Episode", "HealthState",
     "build_nudge_text", "classify", "error_in_tail", "nudge_action",
     "pane_idle", "pane_pending", "power_cycle_due",
+    "EXIT_MARKER", "EXIT_CEREMONY_PREFIXES", "EXIT_SYNTHETIC",
+    "parse_entry_ts", "transcript_slug", "find_exit_marker_ts",
+    "exit_hang_due", "find_claude_pid",
 ]
 
 # --- liveness outcomes (P10-D6) ---------------------------------------------
@@ -303,3 +307,130 @@ def power_cycle_due(status: str, down_since: float | None, now: float,
     if last_cycle_ts is not None and now - last_cycle_ts < cooldown_s:
         return False
     return True
+
+
+# --- exit-hang killer (Phase 21, cp-059 forensics design) --------------------
+
+#: The real ``/exit`` marker: a ``user`` entry whose RAW STRING content
+#: starts with this tag. Verified across 109 transcripts — a bare
+#: substring scan false-positives on transcripts that QUOTE the tag in
+#: assistant text or embedded user text, so the rule is user-only +
+#: startswith (never substring, never ``json.dumps``).
+EXIT_MARKER = "<command-name>/exit</command-name>"
+#: Post-hang ceremony: the user local-command output/caveat lines
+#: (farewell, ...) written at the marker's own timestamp.
+EXIT_CEREMONY_PREFIXES = ("<local-command-stdout>",
+                          "<local-command-caveat>")
+#: The assistant synthetic line CC writes seconds after a hung /exit.
+EXIT_SYNTHETIC = "No response requested."
+
+
+def parse_entry_ts(ts: str) -> float | None:
+    """A transcript ``timestamp`` (ISO-8601, ``…Z``) → epoch seconds.
+
+    Malformed → None. A NAIVE ts (no timezone) is malformed too:
+    reading it as local time would silently return a WRONG epoch, and a
+    wrong marker age would kill (or spare) the wrong process.
+    """
+    if not isinstance(ts, str) or not ts:
+        return None
+    body = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+    try:
+        dt = datetime.fromisoformat(body)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.timestamp()
+
+
+def transcript_slug(cwd: str) -> str:
+    """Project cwd → the directory name CC uses under
+    ``<config>/projects/``: every non-alphanumeric character becomes
+    ``-`` (verified against real dirs: ``/Users/x/.claude`` →
+    ``-Users-x--claude``)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def find_exit_marker_ts(entries) -> float | None:
+    """Ts of the NEWEST real /exit marker, or None.
+
+    ``entries``: list of ``(ts, etype, text)`` tuples extracted by the
+    daemon from the transcript. Marker rule (109-transcript forensics):
+    ``etype == "user"`` AND text STARTS WITH :data:`EXIT_MARKER`.
+    Assistant entries and user entries that merely quote the tag are
+    never markers. A retried /exit simply yields a newer ts.
+    """
+    best = None
+    for ts, etype, text in entries:
+        if etype == "user" and text.startswith(EXIT_MARKER):
+            if best is None or ts > best:
+                best = ts
+    return best
+
+
+def _is_exit_ceremony(etype: str, text: str) -> bool:
+    """True for the ONLY entry shapes a HUNG CC writes after the
+    marker (forensics, every hung case): the local-command
+    stdout/caveat farewell lines and the assistant's synthetic
+    response line. Anything else after the marker is real activity."""
+    if etype == "user":
+        return text.startswith(EXIT_CEREMONY_PREFIXES)
+    if etype == "assistant":
+        return text.strip() == EXIT_SYNTHETIC
+    return False
+
+
+def exit_hang_due(entries, now: float, limit_s: float,
+                  alive: bool = True) -> bool:
+    """True when a live CC process has hung on /exit past the grace.
+
+    ``entries``: list of ``(ts, etype, text)``. Decision (cp-059
+    design): the NEWEST /exit marker is strictly older than
+    ``limit_s`` (``≤`` is still within the grace — the user may retry
+    or send a prompt), AND no real activity entry has landed after it.
+    Real activity = anything that is NOT post-hang ceremony — including
+    a tool-only assistant turn with empty text (a retry / a prompt
+    arriving during a long TTFT keeps the process alive).
+    ``alive=False``: the process is already gone → nothing to kill.
+    """
+    marker_ts = find_exit_marker_ts(entries)
+    if marker_ts is None or not alive:
+        return False
+    if now - marker_ts <= limit_s:
+        return False
+    for ts, etype, text in entries:
+        if ts > marker_ts and not _is_exit_ceremony(etype, text):
+            return False
+    return True
+
+
+def find_claude_pid(root_pid: int, procmap: dict) -> int | None:
+    """The TOPMOST ``claude`` binary in the pane's process tree.
+
+    ``procmap``: ``{pid: (ppid, command)}`` from the daemon's
+    ``ps_tree()``. BFS from ``root_pid`` INCLUSIVE — with the sh exec
+    optimization the pane's sh wrapper can be claude itself — and the
+    first process whose command's basename is exactly ``claude`` wins
+    (path form ``/opt/…/claude`` matches; ``claude-hud`` does not).
+    None when absent or when the root is not in the map.
+    """
+    if root_pid not in procmap:
+        return None
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _cmd) in procmap.items():
+        children.setdefault(ppid, []).append(pid)
+    queue = [root_pid]
+    seen = {root_pid}
+    while queue:
+        current, queue = queue, []
+        for pid in current:
+            _ppid, command = procmap[pid]
+            head = command.split()
+            if head and os.path.basename(head[0]) == "claude":
+                return pid
+            for child in children.get(pid, ()):
+                if child not in seen:
+                    seen.add(child)
+                    queue.append(child)
+    return None
