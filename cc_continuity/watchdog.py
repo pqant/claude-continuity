@@ -143,6 +143,25 @@ def classify(rec: dict, last_ts: float | None, capture: str,
     return WAIT  # internal: row 5 needs 2 unchanged ticks
 
 
+def frozen_nudge_due(ticks: int, turn_active: bool, *,
+                     frozen_minutes: float = 20.0,
+                     interval_s: float = 300.0) -> bool:
+    """Phase 22: has the FROZEN pane been frozen long enough to escalate?
+
+    The freeze duration is ``ticks * interval_s`` (consecutive
+    unchanged full ticks; the caller only reaches this in the FROZEN
+    branch, i.e. ticks >= 2). ``turn_active`` is the "work is
+    in-flight" signal — a frozen pane WITHOUT it (a picker, a
+    legitimate user wait) is never escalated here. ``frozen_minutes``
+    is ``watchdog_frozen_nudge_minutes`` (default 20); at 300 s ticks
+    the default needs ticks >= 4. A non-positive ``interval_s`` is
+    never due (broken config must not escalate)."""
+    if not turn_active or interval_s <= 0:
+        return False
+    minutes = max(0.0, frozen_minutes)
+    return ticks * interval_s >= minutes * 60
+
+
 def pane_pending(capture: str, nudge_text: str) -> bool:
     """True when the nudge text sits UNsubmitted in the input line: the
     last non-empty line is a prompt line containing ``nudge_text``
@@ -186,12 +205,13 @@ def build_nudge_text(base: str, *, now: float,
                      down_since: float | None = None,
                      cycle_ts: float | None = None,
                      idle_minutes: int | None = None,
-                     stalled: bool = False) -> str:
+                     stalled: bool = False,
+                     frozen_minutes: int | None = None) -> str:
     """Phase 19: the nudge prompt carries WHY the turn stopped, so the
     session resumes with context instead of a bare ``continue``.
 
     ``base``: the first line — ``watchdog_nudge_text`` (the user's
-    override wins). Two forms:
+    override wins). Forms (first match wins):
 
     * OUTAGE (``down_since`` set): the model server went down and came
       back; the in-flight turn died with the model. The text names the
@@ -199,6 +219,10 @@ def build_nudge_text(base: str, *, now: float,
       ``→ power_cycle <ts>`` segment ONLY when ``cycle_ts`` falls INSIDE
       that window — and tells the session to check ``git status`` / the
       last output before continuing.
+    * FROZEN (Phase 22, ``frozen_minutes`` set): the pane was frozen
+      with the turn in flight; the daemon ESC-cancelled the in-flight
+      turn first — the text says so and tells the session to check
+      ``git status`` / the last output before resuming.
     * PLAIN (``down_since`` None): TURN_DEAD → the idle minutes;
       STALLED (``stalled=True``) → the turn ended in error.
 
@@ -220,6 +244,11 @@ def build_nudge_text(base: str, *, now: float,
             "Continue from where you left off.",
             "If unsure, check git status and the last output first.",
         ]
+    elif frozen_minutes is not None:
+        lines.append(
+            f"[cc-continuity watchdog] Turn {frozen_minutes} min frozen — "
+            f"I cancelled it. check git status and the last output, "
+            f"Continue from where you left off.")
     elif stalled:
         lines.append("[cc-continuity watchdog] "
                      "The last turn ended in error — continue from where you left off.")
