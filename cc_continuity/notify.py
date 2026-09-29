@@ -253,6 +253,10 @@ def build_message(event: str, *, slug: str, nnn: int,
     elif event == "freeze_detected":
         t, pr = "🧊 cc-continuity: retry-loop freeze?", "high"
         b = f"proj={slug} {p} pane stuck, input closed — no auto-fix"
+    elif event == "exit_hang":
+        t, pr = "💥 cc-continuity: /exit hang — killed", "high"
+        b = (f"proj={slug} {p} /exit hung {int(fields['age_s'])}s — "
+             f"killed ({fields['mode']})")
     else:
         raise ValueError(f"unknown notify event {event!r}")
     if len(b) > 200:

@@ -383,3 +383,218 @@ def test_power_cycle_custom_thresholds():
     assert watchdog.power_cycle_due("DOWN", 10_000.0 - 30.0, 10_000.0,
                                     None, after_s=60.0,
                                     cooldown_s=30.0) is False
+
+
+# --- Phase 21: exit-hang killer (cp-059 design — /exit marker forensics) -----
+#
+# The real /exit marker (verified across 109 transcripts): a ``user`` entry
+# whose RAW STRING content STARTS WITH the command-name tag. Naive substring
+# scans false-positive on investigation transcripts that QUOTE the marker in
+# assistant text / embedded user text. After a HUNG marker the only entries
+# written are ceremony entries (farewell stdout, caveat, "No response
+# requested."); ANY other entry after the marker = the process is alive →
+# no kill. entries = list[(ts: float, etype: str, text: str)].
+
+
+def _e(ts, etype, text=""):
+    return (ts, etype, text)
+
+
+T0 = 1_000_000.0
+MARK = "<command-name>/exit</command-name>"
+MARK_FULL = (MARK + "             <command-message>exit</command-message>"
+             "             <command-args></command-args>")
+FARWELL = "<local-command-stdout>See ya!</local-command-stdout>"
+CAVEAT = "<local-command-caveat>Caveat: local command output follows.</local-command-caveat>"
+
+
+def test_exit_marker_is_the_exact_command_name_tag():
+    # the forensic rule is startswith on this exact tag — a "simplification"
+    # to a bare substring is a false positive (058/059 transcripts proved it)
+    assert watchdog.EXIT_MARKER == MARK
+
+
+# --- parse_entry_ts -----------------------------------------------------------
+
+def test_parse_entry_ts_zulu_iso_to_epoch():
+    from datetime import datetime, timezone
+    want = datetime(2026, 9, 28, 20, 43, 17, 123456,
+                    tzinfo=timezone.utc).timestamp()
+    assert watchdog.parse_entry_ts("2026-09-28T20:43:17.123456Z") == want
+
+
+def test_parse_entry_ts_malformed_returns_none():
+    # a NAIVE ts is malformed too: interpreting it as local time would
+    # silently produce a WRONG epoch, so reject it
+    for bad in ("", "not-a-date", "Z", "2026-13-99T99:99:99Z",
+                "2026-09-28T20:43:17", "2026-09-28 20:43:17"):
+        assert watchdog.parse_entry_ts(bad) is None, repr(bad)
+
+
+# --- transcript_slug ----------------------------------------------------------
+
+def test_transcript_slug_matches_cc_project_dirs():
+    # verified against real ~/.claude/projects/ dir names (cp-059 item 4):
+    # every non-alphanumeric character becomes '-' — the dot in a hidden
+    # dir yields a DOUBLE dash
+    assert watchdog.transcript_slug(
+        "/Users/devx/arid/claude-continuity") \
+        == "-Users-devx-arid-claude-continuity"
+    assert watchdog.transcript_slug("/Users/devx/.claude") \
+        == "-Users-devx--claude"
+
+
+# --- find_exit_marker_ts ------------------------------------------------------
+
+def test_find_exit_marker_ts_found_on_user_raw_string():
+    entries = [_e(T0 - 60, "assistant", "bye soon"),
+               _e(T0, "user", MARK_FULL),
+               _e(T0 + 7, "assistant", "No response requested.")]
+    assert watchdog.find_exit_marker_ts(entries) == T0
+
+
+def test_find_exit_marker_ts_none_when_absent():
+    entries = [_e(T0, "user", "normal prompt"),
+               _e(T0 + 1, "assistant", "ok")]
+    assert watchdog.find_exit_marker_ts(entries) is None
+
+
+def test_find_exit_marker_ts_ignores_quoted_marker():
+    # investigation transcripts QUOTE the marker in assistant text and in
+    # user text that merely contains it — the rule is user-type ONLY and
+    # startswith, never substring
+    entries = [_e(T0, "assistant", f"the marker is {MARK_FULL}"),
+               _e(T0 + 1, "user", "test: " + MARK_FULL + " again")]
+    assert watchdog.find_exit_marker_ts(entries) is None
+
+
+def test_find_exit_marker_ts_max_of_retries():
+    entries = [_e(T0, "user", MARK_FULL),
+               _e(T0 + 50, "user", MARK_FULL)]
+    assert watchdog.find_exit_marker_ts(entries) == T0 + 50
+
+
+# --- exit_hang_due --------------------------------------------------------------
+
+def test_exit_hang_due_false_without_marker():
+    entries = [_e(T0, "user", "hi"), _e(T0 + 1, "assistant", "hello")]
+    assert watchdog.exit_hang_due(entries, T0 + 3600, 30.0) is False
+
+
+def test_exit_hang_due_boundary_at_limit_false_strict_after():
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 30, 30.0) is False
+    assert watchdog.exit_hang_due(entries, T0 + 30.5, 30.0) is True
+
+
+def test_exit_hang_due_false_when_process_not_alive():
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 3600, 30.0,
+                                  alive=False) is False
+
+
+def test_exit_hang_due_true_stale_marker_nothing_after():
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0) is True
+
+
+def test_exit_hang_due_true_when_only_ceremony_after_marker():
+    # every hung case ever observed wrote ONLY these after the marker
+    entries = [
+        _e(T0, "user", MARK_FULL),
+        _e(T0, "user", FARWELL),          # same ts as the marker
+        _e(T0, "user", CAVEAT),           # same ts as the marker
+        _e(T0 + 7, "assistant", "No response requested."),
+    ]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0) is True
+
+
+def test_exit_hang_due_synthetic_text_strip_tolerant():
+    entries = [_e(T0, "user", MARK_FULL),
+               _e(T0 + 7, "assistant", "  No response requested.  ")]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0) is True
+
+
+def test_exit_hang_due_false_when_real_activity_after_marker():
+    # each of these after a stale marker means the process IS alive
+    real = [
+        _e(T0 + 2, "user", "yeni prompt atildi"),
+        _e(T0 + 2, "assistant", "an actual answer"),
+        _e(T0 + 2, "assistant", ""),               # tool-only turn
+        _e(T0 + 2, "attachment", ""),
+        _e(T0 + 2, "system", "some system line"),
+        _e(T0 + 2, "file-history-delta", ""),
+    ]
+    for after in real:
+        entries = [_e(T0, "user", MARK_FULL), after]
+        assert watchdog.exit_hang_due(entries, T0 + 3600, 30.0) is False, after
+
+
+def test_exit_hang_due_age_measured_from_newest_marker():
+    # the user retried /exit: the fresh marker resets the clock
+    entries = [_e(T0, "user", MARK_FULL),
+               _e(T0 + 10, "user", MARK_FULL)]
+    # age from the NEWEST marker (T0+10): 30 s at now=T0+40 is not > 30,
+    # 35 s at now=T0+45 is — measuring from the oldest marker would make
+    # the first assertion True (40 > 30), so it pins the newest rule
+    assert watchdog.exit_hang_due(entries, T0 + 40, 30.0) is False
+    assert watchdog.exit_hang_due(entries, T0 + 45, 30.0) is True
+
+
+def test_exit_hang_due_activity_before_marker_ignored():
+    entries = [_e(T0 - 50, "user", "old prompt"),
+               _e(T0 - 40, "assistant", "old answer"),
+               _e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0) is True
+
+
+# --- find_claude_pid -------------------------------------------------------------
+
+def test_find_claude_pid_root_itself_is_claude():
+    # sh exec optimization: pane_pid itself IS the claude process
+    procmap = {100: (99, "claude --dangerously-skip-permissions -n x")}
+    assert watchdog.find_claude_pid(100, procmap) == 100
+
+
+def test_find_claude_pid_child_of_sh_wrapper():
+    # the live map (cp-059): pane_pid = sh wrapper, claude is its CHILD
+    procmap = {24817: (99, "/bin/sh /usr/bin/command claude -n old"),
+               24822: (24817, "claude --dangerously-skip-permissions -n old")}
+    assert watchdog.find_claude_pid(24817, procmap) == 24822
+
+
+def test_find_claude_pid_path_form_command():
+    procmap = {10: (1, "/opt/homebrew/bin/claude -p hi"),
+               11: (10, "sh -c sleep")}
+    assert watchdog.find_claude_pid(10, procmap) == 10
+
+
+def test_find_claude_pid_none_when_absent_or_root_missing():
+    procmap = {10: (1, "zsh"),
+               11: (10, "cc-continuity progress-pane @23"),
+               12: (10, "sleep 5")}
+    assert watchdog.find_claude_pid(10, procmap) is None
+    assert watchdog.find_claude_pid(999, procmap) is None
+
+
+def test_find_claude_pid_empty_command_is_not_claude():
+    # a zombie row may carry an empty command string
+    procmap = {1: (0, "zsh"), 2: (1, "")}
+    assert watchdog.find_claude_pid(1, procmap) is None
+
+
+def test_find_claude_pid_shallowest_match_wins():
+    # BFS from the root: the TOPMOST claude in the tree is the target
+    procmap = {1: (0, "tmux: server"),
+               2: (1, "sh -c wrapper"),
+               3: (2, "claude -n a"),          # depth 2
+               4: (1, "claude -n b")}          # depth 1
+    assert watchdog.find_claude_pid(1, procmap) == 4
+
+
+def test_find_claude_pid_exact_basename_only():
+    # "claude-hud" / cc-continuity tooling is NOT the claude binary
+    procmap = {1: (0, "zsh"),
+               2: (1, "claude-hud --statusline"),
+               3: (1, "python3 -m cc_continuity progress-pane")}
+    assert watchdog.find_claude_pid(1, procmap) is None

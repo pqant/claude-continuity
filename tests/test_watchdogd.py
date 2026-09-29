@@ -6,6 +6,7 @@ run_forever disabled exit 0."""
 
 import json
 import os
+import signal
 
 import pytest
 
@@ -27,9 +28,13 @@ def _turn_dead_text(n):
 class FakeIO:
     """Injectable I/O bag: mutable ``pane``/``ok`` let a test drive
     ticks; ``sends`` records every send-keys call; ``slept`` records
-    every settle pause (Phase 19 ESC settle)."""
+    every settle pause (Phase 19 ESC settle). Phase 21: the exit-hang
+    I/O bag (``panes``/``procmap``/``transcript``/``alive_pids``) and
+    the ``kills`` record."""
 
-    def __init__(self, pane=PROMPT_PANE, health_ok=True, sessions=None):
+    def __init__(self, pane=PROMPT_PANE, health_ok=True, sessions=None,
+                 panes=None, procmap=None, transcript=None,
+                 alive_pids=None, kill_result="term"):
         self.pane = pane
         self.ok = health_ok
         self.sessions = sessions
@@ -42,6 +47,37 @@ class FakeIO:
         self.cycle_result = None
         self.last_cycle_ts_value = None
         self.recorded_cycle = []
+        # Phase 21 exit-hang bag (all optional; None = nothing configured)
+        self.panes = panes  # target -> list[dict] | None (or a bare list)
+        self.procmap = procmap
+        self.transcript = transcript  # (ts, etype, text) rows for any path
+        self.alive_pids = set() if alive_pids is None else set(alive_pids)
+        self.kill_result = kill_result
+        self.kills = []
+        self.ps_calls = 0
+        self.read_calls = []
+
+    def list_panes(self, target):
+        if self.panes is None:
+            return None
+        if isinstance(self.panes, dict):
+            return self.panes.get(target)
+        return self.panes
+
+    def ps_snapshot(self):
+        self.ps_calls += 1
+        return self.procmap
+
+    def read_transcript(self, path):
+        self.read_calls.append(path)
+        return self.transcript
+
+    def is_alive(self, pid):
+        return pid in self.alive_pids
+
+    def kill(self, pid):
+        self.kills.append(pid)
+        return self.kill_result
 
     def sleep(self, s):
         self.slept.append(s)
@@ -132,6 +168,20 @@ def _capture_pushes(monkeypatch):
 # --- run_forever -------------------------------------------------------------
 
 
+def _advancing_now(step: float):
+    """A fake clock: the first call returns 0.0, then every call
+    advances ``step`` (the Phase D single loop is driven by the fake,
+    never the real monotonic time)."""
+    i = [0]
+
+    def fake_now():
+        v = i[0] * step
+        i[0] += 1
+        return v
+
+    return fake_now
+
+
 def test_run_forever_disabled_exits_0(cc_home):
     io = FakeIO()
     cfg = {"watchdog_enabled": False, "watchdog_interval_s": 1}
@@ -147,6 +197,7 @@ def test_run_forever_runs_max_ticks(cc_home):
     io = FakeIO(health_ok=True)
     cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300}
     rc = watchdogd.run_forever(cfg, max_ticks=3, sleep=lambda s: None,
+                               now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
                                send=io.send)
@@ -165,12 +216,38 @@ def test_run_forever_tick_exception_survives(cc_home):
            "watchdog_max_nudges": 3, "watchdog_nudge_text": "continue",
            "watchdog_health_url": ""}
     rc = watchdogd.run_forever(cfg, max_ticks=2, sleep=lambda s: None,
+                               now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
                                send=io.send)
     assert rc == 0
     assert io.probe_calls == 2  # continued past the crashed tick
     assert (paths.logs_dir() / "errors.log").is_file()
+
+
+def test_run_forever_fast_pass_every_iteration_tick_at_interval(cc_home):
+    # Phase 21 contract: the exit-hang fast pass runs EVERY loop
+    # iteration (the 5s poll), but the full tick (probe + session scan)
+    # only when the interval has elapsed — so a hung /exit dies in ~35s,
+    # not ~5min. An eligible live session (turn inactive, resolvable
+    # pane) makes every fast pass take ONE ps snapshot.
+    io = FakeIO(health_ok=True, sessions=["cc-proj-a-0a9b"])
+    _mk(turn_active=False)  # eligible -> one ps per fast pass
+    cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300}
+    rc = watchdogd.run_forever(cfg, max_ticks=2, sleep=lambda s: None,
+                               now=_advancing_now(5.0),
+                               probe=io.probe, capture=io.capture,
+                               list_sessions=io.list_sessions,
+                               send=io.send,
+                               list_panes=io.list_panes,
+                               ps_snapshot=io.ps_snapshot,
+                               read_transcript=io.read_transcript,
+                               is_alive=io.is_alive, kill=io.kill)
+    assert rc == 0
+    # two full ticks (first immediate at now=0, second at now=300)
+    assert io.probe_calls == 2
+    # fast pass every iteration: now=0,5,...,300 = 61 iterations
+    assert io.ps_calls == 61
 
 
 # --- collect / resolve -------------------------------------------------------
@@ -1065,3 +1142,522 @@ def test_tick_no_power_cycle_without_plug_ip(cc_home, monkeypatch):
     ctx = _down_ctx(io, {}, now=now)  # no power_plug_ip in cfg
     watchdogd.tick(ctx)
     assert io.cycle_calls == 0
+
+
+# --- Phase 21: exit-hang daemon I/O --------------------------------------------
+#
+# /exit in CC 2.1.209 can hang: the marker entry is written but the process
+# never dies. The 5s fast pass (check_exit_hangs) finds the hung pane's
+# topmost claude process via the pane process tree + the transcript marker and
+# kills it after the grace (default 30s; CC_CONTINUITY_EXIT_HANG_LIMIT).
+# No-op passes write ZERO log lines (the 5s cadence must not bloat the log).
+
+EXIT_MARK = "<command-name>/exit</command-name>"
+_PANE = {"pane": "%23", "pid": 24817, "path": "/Users/devx/proj"}
+_PROCMAP = {24817: (1, "/bin/sh /usr/bin/command claude -n old"),
+            24822: (24817, "claude --dangerously-skip-permissions -n old")}
+
+
+def _exit_entries(now=10_000.0, age=40.0, after=()):
+    m = now - age
+    return [(m, "user", EXIT_MARK + "  "),
+            (m, "user",
+             "<local-command-stdout>Bye!</local-command-stdout>"),
+            (m + 7, "assistant", "No response requested.")] + list(after)
+
+
+def _hung_io(**over):
+    kw = dict(health_ok=True, sessions=["cc-proj-a-0a9b"],
+              panes={"cc-proj-a-0a9b": [_PANE]}, procmap=_PROCMAP,
+              transcript=_exit_entries(), alive_pids={24822})
+    kw.update(over)
+    return FakeIO(**kw)
+
+
+def _exit_ctx(io, cfg_over=None, now=10_000.0):
+    cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300}
+    cfg.update(cfg_over or {})
+    return TickCtx(cfg=cfg, health=HealthState(), episodes={},
+                   prev_captures={}, froze=set(), probe=io.probe,
+                   capture=io.capture, list_sessions=io.list_sessions,
+                   send=io.send, now=now,
+                   list_panes=io.list_panes, ps_snapshot=io.ps_snapshot,
+                   read_transcript=io.read_transcript,
+                   is_alive=io.is_alive, kill=io.kill)
+
+
+# --- exit_hang_limit_s -----------------------------------------------------------
+
+def test_exit_hang_limit_s_default(monkeypatch):
+    monkeypatch.delenv("CC_CONTINUITY_EXIT_HANG_LIMIT", raising=False)
+    assert watchdogd.exit_hang_limit_s() == 30.0
+
+
+def test_exit_hang_limit_s_env_override(monkeypatch):
+    monkeypatch.setenv("CC_CONTINUITY_EXIT_HANG_LIMIT", "45")
+    assert watchdogd.exit_hang_limit_s() == 45.0
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "0", "-5", ""])
+def test_exit_hang_limit_s_broken_env_falls_back(monkeypatch, bad):
+    # a 0/negative grace would kill a mid-/exit — reject like a typo
+    monkeypatch.setenv("CC_CONTINUITY_EXIT_HANG_LIMIT", bad)
+    assert watchdogd.exit_hang_limit_s() == 30.0
+
+
+# --- kill_process ------------------------------------------------------------------
+
+def _fake_clock(start=100.0):
+    t = [start]
+
+    def clock():
+        return t[0]
+
+    def sleep(s):
+        t[0] += s
+    return clock, sleep
+
+
+class _FakeOsKill:
+    """Stands in for os.kill with a death schedule: ``die_on`` is the sig
+    that kills the process (None = immortal). Liveness probes (sig 0)
+    report the current state."""
+
+    def __init__(self, die_on=None, alive=True):
+        self.die_on = die_on
+        self.alive = alive
+        self.signals = []
+
+    def __call__(self, pid, sig):
+        self.signals.append(sig)
+        if sig == 0:
+            if self.alive:
+                return None
+            raise ProcessLookupError()
+        if sig == self.die_on:
+            self.alive = False
+
+
+def test_kill_process_sigterm_kills():
+    fk = _FakeOsKill(die_on=signal.SIGTERM)
+    clock, sleep = _fake_clock()
+    res = watchdogd.kill_process(4242, kill=fk, clock=clock, sleep=sleep)
+    assert res == "term"
+    assert signal.SIGKILL not in fk.signals
+
+
+def test_kill_process_already_dead_sends_nothing():
+    fk = _FakeOsKill(alive=False)
+    clock, sleep = _fake_clock()
+    assert watchdogd.kill_process(4242, kill=fk, clock=clock, sleep=sleep) \
+        == "dead"
+    assert fk.signals == [0]  # the liveness probe only, no signal sent
+
+
+def test_kill_process_term_ignored_escalates_to_kill():
+    fk = _FakeOsKill(die_on=None)  # immortal: survives TERM (and KILL)
+    clock, sleep = _fake_clock()
+    res = watchdogd.kill_process(4242, term_wait_s=1.0, kill=fk,
+                                 clock=clock, sleep=sleep)
+    assert res == "kill"
+    assert fk.signals[0] == 0
+    assert fk.signals[1] == signal.SIGTERM
+    assert fk.signals[-1] == signal.SIGKILL
+    assert clock() == pytest.approx(101.0)  # the deadline was actually honored
+
+
+def test_kill_process_never_raises():
+    def boom(pid, sig):
+        raise OSError(13, "EPERM")
+
+    clock, sleep = _fake_clock()
+    # a signal error degrades to "dead" — never a false "killed" push
+    assert watchdogd.kill_process(4242, kill=boom, clock=clock,
+                                  sleep=sleep) == "dead"
+
+
+# --- ps_tree ------------------------------------------------------------------------
+
+def test_ps_tree_parses_pid_ppid_command():
+    out = b"  12 1 sh -c x\n  34 12 claude -n a\n"
+    got = watchdogd.ps_tree(runner=lambda *a, **k: _P(0, out))
+    assert got == {12: (1, "sh -c x"), 34: (12, "claude -n a")}
+
+
+def test_ps_tree_command_with_spaces_kept():
+    # the command column is the REST of the line (it may contain spaces)
+    out = (b"  34 12 /opt/homebrew/bin/claude "
+           b"--dangerously-skip-permissions -n x\n")
+    got = watchdogd.ps_tree(runner=lambda *a, **k: _P(0, out))
+    assert got == {34: (12, "/opt/homebrew/bin/claude "
+                               "--dangerously-skip-permissions -n x")}
+
+
+def test_ps_tree_malformed_rows_skipped():
+    out = b"  34 12 ok\n  garbage\n  99\n"
+    got = watchdogd.ps_tree(runner=lambda *a, **k: _P(0, out))
+    assert got == {34: (12, "ok")}
+
+
+def test_ps_tree_failure_is_none():
+    assert watchdogd.ps_tree(runner=lambda *a, **k: _P(1, b"")) is None
+
+    def boom(*a, **k):
+        raise OSError("no ps")
+
+    assert watchdogd.ps_tree(runner=boom) is None
+
+
+# --- list_tmux_panes ------------------------------------------------------------------
+
+def test_list_tmux_panes_parses_with_space_paths():
+    # pane_current_path may contain spaces -> rsplit from the right
+    out = b"%23 24822 /Users/devx/my proj/x\n%30 52486 /tmp\n"
+    cmds = []
+
+    def run(cmd, **kw):
+        cmds.append(cmd)
+        return _P(0, out)
+
+    got = watchdogd.list_tmux_panes("cc-proj-a-0a9b", runner=run)
+    assert got == [
+        {"pane": "%23", "pid": 24822, "path": "/Users/devx/my proj/x"},
+        {"pane": "%30", "pid": 52486, "path": "/tmp"},
+    ]
+    assert cmds[0][1:4] == ["list-panes", "-t", "cc-proj-a-0a9b"]
+    assert cmds[0][4] == "-F"
+
+
+def test_list_tmux_panes_failure_is_none():
+    assert watchdogd.list_tmux_panes("s",
+                                     runner=lambda *a, **k: _P(1, b"")) is None
+
+
+def test_list_tmux_panes_malformed_row_skipped():
+    out = b"%23 notapid /x\n%30 52486 /tmp\n"
+    got = watchdogd.list_tmux_panes("s", runner=lambda *a, **k: _P(0, out))
+    assert got == [{"pane": "%30", "pid": 52486, "path": "/tmp"}]
+
+
+# --- read_transcript_entries --------------------------------------------------------
+
+def _transcript_root(tmp_path, monkeypatch):
+    root = tmp_path / "cc-config"
+    root.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    return root
+
+
+def _write_jsonl(root, slug, name, rows, mtime=None):
+    d = root / "projects" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_text("".join(json.dumps(r) + "\n" for r in rows),
+                 encoding="utf-8")
+    if mtime is not None:
+        os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_read_transcript_entries_parses_string_and_text_blocks(
+        cc_home, monkeypatch, tmp_path):
+    root = _transcript_root(tmp_path, monkeypatch)
+    _write_jsonl(root, "-Users-devx-proj", "a.jsonl", [
+        {"type": "user", "timestamp": "2026-09-28T20:43:17.000000Z",
+         "message": {"content": "hi there"}},
+        {"type": "assistant", "timestamp": "2026-09-28T20:43:18.000000Z",
+         "message": {"content": [
+             {"type": "text", "text": "hello"},
+             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+             {"type": "text", "text": "done"}]}},
+    ])
+    got = watchdogd.read_transcript_entries("/Users/devx/proj")
+    assert got is not None
+    assert [e[1:] for e in got] == [
+        ("user", "hi there"),
+        ("assistant", "hello\ndone"),  # tool_use is not a text block
+    ]
+    from datetime import datetime, timezone
+    assert got[0][0] == datetime(2026, 9, 28, 20, 43, 17,
+                                 tzinfo=timezone.utc).timestamp()
+
+
+def test_read_transcript_entries_newest_mtime_wins(cc_home, monkeypatch,
+                                                    tmp_path):
+    root = _transcript_root(tmp_path, monkeypatch)
+    _write_jsonl(root, "-Users-devx-proj", "old.jsonl", [
+        {"type": "user", "timestamp": "2026-09-28T20:00:00.000000Z",
+         "message": {"content": "old"}}], mtime=1_000.0)
+    _write_jsonl(root, "-Users-devx-proj", "new.jsonl", [
+        {"type": "user", "timestamp": "2026-09-28T21:00:00.000000Z",
+         "message": {"content": "new"}}], mtime=2_000.0)
+    got = watchdogd.read_transcript_entries("/Users/devx/proj")
+    assert [e[2] for e in got] == ["new"]
+
+
+def test_read_transcript_entries_missing_dir_is_none(cc_home, monkeypatch,
+                                                     tmp_path):
+    _transcript_root(tmp_path, monkeypatch)
+    assert watchdogd.read_transcript_entries("/Users/devx/elsewhere") is None
+
+
+def test_read_transcript_entries_skips_bad_rows(cc_home, monkeypatch,
+                                                tmp_path):
+    root = _transcript_root(tmp_path, monkeypatch)
+    d = root / "projects" / "-Users-devx-proj"
+    d.mkdir(parents=True)
+    (d / "a.jsonl").write_text(
+        "{not json\n"
+        + json.dumps({"type": "user", "message": {"content": "no ts"}}) + "\n"
+        + json.dumps({"timestamp": "2026-09-28T20:00:00.000000Z",
+                      "message": {"content": "no type"}}) + "\n"
+        + json.dumps({"type": "user",
+                      "timestamp": "2026-09-28T20:43:17.000000Z",
+                      "message": {"content": "ok"}}) + "\n",
+        encoding="utf-8")
+    got = watchdogd.read_transcript_entries("/Users/devx/proj")
+    assert [e[2] for e in got] == ["ok"]
+
+
+def test_read_transcript_entries_reads_tail_only(cc_home, monkeypatch,
+                                                 tmp_path):
+    # a hung CC stops writing: the marker sits in the TAIL; the head junk
+    # line (600KB > the 512KB tail) must be ignored — its partial first
+    # line is dropped, not fatal
+    root = _transcript_root(tmp_path, monkeypatch)
+    d = root / "projects" / "-Users-devx-proj"
+    d.mkdir(parents=True)
+    big = "X" * (600 * 1024)
+    (d / "a.jsonl").write_text(
+        big + "\n"
+        + json.dumps({"type": "user",
+                      "timestamp": "2026-09-28T20:43:17.000000Z",
+                      "message": {"content": EXIT_MARK + "  "}}) + "\n",
+        encoding="utf-8")
+    got = watchdogd.read_transcript_entries("/Users/devx/proj")
+    assert [e[2] for e in got] == [EXIT_MARK + "  "]
+
+
+# --- check_exit_hangs ---------------------------------------------------------------
+
+def test_check_exit_hangs_kills_hung_claude(cc_home, monkeypatch):
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert actions[0]["pid"] == 24822
+    assert actions[0]["mode"] == "term"
+    assert actions[0]["key"] == "proj-a"
+    assert actions[0]["nnn"] == 1
+    assert actions[0]["age_s"] == pytest.approx(40.0)
+    assert len(pushes) == 1
+    ev, slug, nnn, fields = pushes[0]
+    assert ev == "exit_hang"
+    assert slug == "proj-a"
+    assert nnn == 1
+    assert fields["mode"] == "term"
+    assert fields["age_s"] == pytest.approx(40.0)
+    assert 24822 in ctx.exit_hang_killed
+
+
+def test_check_exit_hangs_logs_kill_line(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(kill_result="kill")
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    log = (paths.logs_dir() / "watchdog.log").read_text(encoding="utf-8")
+    line = json.loads(log.strip().splitlines()[-1])
+    assert line["events"] == ["exit_hang_killed:proj-a"]
+    assert line["key"] == "proj-a"
+    assert line["nnn"] == 1
+    assert line["pane"] == "cc-proj-a-0a9b"
+    assert line["pid"] == 24822
+    assert line["mode"] == "kill"
+    assert line["age_s"] == pytest.approx(40.0)
+    assert "ts" in line
+
+
+def test_check_exit_hangs_dead_race_no_push_no_log(cc_home, monkeypatch):
+    # the kill lost the race (someone else reaped it): no push, NO log
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(kill_result="dead")
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert 24822 in ctx.exit_hang_killed
+    assert pushes == []
+    assert not (paths.logs_dir() / "watchdog.log").is_file()
+
+
+def test_check_exit_hangs_noop_pass_writes_no_log(cc_home, monkeypatch):
+    # marker still within the grace: nothing happens and NOTHING is logged
+    # (a log line every 5s would bloat the file by MBs a day)
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript=_exit_entries(age=5.0))
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert not (paths.logs_dir() / "watchdog.log").is_file()
+
+
+def test_check_exit_hangs_skips_turn_active(cc_home, monkeypatch):
+    # mid-turn /exit: the Stop hook flips turn_active False later; until
+    # then the process is never touched (and the ps scan is skipped too)
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=True)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert io.read_calls == []
+    assert io.ps_calls == 0
+
+
+def test_check_exit_hangs_activity_after_marker_not_killed(cc_home,
+                                                            monkeypatch):
+    # a prompt landing after the marker = the user gave up on /exit
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript=_exit_entries(
+        after=[(9_995.0, "user", "yeni prompt")]))
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+
+
+def test_check_exit_hangs_no_tmux_is_noop(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(sessions=None)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert io.ps_calls == 0
+
+
+def test_check_exit_hangs_unresolvable_target_skipped(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)  # stale tmux_session, no prefix match
+    io = _hung_io(sessions=["cc-other-1"])
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert io.ps_calls == 0
+
+
+def test_check_exit_hangs_panes_none_skipped(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(panes={"cc-proj-a-0a9b": None})
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+
+
+def test_check_exit_hangs_no_claude_in_tree_skipped(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    procmap = {24817: (1, "sh -c x"), 24822: (24817, "zsh")}
+    io = _hung_io(procmap=procmap)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert io.read_calls == []  # no claude -> no transcript read
+
+
+def test_check_exit_hangs_pid_not_alive_skipped(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(alive_pids=set())
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+
+
+def test_check_exit_hangs_killed_pid_not_rekilled(cc_home, monkeypatch):
+    # a zombie keeps kill(pid, 0) succeeding: the killed-set (daemon
+    # lifetime) is the re-kill / re-push guard
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert len(pushes) == 1
+
+
+def test_check_exit_hangs_ps_tree_none_is_noop(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(procmap=None)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+
+
+def test_check_exit_hangs_ps_tree_raises_never_propagates(cc_home,
+                                                           monkeypatch):
+    # P10-D12: a fast-pass exception must not escape to the loop
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io()
+
+    def boom():
+        raise RuntimeError("ps exploded")
+
+    io.ps_snapshot = boom
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)  # must not raise
+    assert io.kills == []
+
+
+def test_check_exit_hangs_env_limit_respected(cc_home, monkeypatch):
+    monkeypatch.setenv("CC_CONTINUITY_EXIT_HANG_LIMIT", "60")
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript=_exit_entries(age=40.0))  # 40 s < 60 s grace
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+
+
+def test_check_exit_hangs_same_target_twice_kills_highest_once(
+        cc_home, monkeypatch):
+    # two live records of one project share the target (in-place
+    # rotation): kill ONCE, and the push carries the HIGHEST nnn
+    pushes = _capture_pushes(monkeypatch)
+    _mk(nnn=1, turn_active=False)
+    _mk(nnn=2, turn_active=False)  # same default tmux_session
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert io.ps_calls == 1
+    assert len(pushes) == 1
+    assert pushes[0][2] == 2
+    assert actions[0]["nnn"] == 2
+
+
+def test_check_exit_hangs_each_project_killed_ps_once(cc_home, monkeypatch):
+    _capture_pushes(monkeypatch)
+    _mk(key="proj-a", nnn=1, turn_active=False, tmux="cc-proj-a-0a9b")
+    _mk(key="proj-b", nnn=1, turn_active=False, tmux="cc-proj-b-0b9c")
+    panes = {"cc-proj-a-0a9b": [_PANE],
+             "cc-proj-b-0b9c": [
+                 {"pane": "%26", "pid": 25646, "path": "/Users/devx/other"}]}
+    procmap = {24817: (1, "sh -c x"), 24822: (24817, "claude -n a"),
+               25646: (1, "sh -c y"), 25652: (25646, "claude -n b")}
+    io = _hung_io(sessions=["cc-proj-a-0a9b", "cc-proj-b-0b9c"],
+                  panes=panes, procmap=procmap,
+                  alive_pids={24822, 25652})
+    ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert sorted(io.kills) == [24822, 25652]
+    assert io.ps_calls == 1  # one ps scan for the whole pass
+    assert {a["key"] for a in actions} == {"proj-a", "proj-b"}
