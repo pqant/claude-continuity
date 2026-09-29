@@ -84,6 +84,11 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `power_cycle_cooldown_s` | **`1800`** | minimum spacing between successful cycles (30 min — no cycle loops) |
 | `watchdog_digest_push_cap_s` | **`300`** | at most one digest injection per this window (file logging is uncapped) |
 
+Env override: `CC_CONTINUITY_EXIT_HANG_LIMIT` (Phase 21) — the grace
+in SECONDS before a hung `/exit` is killed; default **30**; `0`,
+negative or non-numeric values are rejected (fall back to the default —
+a 0 grace would kill a mid-`/exit`).
+
 ## Behavior
 
 ### Health (P10-D4)
@@ -218,6 +223,43 @@ also starts at SEND_ENTER, never at a re-paste.
 `ESCAPE_SETTLE_S` (and the popup geometry/duration in the digest
 relay) are v1 **module constants**, not config keys — "ayarlanabilir"
 was the directive; they become config when a second value is needed.
+
+### Exit-hang killer (Phase 21)
+
+CC 2.1.209's `/exit` can HANG: the marker entry is written to the
+transcript but the process never dies (observed: 20+ h zombie). A
+dead CC in a tmux pane blocks the project (no new session can take
+the pane). The daemon kills it — a 5 s **fast pass**
+(`check_exit_hangs`) runs on EVERY loop iteration; the full tick
+(probe + session scan) still fires only every `watchdog_interval_s`
+(one loop, two cadences, first iteration ticks immediately).
+
+Detection (all per pass, one `ps` scan total):
+
+1. live tmux sessions → live records; per target the **highest nnn
+   wins** (an in-place rotation shares the pane);
+2. the **turn guard BEFORE the ps scan**: any `turn_active` record
+   makes the whole pass skip the scan — a mid-turn `/exit` waits for
+   the Stop hook to clear `turn_active`;
+3. per pane: the **topmost `claude`** in the pane process tree
+   (BFS, exact basename), alive (`kill(pid, 0)`), whose transcript's
+   `/exit` marker is older than the grace AND has **no user prompt
+   after the marker** (a prompt = the user gave up on `/exit` —
+   never touched);
+4. kill: SIGTERM, 5 s, then SIGKILL; then the **GATE cleanup** —
+   `tmux kill-session -t <target>`: the killed claude was the
+   session's main pane, and the orphaned **progress-pane would keep
+   the session alive as a zombie** with no CC and no restart
+   (launch is one-shot). The cleanup is best-effort: a failure
+   degrades and never eats the push/log.
+
+Outcome: one `exit_hang` ntfy push + **one** log line
+(`exit_hang_killed:<key>`, pid/mode/age). A `"dead"` kill (lost the
+race — someone else reaped it) joins the killed-set but gets **no
+push, no log, no session cleanup**. A no-op pass writes **zero** log
+lines (the 5 s cadence must not bloat the log). The killed-set
+(daemon lifetime) guards re-kill/re-push of a zombie whose
+`kill(pid, 0)` still succeeds.
 
 ### Network recovery (P10)
 
@@ -385,3 +427,13 @@ line is submitted with a bare Enter on the next unchanged tick.
   the popup display itself is covered by the 52-test digest suite and
   will appear at the next notable digest on an idle target. No DGX
   staging (outage-test protocol: no staging).
+- 2026-09-29: **Phase 21 live — first real kill.** The first fast
+  pass after the kickstart found a connector-pane CC hung **20.8 h**
+  after its `/exit` (pid 25652, mode `term` — SIGTERM sufficed); the
+  `exit_hang` push went out and the pane closed. The GATE fired: no
+  new CC pane within 1 min — the session survived on the orphaned
+  progress-pane (a zombie, no restart: launch is one-shot). The
+  approved GATE addendum (post-kill `tmux kill-session` cleanup,
+  best-effort, dead-race exempt) was implemented TDD (1044 tests),
+  deployed, kickstarted, and the leftover zombie session was cleaned
+  up. Commit 83135a9 (killer) + the cleanup follow-up.

@@ -34,7 +34,8 @@ class FakeIO:
 
     def __init__(self, pane=PROMPT_PANE, health_ok=True, sessions=None,
                  panes=None, procmap=None, transcript=None,
-                 alive_pids=None, kill_result="term"):
+                 alive_pids=None, kill_result="term",
+                 kill_session_result=True):
         self.pane = pane
         self.ok = health_ok
         self.sessions = sessions
@@ -54,6 +55,8 @@ class FakeIO:
         self.alive_pids = set() if alive_pids is None else set(alive_pids)
         self.kill_result = kill_result
         self.kills = []
+        self.kill_session_result = kill_session_result
+        self.kill_session_calls = []
         self.ps_calls = 0
         self.read_calls = []
 
@@ -78,6 +81,12 @@ class FakeIO:
     def kill(self, pid):
         self.kills.append(pid)
         return self.kill_result
+
+    def kill_session(self, target):
+        self.kill_session_calls.append(target)
+        if isinstance(self.kill_session_result, Exception):
+            raise self.kill_session_result
+        return bool(self.kill_session_result)
 
     def sleep(self, s):
         self.slept.append(s)
@@ -242,7 +251,8 @@ def test_run_forever_fast_pass_every_iteration_tick_at_interval(cc_home):
                                list_panes=io.list_panes,
                                ps_snapshot=io.ps_snapshot,
                                read_transcript=io.read_transcript,
-                               is_alive=io.is_alive, kill=io.kill)
+                               is_alive=io.is_alive, kill=io.kill,
+                               kill_session=io.kill_session)
     assert rc == 0
     # two full ticks (first immediate at now=0, second at now=300)
     assert io.probe_calls == 2
@@ -1183,7 +1193,8 @@ def _exit_ctx(io, cfg_over=None, now=10_000.0):
                    send=io.send, now=now,
                    list_panes=io.list_panes, ps_snapshot=io.ps_snapshot,
                    read_transcript=io.read_transcript,
-                   is_alive=io.is_alive, kill=io.kill)
+                   is_alive=io.is_alive, kill=io.kill,
+                   kill_session=io.kill_session)
 
 
 # --- exit_hang_limit_s -----------------------------------------------------------
@@ -1661,3 +1672,89 @@ def test_check_exit_hangs_each_project_killed_ps_once(cc_home, monkeypatch):
     assert sorted(io.kills) == [24822, 25652]
     assert io.ps_calls == 1  # one ps scan for the whole pass
     assert {a["key"] for a in actions} == {"proj-a", "proj-b"}
+
+
+# --- kill_tmux_session (GATE: zombie session / progress-pane cleanup) ---------------
+#
+# Live validation 2026-09-29: killing the hung claude closed its pane, but
+# the session survived on the orphaned progress-pane (no CC, no restart —
+# launch is one-shot). The approved GATE: after the kill, kill the whole
+# session.
+
+def test_kill_tmux_session_ok():
+    cmds = []
+
+    def run(cmd, **kw):
+        cmds.append(cmd)
+        return _P(0, b"")
+
+    assert watchdogd.kill_tmux_session("cc-proj-a-0a9b", runner=run) is True
+    assert cmds[0][1:4] == ["kill-session", "-t", "cc-proj-a-0a9b"]
+
+
+def test_kill_tmux_session_already_gone_is_false():
+    # the pane died with the session in the meantime: rc != 0 = degrade,
+    # not an error (the cleanup is best-effort)
+    assert watchdogd.kill_tmux_session("s",
+                                       runner=lambda *a, **k: _P(1, b"")) \
+        is False
+
+
+def test_kill_tmux_session_runner_error_is_false():
+    def boom(*a, **k):
+        raise OSError("tmux gone")
+
+    assert watchdogd.kill_tmux_session("s", runner=boom) is False
+
+
+def test_check_exit_hangs_kills_session_after_kill(cc_home, monkeypatch):
+    # GATE: the hung claude was the session's main pane; without cleanup
+    # the orphaned progress-pane keeps the session alive as a zombie
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert io.kill_session_calls == ["cc-proj-a-0a9b"]
+
+
+def test_check_exit_hangs_dead_race_no_session_kill(cc_home, monkeypatch):
+    # the kill lost the race: WE killed nothing, so the session is left
+    # as-is (no cleanup)
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(kill_result="dead")
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert io.kill_session_calls == []
+
+
+def test_check_exit_hangs_session_kill_failure_degrades(cc_home, monkeypatch):
+    # a failed cleanup (tmux error) must not eat the push or the log,
+    # and must not escape to the loop (P10-D12)
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(kill_session_result=RuntimeError("tmux exploded"))
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)  # must not raise
+    assert io.kills == [24822]
+    assert io.kill_session_calls == ["cc-proj-a-0a9b"]
+    assert len(pushes) == 1
+    log = (paths.logs_dir() / "watchdog.log").read_text(encoding="utf-8")
+    line = json.loads(log.strip().splitlines()[-1])
+    assert line["events"] == ["exit_hang_killed:proj-a"]
+
+
+def test_check_exit_hangs_rekilled_pass_no_second_session_kill(
+        cc_home, monkeypatch):
+    # second pass: the pid is in the killed-set -> no kill, no cleanup
+    _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert io.kill_session_calls == ["cc-proj-a-0a9b"]
