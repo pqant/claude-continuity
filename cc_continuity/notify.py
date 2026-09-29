@@ -257,6 +257,10 @@ def build_message(event: str, *, slug: str, nnn: int,
         t, pr = "💥 cc-continuity: /exit hang — killed", "high"
         b = (f"proj={slug} {p} /exit hung {int(fields['age_s'])}s — "
              f"killed ({fields['mode']})")
+    elif event == "frozen_nudge":
+        t, pr = "🧊 cc-continuity: frozen turn — escalated", "urgent"
+        b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
+             f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")
     else:
         raise ValueError(f"unknown notify event {event!r}")
     if len(b) > 200:

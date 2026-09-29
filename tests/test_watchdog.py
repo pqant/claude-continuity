@@ -281,6 +281,72 @@ def test_build_nudge_text_stalled():
                     "The last turn ended in error — continue from where you left off.")
 
 
+def test_build_nudge_text_frozen():
+    # Phase 22: the frozen-turn escalation — the daemon ESC-cancelled the
+    # in-flight turn, so the text says so and tells the session to check
+    # its state before resuming
+    text = watchdog.build_nudge_text("continue", now=10_000.0,
+                                     frozen_minutes=25)
+    assert text == ("continue\n\n[cc-continuity watchdog] "
+                    "Turn 25 min frozen — I cancelled it. "
+                    "check git status and the last output, "
+                    "Continue from where you left off.")
+
+
+def test_build_nudge_text_outage_wins_over_frozen():
+    # the OUTAGE form is the more specific context (the model went down
+    # and came back) — it must not be replaced by the frozen block
+    text = watchdog.build_nudge_text("continue", now=10_900.0,
+                                     down_since=10_000.0,
+                                     frozen_minutes=25)
+    assert "dondu" not in text
+    assert "The model server is back online" in text
+
+
+# --- frozen_nudge_due (Phase 22: frozen-turn escalation threshold) ------------
+
+
+def test_frozen_nudge_due_requires_turn_active():
+    # a frozen pane WITHOUT turn_active is a picker / a legitimate user
+    # wait — never escalated (the picker only gets a single Esc, Phase C)
+    assert watchdog.frozen_nudge_due(10, False, frozen_minutes=20,
+                                     interval_s=300) is False
+
+
+def test_frozen_nudge_due_at_threshold():
+    # 4 unchanged ticks x 300s = 20 min = the default threshold
+    assert watchdog.frozen_nudge_due(4, True, frozen_minutes=20,
+                                     interval_s=300) is True
+
+
+def test_frozen_nudge_due_below_threshold():
+    assert watchdog.frozen_nudge_due(3, True, frozen_minutes=20,
+                                     interval_s=300) is False
+
+
+def test_frozen_nudge_due_custom_minutes():
+    # 10 min at 300s ticks = 2 unchanged ticks
+    assert watchdog.frozen_nudge_due(2, True, frozen_minutes=10,
+                                     interval_s=300) is True
+    assert watchdog.frozen_nudge_due(1, True, frozen_minutes=10,
+                                     interval_s=300) is False
+
+
+def test_frozen_nudge_due_zero_minutes_due_immediately():
+    # 0 = escalate as soon as the caller reaches the FROZEN branch
+    # (only possible at ticks >= 2)
+    assert watchdog.frozen_nudge_due(2, True, frozen_minutes=0,
+                                     interval_s=300) is True
+
+
+def test_frozen_nudge_due_bad_interval_is_false():
+    # a non-positive interval would break the math — never due
+    assert watchdog.frozen_nudge_due(4, True, frozen_minutes=20,
+                                     interval_s=0) is False
+    assert watchdog.frozen_nudge_due(4, True, frozen_minutes=20,
+                                     interval_s=-5) is False
+
+
 # --- Episode + nudge_action (P10-D7 table) ----------------------------------
 
 

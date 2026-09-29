@@ -264,6 +264,15 @@ def test_build_message_exit_hang():
     assert b == "proj=spike-repo 007 /exit hung 31s — killed (kill)"
 
 
+# --- Phase 22 frozen-turn escalation event (cp-063 approved design) -----------
+
+def test_build_message_frozen_nudge():
+    t, b, pr = notify.build_message("frozen_nudge", slug="spike-repo", nnn=7,
+                                    frozen_minutes=23, nudge=2, max_nudges=3)
+    assert (t, pr) == ("🧊 cc-continuity: frozen turn — escalated", "urgent")
+    assert b == "proj=spike-repo 007 frozen 23m — ESC + nudge 2/3"
+
+
 def test_fmt_minutes():
     assert notify._fmt_minutes(0) == "0m"
     assert notify._fmt_minutes(59 * 60) == "59m"
@@ -280,6 +289,8 @@ def test_watchdog_bodies_under_200_chars():
         ("turn_recovered", dict(nudge=99)),
         ("freeze_detected", {}),
         ("exit_hang", dict(age_s=10 ** 6, mode="kill")),
+        ("frozen_nudge", dict(frozen_minutes=10 ** 9, nudge=99,
+                              max_nudges=99)),
     ]:
         _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
         assert len(b) <= 200, ev
