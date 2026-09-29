@@ -407,6 +407,22 @@ def list_tmux_panes(session: str,
     return panes
 
 
+def kill_tmux_session(session: str,
+                      runner=subprocess.run) -> bool:
+    """Phase 21 GATE: ``tmux kill-session -t <session>`` — the zombie
+    cleanup after an exit-hang kill. The killed claude was the
+    session's main pane; the orphaned progress-pane would keep the
+    session alive with no CC and no restart (launch is one-shot).
+    Best-effort: rc != 0 (already gone) / runner error → False;
+    it never raises into the fast pass."""
+    try:
+        proc = runner([_tmux_bin(), "kill-session", "-t", session],
+                      capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def read_transcript_entries(cwd: str) -> list | None:
     """Phase 21: the newest transcript under
     ``<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<slug>`` as
@@ -610,6 +626,7 @@ class TickCtx:
     read_transcript: object = None  # (cwd: str) -> list | None
     is_alive: object = None  # (pid: int) -> bool
     kill: object = None  # (pid: int) -> str ("term"/"kill"/"dead")
+    kill_session: object = None  # (target: str) -> bool (GATE cleanup)
     exit_hang_killed: set = dataclasses.field(default_factory=set)
 
 
@@ -1045,9 +1062,10 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
     rotation shares the pane) → the turn guard BEFORE the ps scan
     (all mid-turn means zero ps) → ONE process map for the whole pass
     → per pane: topmost claude → liveness → transcript marker + grace
-    + activity rule → kill. A ``"dead"`` kill lost the race: the pid
-    still joins the killed-set (the zombie guard) but gets NO push and
-    NO log. A no-op pass writes ZERO log lines (the 5s cadence must not
+    + activity rule → kill → session cleanup (GATE: ``kill_session``,
+    best-effort). A ``"dead"`` kill lost the race: the pid
+    still joins the killed-set (the zombie guard) but gets NO push,
+    NO log and NO session cleanup. A no-op pass writes ZERO log lines (the 5s cadence must not
     bloat the log). Returns the actions taken (one dict per kill)."""
     try:
         sessions = ctx.list_sessions()
@@ -1114,6 +1132,14 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
             ctx.exit_hang_killed.add(pid)
             if mode == "dead":
                 continue  # lost the race: no push, NO log
+            # GATE cleanup: we killed the session's main pane — drop the
+            # whole session so the orphaned progress-pane cannot keep a
+            # zombie alive (the driver restart is unverified; best-effort,
+            # a failure degrades and never eats the push/log below)
+            try:
+                ctx.kill_session(target)
+            except Exception:
+                _log_error("exit_hang kill_session")
             _push(ctx.cfg, "exit_hang", slug=slug, nnn=nnn,
                   age_s=age_s, mode=mode)
             action = {"key": key, "nnn": nnn, "pane": target, "pid": pid,
@@ -1130,7 +1156,7 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 recover=None, cycle=None, last_cycle_ts=None,
                 record_cycle_ts=None, list_panes=None,
                 ps_snapshot=None, read_transcript=None, kill=None,
-                is_alive=None) -> int:
+                is_alive=None, kill_session=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
@@ -1171,6 +1197,8 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                          else read_transcript_entries),
         is_alive=is_alive if is_alive is not None else pid_alive,
         kill=kill if kill is not None else kill_process,
+        kill_session=kill_session if kill_session is not None
+        else kill_tmux_session,
     )
     ticks = 0
     last_tick = None
