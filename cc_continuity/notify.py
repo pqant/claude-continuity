@@ -268,6 +268,12 @@ def build_message(event: str, *, slug: str, nnn: int,
             t, pr = "🧊 cc-continuity: frozen turn — escalated", "urgent"
             b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
                  f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")
+    elif event == "zombie_cleaned":
+        # Phase 23 (fix a): an off session's tmux session was still alive
+        # on the orphaned progress-pane (no CC) — the daemon killed it
+        t, pr = "🧟 cc-continuity: zombie session cleaned", "default"
+        b = (f"proj={slug} {p} {_clip(fields['session'], 40)} — "
+             "no CC, killed")
     else:
         raise ValueError(f"unknown notify event {event!r}")
     if len(b) > 200:

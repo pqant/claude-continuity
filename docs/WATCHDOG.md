@@ -343,6 +343,62 @@ per tick** (a tick-local set) and the picker Esc at most **once per run**
 (`frozen_esc`), so 11 stale records resolving to one pane produce one
 announce, one escalation, and one gen probe — not eleven.
 
+### Zombie-session watcher (Phase 23, fix a)
+
+Phase 21's exit-hang killer and its GATE cleanup handle a **hung** CC and
+the session left behind. A *clean* `/exit` can leave a different zombie:
+the CC process exits normally, the record flips `off=True`, but the tmux
+**session survives on its orphaned progress-pane** — no CC, no restart
+(2026-09-30 13:47 connector incident: the session sat alive with nothing
+running in it). The daemon now sweeps these at the end of each full tick
+(`check_zombie_sessions`, 300 s cadence — the 5 s fast pass is
+exit-hang-only). A still-alive tmux session is killed only when **all**
+five fail-safe conditions hold:
+
+1. the record is `off=True` and has a `tmux_session` field;
+2. that session is in the current `list_sessions()`;
+3. **no live (`off=False`) record resolves to it** (`resolve_pane`,
+   prefix fallback included) — a shared / in-place-rotation pane is
+   never touched;
+4. **no `claude` process in any of the session's panes** (one `ps`
+   snapshot, `find_claude_pid` per pane; the progress-pane is python,
+   not claude);
+5. it has been `off` for more than `ZOMBIE_GRACE_S` (120 s, per the
+   record's `updated` ts) — a freshly-ended session may be mid-relaunch.
+
+Conditions 1, 2, 3, 5 are cheap and run first, so a no-op pass costs
+zero `ps`. The kill is `tmux kill-session` + one `zombie_cleaned` push
+("no CC, killed") + a `zombie_cleaned:<key>:<nnn>` event; a successful
+kill is deduped for the daemon's lifetime (`zombie_killed`), a failed
+kill (`rc != 0`) is **not** — the next tick retries. Unparseable /
+missing `updated` degrades to no kill.
+
+### FROZEN progress-pane skip (Phase 23, fix b)
+
+A progress-only session (the CC died; the session survives on its
+orphaned progress-pane) renders a **static** "◆ NN% Active Usage" line.
+An unchanged static capture classifies **FROZEN** after two ticks — and
+Phase 22's FROZEN branch would act on it: a spurious `freeze_detected`
+announce, and (with `turn_active`) an ESC + nudge + gen-probe
+escalation sent to a pane that has no CC to freeze (the 2026-09-30
+14:03 / 16:04 noise). The FROZEN branch now opens with a guard
+(`_frozen_progress_pane`): skip **all** FROZEN handling when the
+captured pane is a progress display. Two independent signals, either
+suffices:
+
+- the capture's last non-empty line **matches the progress usage line**
+  (`_PROGRESS_TAIL_RE`, `^\s*◆?\s*\d+% Active Usage`) — checks the
+  captured pane, so it catches a live CC sitting in ANOTHER pane while
+  the active pane is the progress display;
+- **OR** the `ps` snapshot shows **no `claude` in any of the session's
+  panes** (no CC to be frozen) — the robust fallback, since the
+  progress pane animates and its tail is not always the usage line.
+
+Both signals False → the existing FROZEN behavior stands (no
+regression). The helper never raises: a `ps`/`list_panes` failure
+degrades to `False` (no skip), so a broken I/O path reverts to acting
+on the freeze, never to silently ignoring a real one.
+
 ### Network recovery (P10)
 
 A failed health probe may be a **stale route** (after a DGX or Mac

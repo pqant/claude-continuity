@@ -301,6 +301,7 @@ def test_watchdog_bodies_under_200_chars():
         ("frozen_nudge", dict(frozen_minutes=10 ** 9, nudge=99,
                               max_nudges=99)),
         ("frozen_nudge", dict(frozen_minutes=10 ** 9)),  # picker variant
+        ("zombie_cleaned", dict(session="cc-" + "x" * 60)),
     ]:
         _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
         assert len(b) <= 200, ev

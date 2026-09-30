@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -2187,6 +2188,212 @@ def test_check_exit_hangs_no_session_id_falls_back_to_newest(cc_home,
     assert [a["nnn"] for a in actions] == [1]
 
 
+# --- cp-071: zombie-session watcher (Phase 23 fix a) --------------------------------
+#
+# A clean /exit whose CC died can leave the tmux session ALIVE on the
+# orphaned progress-pane (no CC, no restart — launch is one-shot). The
+# 2026-09-30 c19b incident: the user's "kill it" commands landed in the
+# progress pane, the session sat as a zombie. The watcher kills it:
+# off=True record + tmux_session still in list_sessions + no LIVE record
+# resolves to it + NO claude in any of its panes + off for > grace.
+
+# a progress-pane: a python process (NOT claude) with a child — no claude
+# anywhere in the tree, so find_claude_pid returns None for the pane
+_ZOMBIE_PANE = {"pane": "%99", "pid": 50001, "path": "/Users/devx/proj"}
+_ZOMBIE_PROCMAP = {50001: (1,
+                           "python3 /opt/homebrew/bin/cc-continuity "
+                           "progress-pane"),
+                   50002: (50001, "sleep 30")}
+# a pane whose tree DOES contain a live claude (the must-not-kill case)
+_CLAUDE_PANE = {"pane": "%23", "pid": 24817, "path": "/Users/devx/proj"}
+_CLAUDE_PROCMAP = {24817: (1, "/bin/sh /usr/bin/command claude -n old"),
+                   24822: (24817, "claude --dangerously-skip-permissions")}
+_ZS = "cc-proj-a-0a9b"  # the zombie tmux session name
+
+
+def _set_updated(key, nnn, epoch):
+    """Pin the record's ``updated`` to ``epoch`` (a tz-aware ISO string
+    parse_entry_ts round-trips) — controls the off-grace in the tests."""
+    p = paths.session_dir(key, nnn) / "state.json"
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    rec["updated"] = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+    p.write_text(json.dumps(rec), encoding="utf-8")
+
+
+def _m_off(key="proj-a", nnn=1, tmux=_ZS, off=True, updated_epoch=9000.0,
+           turn_active=False):
+    """An off record (the zombie candidate). updated_epoch pins the
+    off-time: 9000.0 is 1000 s before the pinned now (10_000.0) → past
+    the 120 s grace; 9950.0 is 50 s → within grace."""
+    state.create_session_state(key, f"{key}-{nnn:03d}", nnn,
+                               session_id=f"sid-{key}-{nnn}",
+                               initial_state="ACTIVE")
+    if tmux is not None:
+        state.update_fields(key, nnn, tmux_session=tmux)
+    if turn_active:
+        state.update_fields(key, nnn, turn_active=True)
+    if off:
+        state.update_fields(key, nnn, off=True)
+    _set_updated(key, nnn, updated_epoch)
+    return paths.session_dir(key, nnn)
+
+
+def _zombie_io(panes=None, procmap=_ZOMBIE_PROCMAP, sessions=(_ZS,),
+               kill_session_result=True):
+    return FakeIO(sessions=list(sessions), panes={_ZS: (panes
+                                                        if panes is not None
+                                                        else [_ZOMBIE_PANE])},
+                  procmap=procmap, kill_session_result=kill_session_result)
+
+
+def _zline():
+    return {"ts": 10_000.0, "events": []}
+
+
+def test_check_zombie_sessions_kills_no_claude_session(cc_home, monkeypatch):
+    # the happy path: off record, session alive, no live record, no claude,
+    # past grace -> kill + push + dedup + log event
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io()
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == [_ZS]
+    assert len(actions) == 1 and actions[0]["session"] == _ZS
+    assert _ZS in ctx.zombie_killed
+    assert any(ev[0] == "zombie_cleaned" for ev in pushes)
+    assert any(ev.startswith("zombie_cleaned") for ev in line["events"])
+
+
+def test_check_zombie_sessions_live_record_points_to_s_no_kill(cc_home,
+                                                               monkeypatch):
+    # a LIVE record resolves to the same session -> never kill it
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    _mk(key="proj-a", nnn=2, tmux=_ZS, turn_active=False)  # live record
+    io = _zombie_io()
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed
+
+
+def test_check_zombie_sessions_claude_in_pane_no_kill(cc_home, monkeypatch):
+    # a live claude in the session's panes -> NOT a zombie -> no kill
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io(panes=[_CLAUDE_PANE], procmap=_CLAUDE_PROCMAP)
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed
+
+
+def test_check_zombie_sessions_within_grace_no_kill(cc_home, monkeypatch):
+    # off only 50 s ago (< the 120 s grace) -> wait, do not kill
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9950.0)  # now=10_000 -> 50 s ago
+    io = _zombie_io()
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed
+
+
+def test_check_zombie_sessions_not_in_tmux_no_kill(cc_home, monkeypatch):
+    # the session is already gone (not in list_sessions) -> nothing to kill
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io(sessions=[])  # the session no longer exists
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed
+
+
+def test_check_zombie_sessions_no_tmux_session_field_no_kill(cc_home,
+                                                             monkeypatch):
+    # an off record with NO tmux_session field -> nothing to resolve
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(tmux=None, updated_epoch=9000.0)
+    io = _zombie_io()
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+
+
+def test_check_zombie_sessions_empty_panes_no_kill(cc_home, monkeypatch):
+    # list_panes returns no panes -> cannot verify it is a zombie -> no kill
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io(panes=[])
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed
+
+
+def test_check_zombie_sessions_kill_rc0_not_deduped(cc_home, monkeypatch):
+    # kill rc != 0 (already gone / race) -> NOT added to the dedup set, so
+    # the next tick retries; still no push (nothing was killed)
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io(kill_session_result=False)
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == [_ZS]  # it tried
+    assert actions == []
+    assert pushes == []
+    assert _ZS not in ctx.zombie_killed  # not deduped -> retries
+
+
+def test_check_zombie_sessions_dedup_no_rekill(cc_home, monkeypatch):
+    # already cleaned this daemon lifetime -> never touched again
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)
+    io = _zombie_io()
+    ctx = _exit_ctx(io)
+    ctx.zombie_killed.add(_ZS)  # pre-populated (a prior tick cleaned it)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert pushes == []
+
+
+def test_check_zombie_sessions_tmux_unavailable_no_kill(cc_home, monkeypatch):
+    # no tmux server (list_sessions -> None) -> cannot verify -> no kill
+    _m_off(updated_epoch=9000.0)
+    io = FakeIO(sessions=None, panes={_ZS: [_ZOMBIE_PANE]},
+                procmap=_ZOMBIE_PROCMAP, kill_session_result=True)
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == []
+    assert actions == []
+    assert _ZS not in ctx.zombie_killed
+
+
 # --- kill_tmux_session (GATE: zombie session / progress-pane cleanup) ---------------
 #
 # Live validation 2026-09-29: killing the hung claude closed its pane, but
@@ -2271,3 +2478,60 @@ def test_check_exit_hangs_rekilled_pass_no_second_session_kill(
     watchdogd.check_exit_hangs(ctx)
     assert io.kills == [24822]
     assert io.kill_session_calls == ["cc-proj-a-0a9b"]
+
+
+# --- cp-071: FROZEN progress-pane skip (Phase 23 fix b) -----------------------
+_PROGRESS_TAIL = "  ◆ 42% Active Usage"
+
+
+def _frozen_io(panes=(_ZOMBIE_PANE,), procmap=_ZOMBIE_PROCMAP,
+               pane=_PROGRESS_TAIL):
+    return FakeIO(pane=pane, sessions=["cc-proj-a-0a9b"],
+                  panes={"cc-proj-a-0a9b": list(panes)}, procmap=procmap)
+
+
+def test_frozen_progress_pane_tail_match(cc_home, monkeypatch):
+    # captured tail is a progress usage line -> skip (no procmap needed)
+    ctx = _exit_ctx(_frozen_io())
+    assert watchdogd._frozen_progress_pane(ctx, _ZS, _PROGRESS_TAIL) is True
+
+
+def test_frozen_progress_pane_no_claude_in_panes(cc_home, monkeypatch):
+    # non-progress tail, but no claude in any pane (progress-only) -> skip
+    ctx = _exit_ctx(_frozen_io(pane="some static line"))
+    assert watchdogd._frozen_progress_pane(ctx, _ZS, "some static line") \
+        is True
+
+
+def test_frozen_progress_pane_has_claude_not_progress(cc_home, monkeypatch):
+    # a live claude in a pane -> NOT progress-only -> no skip
+    io = _frozen_io(panes=(_CLAUDE_PANE,), procmap=_CLAUDE_PROCMAP,
+                    pane="some static line")
+    ctx = _exit_ctx(io)
+    assert watchdogd._frozen_progress_pane(ctx, _ZS, "some static line") \
+        is False
+
+
+def test_frozen_progress_pane_no_procmap_degrades(cc_home, monkeypatch):
+    # no procmap/panes + non-progress tail -> cannot verify -> no skip
+    io = FakeIO(pane="some static line", sessions=["cc-proj-a-0a9b"],
+                panes={"cc-proj-a-0a9b": []}, procmap={})
+    ctx = _exit_ctx(io)
+    assert watchdogd._frozen_progress_pane(ctx, _ZS, "some static line") \
+        is False
+
+
+def test_tick_frozen_progress_pane_no_action(cc_home, monkeypatch):
+    # a LIVE session whose active pane is a progress-only display (no CC)
+    # is FROZEN-classified; the fix must NOT push freeze_detected / send
+    # frozen_esc (the 14:03/16:04 misattribution)
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)  # live record -> pane cc-proj-a-0a9b
+    io = _frozen_io(pane="  ◆ 42% Active Usage")  # static progress display
+    ctx = _exit_ctx(io)
+    watchdogd.tick(ctx)          # baseline
+    watchdogd.tick(ctx)          # unchanged
+    l3 = watchdogd.tick(ctx)     # FROZEN
+    assert l3["sessions"][0]["outcome"] == "FROZEN"
+    assert not any(ev[0] == "freeze_detected" for ev in pushes)
+    assert io.sends == []
