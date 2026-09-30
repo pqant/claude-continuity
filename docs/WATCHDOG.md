@@ -17,8 +17,9 @@ tick it:
    `tmux capture-pane` read of the session's pane;
 3. **auto-nudges dead turns** — `tmux send-keys "<nudge text>" Enter` is
    the ONLY pane write the daemon ever performs;
-4. detects **retry-loop freeze** (a pane stuck unchanged) and reports it —
-   no auto-fix;
+4. detects **freeze** (a pane stuck unchanged) and reports it; since
+   Phase 22 it also **escalates** a freeze that caught a turn in flight
+   and outlived the threshold (see *Frozen-turn escalation*);
 5. pushes events to the phone (ntfy).
 
 Recovery is a **prompt, never a restart**: the daemon never kills a
@@ -78,6 +79,8 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `watchdog_nudge_text` | **`"continue"`** | the nudge prompt sent to the pane |
 | `watchdog_nudge_only_most_recent` | **`false`** | when on, at most one session per tick may be nudged — the focus session (see *Nudge focus*, Phase 16); off = legacy nudge-all |
 | `watchdog_network_recovery_cmd` | **`"sudo -n /usr/local/libexec/dgx-network-recovery"`** | local (Mac-side) route recovery run ONLY on a failed health probe; `""` = disabled |
+| `watchdog_frozen_nudge_minutes` | **`20`** | a FROZEN pane WITH a turn in flight escalates (ESC + nudge + generation probe) once the freeze outlives this (see *Frozen-turn escalation*, Phase 22) |
+| `watchdog_gen_probe_timeout_s` | **`180`** | the 5-token completion step of the generation probe; a hung generation never answers — the timeout IS the detection |
 | `power_plug_ip` / `power_plug_port` | **`"192.0.2.99"` / `9999`** | the Kasa HS100 on the DGX power path (the plug's own LAN port); empty IP disables auto power-cycle |
 | `power_cycle_off_s` | **`8`** | relay-off duration during a cycle |
 | `power_cycle_after_s` | **`600`** | sustained DOWN before the auto power-cycle fires (10 min covers box boot + model load) |
@@ -111,7 +114,7 @@ a 0 grace would kill a mid-`/exit`).
 | 2 | pane changed since the previous tick | ALIVE | none (rendering / tool output) |
 | 3 | pane at the prompt AND `turn_active` | **TURN_DEAD** | nudge (send-keys text + Enter) + `turn_dead` push |
 | 4 | pane at the prompt, turn ended, error in the tail | **STALLED** | nudge + `turn_dead` push |
-| 5 | pane unchanged for 2+ consecutive ticks (input closed) | **FROZEN** | one `freeze_detected` push, **no auto-fix** |
+| 5 | pane unchanged for 2+ consecutive ticks (input closed) | **FROZEN** | one `freeze_detected` push per pane; since Phase 22, escalate when a turn was in flight and the freeze outlived `watchdog_frozen_nudge_minutes` (see *Frozen-turn escalation*) |
 | 6 | pane at the prompt, turn not active, no recent error | IDLE_WAITING | **never nudged** — the user is simply away |
 
 Eligibility dominates age: a session whose state is not `ACTIVE`/`WARNED`
@@ -260,6 +263,62 @@ push, no log, no session cleanup**. A no-op pass writes **zero** log
 lines (the 5 s cadence must not bloat the log). The killed-set
 (daemon lifetime) guards re-kill/re-push of a zombie whose
 `kill(pid, 0)` still succeeds.
+
+### Frozen-turn escalation (Phase 22)
+
+Phase 21's exit-hang killer handles a hung `/exit`. Phase 22 handles the
+other way a turn dies silently: **vLLM hangs mid-generation**. The
+liveness probe (`/health`) keeps answering **200 UP** while a completion
+never returns (2026-09-29 morning: a 5-token ping never completed while
+`/health` was healthy) — so the per-tick liveness probe could never see
+it, and a session sat **FROZEN with its turn still "in flight"**
+indefinitely, because a FROZEN pane is normally report-only.
+
+Detection is a separate **generation probe** (`probe_generation`), run
+**ONLY on suspicion** — never on a healthy tick, because a real 5-token
+completion costs the shared DGX model:
+
+1. `GET {base}/v1/models` (10 s) — the model **NAME** is asked from the
+   server, never read from config, so a box restart / model swap adapts
+   itself. `{base}` = `watchdog_health_url` without its trailing path.
+2. `POST {base}/v1/chat/completions` — a 5-token "ping" completion,
+   timeout `watchdog_gen_probe_timeout_s` (180 s); ok = rc 0 AND HTTP 200.
+   A hung generation never answers: **the timeout IS the detection**.
+
+The result feeds a **separate gen HealthState** (2-fail debounce — the
+same machine as liveness, so one failed probe is never a gen-DOWN).
+Liveness and generation health are distinct: a hung vLLM is gen-DOWN
+while liveness is still UP.
+
+The FROZEN branch now has two paths. The announce is unchanged: **one
+`freeze_detected` per PANE per run** — deduped on the resolved target,
+so stale records that resolve to the same pane announce once, and
+seeded from the ledger on a daemon restart (never re-announced).
+
+- **turn in flight** (`turn_active`): once the freeze outlives
+  `watchdog_frozen_nudge_minutes` (20 min), the daemon **escalates** —
+  a force-cancel `Escape` + the enriched nudge in its **FROZEN form**
+  (form priority OUTAGE > FROZEN > STALLED/PLAIN; the FROZEN line says
+  the turn froze for *N* minutes and was ESC-cancelled, and to check
+  `git status` / the last output before resuming) + a `frozen_nudge`
+  push (title "frozen turn — escalated", `Nudge k/max`). The episode
+  machine then continues on later ticks (RESEND/SEND_ENTER/GIVE_UP). The
+  generation probe runs on the escalation tick and every tick after,
+  while the pane stays FROZEN-with-turn. Sustained **gen-DOWN** past
+  `power_cycle_after_s` (600 s) fires the **shared** auto power-cycle —
+  the same relay and the same cooldown file as liveness (one relay, one
+  30-min window); a **gen-DOWN→UP** fires `dgx_up` + the existing outage
+  recovery (`_recover_stuck_turns`), which liveness can never trigger on
+  its own.
+- **no turn in flight** (the picker screen): **one** force-cancel
+  `Escape` + a `frozen_nudge` push — no nudge text and **no model call**
+  (nothing is generating, so there is nothing to nudge and nothing to
+  probe).
+
+Both paths are bounded per pane: the turn escalation runs at most **once
+per tick** (a tick-local set) and the picker Esc at most **once per run**
+(`frozen_esc`), so 11 stale records resolving to one pane produce one
+announce, one escalation, and one gen probe — not eleven.
 
 ### Network recovery (P10)
 
@@ -437,3 +496,16 @@ line is submitted with a bare Enter on the next unchanged tick.
   best-effort, dead-race exempt) was implemented TDD (1044 tests),
   deployed, kickstarted, and the leftover zombie session was cleaned
   up. Commit 83135a9 (killer) + the cleanup follow-up.
+- 2026-09-30: **Phase 22 deployed** — frozen-turn escalation went live
+  (commits 7d3fba1 A+B + a2eee4c C). The first kickstart after copying
+  the three C files (config/notify/watchdogd) **crashed the daemon on
+  startup**: `watchdogd.py` imports `frozen_nudge_due` from `watchdog.py`
+  (an A+B file) but the app dir still had the pre-Phase-22 `watchdog.py`
+  — the handoff's deploy list had missed it → ImportError, launchd
+  respawn loop (last exit 1, `state = spawn scheduled`). Fixed by also
+  deploying `watchdog.py`; the daemon came back clean (fresh tick,
+  cold-start `health=UNKNOWN` baseline then UP). **1067 tests pass.**
+  **Live verification PENDING**: the gen-DOWN → power-cycle chain (180 s
+  probe + 600 s after_s + shared relay) has not been exercised against a
+  real DGX yet — first real freeze. No staging (outage-test protocol: no
+  staging).
