@@ -1020,6 +1020,40 @@ def test_tick_frozen_multi_record_same_pane_escalates_once(cc_home,
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
 
 
+def test_tick_frozen_eleven_records_same_pane_escalates_once(cc_home,
+                                                              monkeypatch):
+    # Phase 22-D: the 2-record dedup variant at the LIVE scale — the
+    # real 2026-09-29 incident left 11 stale records (rotated-out
+    # connector sessions) that all resolve to the SAME pane. The
+    # per-PANE announce (ctx.froze) must collapse them to ONE
+    # freeze_detected, and the tick-local escalated set must collapse
+    # the escalation to ONE nudge / ONE frozen_nudge push / ONE gen
+    # probe for the whole pane — not 11 of each.
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE,
+                sessions=["cc-proj-a-0a9b"])
+    for nnn in range(1, 12):  # 11 live records, one pane
+        _mk(key="proj-a", nnn=nnn, turn_active=True,
+            tmux="cc-proj-a-0a9b")
+        _stale_prompt(paths.session_dir("proj-a", nnn), now=10_000.0)
+    ctx = _ctx(io, now=10_000.0)
+    for _ in range(2):
+        watchdogd.tick(ctx)  # all 11 WAIT
+    l3 = watchdogd.tick(ctx)  # all 11 FROZEN → ONE freeze push (per pane)
+    assert [l["outcome"] for l in l3["sessions"]] == ["FROZEN"] * 11
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    watchdogd.tick(ctx)  # ticks=3: 900s < 1200s → not due
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    l5 = watchdogd.tick(ctx)  # ticks=4: due → ONE escalation
+    assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
+    assert io.gen_probe_calls == 1
+    assert len([s for s in io.sends if s[-1] == "Enter"]) == 1
+    assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
+    # exactly one freeze announce event across all 11 records
+    assert sum(1 for e in l5["events"] if e.startswith("freeze:")) == 0
+    assert sum(1 for e in l3["events"] if e.startswith("freeze:")) == 1
+
+
 def test_tick_frozen_gen_down_power_cycles(cc_home, monkeypatch):
     # Phase 22-C Wave 4: the generation probe (ONLY on suspicion) goes
     # DOWN (2-fail debounce) while LIVENESS stays UP — a hung vLLM
