@@ -454,6 +454,55 @@ def ps_tree(runner=subprocess.run) -> dict | None:
     return out
 
 
+def parse_etime(etime: str) -> float | None:
+    """cp-069: a BSD ps ``etime`` string → elapsed seconds. Formats
+    (verified on macOS, second-granular): ``MM:SS`` (<1h), ``H:MM:SS``
+    (>=1h), ``D-H:MM:SS`` (>=1d). Malformed → None."""
+    etime = etime.strip()
+    days = 0
+    if "-" in etime:
+        d, etime = etime.split("-", 1)
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+    parts = etime.split(":")
+    if len(parts) == 2:
+        try:
+            m, s = (int(p) for p in parts)
+        except ValueError:
+            return None
+        return m * 60 + s
+    if len(parts) == 3:
+        try:
+            h, m, s = (int(p) for p in parts)
+        except ValueError:
+            return None
+        return days * 86400 + h * 3600 + m * 60 + s
+    return None
+
+
+def process_start_ts(pid: int, now=time.time,
+                     runner=subprocess.run) -> float | None:
+    """cp-069: the epoch seconds when ``pid`` STARTED, via
+    ``ps -o etime=`` (elapsed-time string — :func:`parse_etime`; the
+    start estimate sits within ~1 s of the true start). rc != 0 /
+    runner error / unparseable output → None (the caller degrades: an
+    unknown age means NO kill — a destructive action never runs on an
+    unverified state)."""
+    try:
+        proc = runner(["ps", "-o", "etime=", "-p", str(pid)],
+                      capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    et = parse_etime(proc.stdout.decode(errors="replace"))
+    if et is None:
+        return None
+    return now() - et
+
+
 def list_tmux_panes(session: str,
                     runner=subprocess.run) -> list[dict] | None:
     """Phase 21: the session's panes as ``{"pane", "pid", "path"}``.
@@ -718,6 +767,10 @@ class TickCtx:
     is_alive: object = None  # (pid: int) -> bool
     kill: object = None  # (pid: int) -> str ("term"/"kill"/"dead")
     kill_session: object = None  # (target: str) -> bool (GATE cleanup)
+    # cp-069: (pid: int) -> float | None — the process START ts. The
+    # start-time guard: a /exit marker older than the process start is
+    # not this process's /exit (stale transcript, a --continue replay).
+    process_start_ts: object = None
     exit_hang_killed: set = dataclasses.field(default_factory=set)
     # Phase 22: frozen-turn escalation. gen is a SEPARATE HealthState:
     # the liveness probe feeds UP on every tick (a hung vLLM still
@@ -1345,6 +1398,24 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
                 continue
             if entries is None or not exit_hang_due(entries, now, limit_s):
                 continue
+            # cp-069: the marker must be this process's OWN /exit. The
+            # dir's newest transcript may belong to an OLDER conversation
+            # (a --continue/--resume replay, or a transcript written
+            # before this process started): a marker older than the
+            # process start (minus epsilon) is not ours → no kill. ps is
+            # called ONLY for kill candidates (a no-op pass still writes
+            # zero ps); an unknown start (None) degrades to no-kill —
+            # the next pass retries.
+            start_ts = None
+            if ctx.process_start_ts is not None:
+                try:
+                    start_ts = ctx.process_start_ts(pid)
+                except Exception:
+                    _log_error("exit_hang process_start_ts")
+            if (start_ts is None
+                    or not exit_hang_due(entries, now, limit_s,
+                                         start_ts=start_ts)):
+                continue
             age_s = now - find_exit_marker_ts(entries)
             try:
                 mode = ctx.kill(pid)
@@ -1378,7 +1449,8 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 recover=None, cycle=None, last_cycle_ts=None,
                 record_cycle_ts=None, list_panes=None,
                 ps_snapshot=None, read_transcript=None, kill=None,
-                is_alive=None, kill_session=None, probe_gen=None) -> int:
+                is_alive=None, kill_session=None, probe_gen=None,
+                proc_start=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
@@ -1421,6 +1493,12 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
         kill=kill if kill is not None else kill_process,
         kill_session=kill_session if kill_session is not None
         else kill_tmux_session,
+        # cp-069: the parameter is proc_start (NOT process_start_ts — a
+        # same-named parameter would shadow the module function inside the
+        # default lambda → calling None → crash, the Phase 22 probe_gen
+        # lesson). The start-time guard degrades to "no kill" on None.
+        process_start_ts=(proc_start if proc_start is not None
+                          else (lambda pid: process_start_ts(pid))),
         # Phase 22: the parameter is probe_gen (NOT probe_generation —
         # a same-named parameter would shadow the module function inside
         # the default lambda → calling None → crash)

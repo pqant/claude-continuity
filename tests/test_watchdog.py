@@ -614,6 +614,49 @@ def test_exit_hang_due_activity_before_marker_ignored():
     assert watchdog.exit_hang_due(entries, T0 + 31, 30.0) is True
 
 
+# --- cp-069: the marker must be this process's own ------------------------------
+#
+# read_transcript_entries picks the NEWEST transcript in the project dir by
+# mtime. That file may belong to an OLDER conversation: a --continue/--resume
+# replay re-serves an old tail, or a fresh process is read before its own
+# transcript exists. In both cases the /exit marker predates the process.
+# The discriminator: a marker older than the process START (minus a small
+# epsilon for ps second-granularity) is not this process's /exit -> no kill.
+
+def test_exit_hang_due_false_when_marker_older_than_process_start():
+    # a 2-day-old marker, a process that started an hour ago: not this
+    # process's /exit -> never due
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 172800, 30.0,
+                                  start_ts=T0 + 3600) is False
+
+
+def test_exit_hang_due_true_when_marker_newer_than_process_start():
+    # the REAL hang (20.8h, 2026-09-29): the marker was written by the
+    # process ITSELF, long after its start -> still due
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0,
+                                  start_ts=T0 - 3600) is True
+
+
+def test_exit_hang_due_start_ts_epsilon_boundary():
+    # ps etime is second-granular: a marker a FEW seconds before the
+    # (rounded) start estimate is not yet "older" — the epsilon spares it
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0,
+                                  start_ts=T0 + 3) is True
+    assert watchdog.exit_hang_due(entries, T0 + 3600, 30.0,
+                                  start_ts=T0 + 10) is False
+
+
+def test_exit_hang_due_no_start_ts_keeps_old_behavior():
+    # start_ts=None (no start-time info) -> the guard is INACTIVE: the
+    # pre-cp-069 decision stands (grace + activity only)
+    entries = [_e(T0, "user", MARK_FULL)]
+    assert watchdog.exit_hang_due(entries, T0 + 31, 30.0,
+                                  start_ts=None) is True
+
+
 # --- find_claude_pid -------------------------------------------------------------
 
 def test_find_claude_pid_root_itself_is_claude():
