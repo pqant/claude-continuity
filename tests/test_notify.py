@@ -273,6 +273,15 @@ def test_build_message_frozen_nudge():
     assert b == "proj=spike-repo 007 frozen 23m — ESC + nudge 2/3"
 
 
+def test_build_message_frozen_nudge_picker():
+    # the picker variant (Phase 22-C): frozen pane WITHOUT a turn in
+    # flight — the daemon sent a single ESC, no nudge (nudge=None)
+    t, b, pr = notify.build_message("frozen_nudge", slug="spike-repo",
+                                    nnn=7, frozen_minutes=10)
+    assert (t, pr) == ("🧊 cc-continuity: frozen pane — ESC sent", "urgent")
+    assert b == "proj=spike-repo 007 frozen 10m — no turn active"
+
+
 def test_fmt_minutes():
     assert notify._fmt_minutes(0) == "0m"
     assert notify._fmt_minutes(59 * 60) == "59m"
@@ -291,6 +300,7 @@ def test_watchdog_bodies_under_200_chars():
         ("exit_hang", dict(age_s=10 ** 6, mode="kill")),
         ("frozen_nudge", dict(frozen_minutes=10 ** 9, nudge=99,
                               max_nudges=99)),
+        ("frozen_nudge", dict(frozen_minutes=10 ** 9)),  # picker variant
     ]:
         _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
         assert len(b) <= 200, ev

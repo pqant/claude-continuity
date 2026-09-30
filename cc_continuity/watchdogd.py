@@ -19,12 +19,13 @@ import subprocess
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import ledger, notify, paths, power_plug, state
 from .watchdog import (Episode, HealthState, build_nudge_text, classify,
                        exit_hang_due, find_claude_pid, find_exit_marker_ts,
-                       nudge_action, parse_entry_ts, pane_pending,
-                       power_cycle_due, transcript_slug)
+                       frozen_nudge_due, nudge_action, parse_entry_ts,
+                       pane_pending, power_cycle_due, transcript_slug)
 
 #: P10-D2/P10-P8: the LaunchAgent label (plist file name minus .plist).
 PLIST_LABEL = "com.claude-continuity.watchdog"
@@ -109,6 +110,79 @@ def probe_health(cfg: dict) -> bool:
             ["curl", "-s", "-o", "/dev/null", "-m", "5",
              "-w", "%{http_code}", url],
             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and \
+        proc.stdout.decode(errors="replace").strip() == "200"
+
+
+# Phase 22 (frozen-turn escalation): the liveness probe (/health) says UP even
+# when vLLM is HUNG (frozen generation, 2026-09-29 morning incident — /health
+# 200 while a 5-token completion never returns). The generation probe asks the
+# model to actually generate.
+GEN_PROBE_MODELS_TIMEOUT_S = 10
+
+
+def _gen_base_url(health_url: str) -> str:
+    """``http://127.0.0.1:8000/health`` → ``http://127.0.0.1:8000`` — the
+    vLLM server root (scheme+netloc) the /v1/* endpoints hang off. A URL
+    without a path is its own root; a URL that cannot be parsed is kept
+    verbatim (minus a trailing slash) so a typo degrades exactly like
+    ``probe_health`` does."""
+    parts = urlsplit(health_url)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return health_url.rstrip("/")
+
+
+def probe_generation(cfg: dict, runner=subprocess.run) -> bool:
+    """Phase 22: is the model actually GENERATING? Two steps (any failure
+    → False; the caller debounces, 2 fails → DOWN):
+
+    1. ``GET {base}/v1/models`` (short timeout) — the model NAME is asked
+       from the server, never the config, so a box restart / model change
+       (e.g. 2.1.209 CC + different vLLM model) adapts itself.
+    2. ``POST {base}/v1/chat/completions`` with a 5-token "ping"
+       completion — timeout ``watchdog_gen_probe_timeout_s`` (default
+       180 s); rc==0 AND HTTP 200 (the ``-w %{http_code}`` pattern, like
+       ``probe_health``). A hung generation never answers: the timeout
+       IS the detection.
+
+    ``base`` = ``watchdog_health_url`` without its trailing path
+    (``_gen_base_url``). Empty URL → True (liveness-only mode, same as
+    ``probe_health`` — the probe is a no-op, not a failure)."""
+    url = str(cfg.get("watchdog_health_url") or "").strip()
+    if not url:
+        return True
+    base = _gen_base_url(url)
+    try:
+        proc = runner(["curl", "-s", "-m",
+                       str(GEN_PROBE_MODELS_TIMEOUT_S),
+                       f"{base}/v1/models"],
+                      capture_output=True,
+                      timeout=GEN_PROBE_MODELS_TIMEOUT_S + 10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        model = json.loads(proc.stdout.decode(errors="replace"))
+        model = model["data"][0]["id"]
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return False
+    if not isinstance(model, str) or not model:
+        return False
+    timeout_s = float(cfg.get("watchdog_gen_probe_timeout_s", 180))
+    body = json.dumps({"model": model, "max_tokens": 5,
+                       "messages": [{"role": "user", "content": "ping"}]})
+    try:
+        proc = runner(["curl", "-s", "-o", "/dev/null",
+                       "-m", str(int(timeout_s)),
+                       "-X", "POST", f"{base}/v1/chat/completions",
+                       "-H", "Content-Type: application/json",
+                       "-d", body,
+                       "-w", "%{http_code}"],
+                      capture_output=True, timeout=timeout_s + 10)
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0 and \
@@ -573,12 +647,24 @@ def _last_nudge_text(sdir) -> str | None:
     return None
 
 
-def _seed_froze() -> set:
-    """P10-P7/D8: a freeze already announced before the daemon restart
-    (a ``watchdog_freeze`` ledger entry not followed by a
-    ``user_prompt``) is not re-pushed."""
+def _seed_froze(list_sessions=list_tmux_sessions) -> set:
+    """P10-P7/D8 (Phase 22: per-TARGET): a freeze already announced
+    before the daemon restart (a ``watchdog_freeze`` ledger entry not
+    followed by a ``user_prompt``) is not re-pushed. The dedup key is
+    the PANE (the resolved target), not (key, nnn) — stale records may
+    resolve to the same pane, and a per-record key would re-announce
+    one frozen pane N times. ``list_sessions`` is injectable: the
+    daemon uses the default (real tmux); tests pass a fake so seeding
+    never touches a live tmux server (Phase 21 GATE lesson). With no
+    tmux server (``sessions is None``) ``resolve_pane`` keeps the
+    hook-recorded field — the target is still valid for dedup."""
+    try:
+        sessions = list_sessions()
+    except Exception:
+        _log_error("list_sessions")
+        sessions = None
     out = set()
-    for key, nnn, _rec in collect_live_sessions():
+    for key, nnn, rec in collect_live_sessions():
         try:
             entries = ledger.read(paths.session_dir(key, nnn))
         except OSError:
@@ -589,8 +675,11 @@ def _seed_froze() -> set:
                 frozen = True
             elif e.get("type") == "user_prompt":
                 frozen = False
-        if frozen:
-            out.add((key, nnn))
+        if not frozen:
+            continue
+        target = resolve_pane(rec, notify.project_slug(key), sessions)
+        if target is not None:
+            out.add(target)
     return out
 
 
@@ -606,7 +695,9 @@ class TickCtx:
     health: HealthState
     episodes: dict      # (key, nnn) -> Episode
     prev_captures: dict  # (key, nnn) -> (capture, unchanged_ticks)
-    froze: set          # (key, nnn) freeze already pushed this run
+    froze: set          # target panes whose freeze was already pushed
+                        # this run (Phase 22: per-PANE — stale records
+                        # may share a pane)
     probe: object        # () -> bool
     capture: object      # (target: str) -> str | None
     list_sessions: object  # () -> list[str] | None
@@ -628,6 +719,13 @@ class TickCtx:
     kill: object = None  # (pid: int) -> str ("term"/"kill"/"dead")
     kill_session: object = None  # (target: str) -> bool (GATE cleanup)
     exit_hang_killed: set = dataclasses.field(default_factory=set)
+    # Phase 22: frozen-turn escalation. gen is a SEPARATE HealthState:
+    # the liveness probe feeds UP on every tick (a hung vLLM still
+    # serves /health), so it could never debounce DOWN; gen is probed
+    # ONLY on suspicion (the frozen branch).
+    gen: HealthState = dataclasses.field(default_factory=HealthState)
+    probe_generation: object = None  # () -> bool (Phase 22 gen probe)
+    frozen_esc: set = dataclasses.field(default_factory=set)
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -706,13 +804,20 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
                 outage: float | None = None,
                 cycle_ts: float | None = None,
                 stalled: bool = False,
-                sent_text: str | None = None) -> None:
+                sent_text: str | None = None,
+                frozen_minutes: int | None = None) -> None:
     """P10-D7 nudge state machine, executed with side effects (the
     daemon owns them — the core stays pure, P10-P1).
 
     Phase 19: ``outage``/``cycle_ts`` build the OUTAGE-form nudge text
     (dgx_up recovery — the model is back, the turn died with it);
     otherwise the plain form (``stalled`` picks the STALLED line).
+    Phase 22: ``frozen_minutes`` (set by the frozen-turn escalation)
+    builds the FROZEN form — the pane was frozen with the turn in
+    flight and the daemon just ESC-cancelled it. Priority: OUTAGE >
+    FROZEN > STALLED/PLAIN (pinned in test_watchdog). On the first
+    physical NUDGE a ``frozen_nudge`` push goes out instead of
+    ``turn_dead``.
     ``sent_text``: the text of the LAST nudge the daemon actually sent
     (``_last_nudge_text``) — the pending check must match THAT, because
     the freshly built text's context block differs per tick. On the
@@ -732,6 +837,8 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
     if outage is not None:
         text = build_nudge_text(base, now=now, down_since=outage,
                                 cycle_ts=cycle_ts)
+    elif frozen_minutes is not None:
+        text = build_nudge_text(base, now=now, frozen_minutes=frozen_minutes)
     else:
         text = build_nudge_text(base, now=now, idle_minutes=idle_minutes,
                                 stalled=stalled)
@@ -777,9 +884,17 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
         ep.n += 1
         ep.nudge_ts = now
         if action == "NUDGE":
-            _push(cfg, "turn_dead", slug=slug, nnn=nnn,
-                  idle_minutes=idle_minutes, max_nudges=max_nudges)
-            line["events"].append(f"turn_dead:{key}:{nnn:03d}")
+            if frozen_minutes is not None:
+                # Phase 22: the frozen-turn escalation — a distinct
+                # push family (title "frozen turn — escalated")
+                _push(cfg, "frozen_nudge", slug=slug, nnn=nnn,
+                      frozen_minutes=frozen_minutes, nudge=ep.n,
+                      max_nudges=max_nudges)
+                line["events"].append(f"frozen_nudge:{key}:{nnn:03d}")
+            else:
+                _push(cfg, "turn_dead", slug=slug, nnn=nnn,
+                      idle_minutes=idle_minutes, max_nudges=max_nudges)
+                line["events"].append(f"turn_dead:{key}:{nnn:03d}")
         # RESEND: ledger-only (P10-P7) — no push
         line["events"].append(f"nudge:{key}:{nnn:03d}")
     elif action == "SEND_ENTER":
@@ -866,6 +981,105 @@ def _recover_stuck_turns(ctx: TickCtx, sessions, line: dict,
         line["events"].append(f"dgx_up_recovery:{key}:{nnn:03d}")
 
 
+def _escalate_frozen(ctx: TickCtx, key: str, nnn: int, target: str,
+                     cap: str, last_ts: float | None, now: float,
+                     line: dict, ticks: int, sent_text: str | None,
+                     sessions, focus: tuple[str, int] | None) -> None:
+    """Phase 22-C: the FROZEN-with-turn escalation (cp-063 approved
+    design). The freeze outlived ``watchdog_frozen_nudge_minutes``:
+    first nudge the pane (ESC force-cancel + the frozen-form text —
+    ``_nudge_path`` owns the episode machine: RESEND/SEND_ENTER/
+    GIVE_UP continue on later ticks), THEN probe generation. The probe
+    runs ONLY on suspicion (this function is called from nowhere else)
+    — a hung vLLM still serves /health, so the per-tick LIVENESS
+    probe could never see it; the result feeds the SEPARATE gen
+    HealthState (2-fail debounce). Sustained gen-DOWN → the SHARED
+    power cycle (after_s gate + the liveness cooldown file);
+    gen-DOWN→UP → dgx_up push + _recover_stuck_turns (the existing
+    outage recovery, with the gen window as the outage context). When
+    ``ctx.probe_generation`` is None (old ctx, some tests) the
+    escalation degrades to the nudge only. Never raises (P10-D12)."""
+    interval_s = float(ctx.cfg.get("watchdog_interval_s", 300))
+    frozen_minutes = int(ticks * interval_s // 60)
+    _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
+                frozen_minutes=frozen_minutes, sent_text=sent_text)
+    if ctx.probe_generation is None:
+        return  # degrade: gen probe not wired
+    try:
+        ok = bool(ctx.probe_generation())
+    except Exception:
+        _log_error("probe_generation")
+        ok = False
+    gen_down_since = ctx.gen.down_since  # BEFORE the feed (it clears on "up")
+    trans = ctx.gen.feed(ok, now)
+    if trans == "down":
+        line["events"].append("gen_down")
+    if ctx.gen.status == "DOWN":
+        # sustained gen-down: the transition tick (down age 0 — the
+        # after_s gate inside keeps it off) AND every later tick,
+        # until the relay fires. SHARED cooldown with liveness.
+        _try_power_cycle(ctx, line, ctx.gen, now)
+        return
+    if trans == "up":
+        # the model is back: the existing outage recovery (dgx_up
+        # push + nudge each stuck mid-turn session) — liveness was
+        # never DOWN, so it can only fire on this gen transition
+        _push(ctx.cfg, "dgx_up", slug="", nnn=0,
+              downtime_s=(now - gen_down_since) if gen_down_since else 0.0)
+        line["events"].append("dgx_up")
+        _recover_stuck_turns(ctx, sessions, line, focus, gen_down_since)
+
+
+def _try_power_cycle(ctx: TickCtx, line: dict, hs: HealthState,
+                     now: float) -> None:
+    """Phase 13 (design 7899), shared by Phase 22: the auto
+    power-cycle gate — sustained DOWN past power_cycle_after_s +
+    cooldown clear + plug configured -> POST the localhost endpoint
+    /cycle. A FAILED attempt does not consume the cooldown (broken
+    plug/endpoint): it retries next tick; only a real relay cycle
+    arms the 30-min window. SHARED by the LIVENESS health (tick 1b)
+    and the generation health (_escalate_frozen): one relay, one
+    30-min window (the cooldown file is shared). Never raises."""
+    if ctx.cycle is None or hs.status != "DOWN":
+        return
+    if not str(ctx.cfg.get("power_plug_ip") or "").strip():
+        return
+    try:
+        last = ctx.last_cycle_ts() if ctx.last_cycle_ts is not None \
+            else None
+    except Exception:
+        _log_error("last_cycle_ts")
+        last = None
+    if not power_cycle_due(hs.status, hs.down_since, now, last,
+                           float(ctx.cfg.get("power_cycle_after_s", 600)),
+                           float(ctx.cfg.get("power_cycle_cooldown_s",
+                                          1800))):
+        return
+    try:
+        res = ctx.cycle()
+    except Exception:
+        _log_error("cycle")
+        res = None
+    res = res if isinstance(res, dict) else {}
+    downtime_s = now - (hs.down_since or now)
+    line["power_cycle"] = {"ok": bool(res.get("ok")),
+                           "state": res.get("state", "unknown"),
+                           "downtime_s": downtime_s}
+    if res.get("ok"):
+        if ctx.record_cycle_ts is not None:
+            try:
+                ctx.record_cycle_ts(now)
+            except Exception:
+                _log_error("record_cycle")
+        _push(ctx.cfg, "dgx_power_cycle", slug="", nnn=0,
+              host=notify.host(), downtime_s=downtime_s)
+        line["events"].append("power_cycle")
+    else:
+        line["events"].append(
+            "power_cycle_failed:"
+            + str(res.get("error", "unknown"))[:60])
+
+
 def tick(ctx: TickCtx) -> dict:
     """One watchdog tick: probe → health transitions → per-live-session
     (verify → resolve → capture → classify → act). Returns the tick's
@@ -921,42 +1135,10 @@ def tick(ctx: TickCtx) -> dict:
     #     POST the localhost endpoint /cycle. A FAILED attempt does not
     #     consume the cooldown (broken plug/endpoint): it retries next
     #     tick; only a real relay cycle arms the 30-min window.
-    if (ctx.cycle is not None and ctx.health.status == "DOWN"
-            and str(ctx.cfg.get("power_plug_ip") or "").strip()):
-        try:
-            last = ctx.last_cycle_ts() if ctx.last_cycle_ts is not None \
-                else None
-        except Exception:
-            _log_error("last_cycle_ts")
-            last = None
-        if power_cycle_due(ctx.health.status, ctx.health.down_since, now,
-                           last,
-                           float(ctx.cfg.get("power_cycle_after_s", 600)),
-                           float(ctx.cfg.get("power_cycle_cooldown_s",
-                                          1800))):
-            try:
-                res = ctx.cycle()
-            except Exception:
-                _log_error("cycle")
-                res = None
-            res = res if isinstance(res, dict) else {}
-            downtime_s = now - (ctx.health.down_since or now)
-            line["power_cycle"] = {"ok": bool(res.get("ok")),
-                                   "state": res.get("state", "unknown"),
-                                   "downtime_s": downtime_s}
-            if res.get("ok"):
-                if ctx.record_cycle_ts is not None:
-                    try:
-                        ctx.record_cycle_ts(now)
-                    except Exception:
-                        _log_error("record_cycle")
-                _push(ctx.cfg, "dgx_power_cycle", slug="", nnn=0,
-                      host=notify.host(), downtime_s=downtime_s)
-                line["events"].append("power_cycle")
-            else:
-                line["events"].append(
-                    "power_cycle_failed:"
-                    + str(res.get("error", "unknown"))[:60])
+    #     Phase 22: the SAME gate (and the SAME cooldown file) serves
+    #     the generation health in _escalate_frozen — one relay, one
+    #     30-min window.
+    _try_power_cycle(ctx, line, ctx.health, now)
 
     # 2. live sessions (P10-D5)
     try:
@@ -983,6 +1165,12 @@ def tick(ctx: TickCtx) -> dict:
     #     flight is not re-nudged on a later UP tick.
     if transition == "up":
         _recover_stuck_turns(ctx, sessions, line, focus, down_since)
+
+    # Phase 22-C: per-TICK frozen-escalation dedup (tick-local, not
+    # per-RUN — a per-run set would break the episode machine's
+    # RESEND/SEND_ENTER/GIVE_UP flow on later ticks). Stale records
+    # sharing a pane enter the escalation at most once per tick.
+    escalated: set = set()
 
     for key, nnn, rec in collect_live_sessions():
         sid = (key, nnn)
@@ -1045,11 +1233,45 @@ def tick(ctx: TickCtx) -> dict:
             # rots in the input box). Submit it with a bare Enter.
             _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
                         sent_text=sent_text)
-        elif outcome == "FROZEN" and sid not in ctx.froze:
-            _push(ctx.cfg, "freeze_detected", slug=slug, nnn=nnn)
-            ledger.append(sdir, {"type": "watchdog_freeze"})
-            ctx.froze.add(sid)
-            line["events"].append(f"freeze:{key}:{nnn:03d}")
+        elif outcome == "FROZEN":
+            # Phase 22-C: per-PANE (target) announce dedup — stale
+            # records may resolve to the same pane; ONE announcement
+            # per pane per run.
+            if target not in ctx.froze:
+                _push(ctx.cfg, "freeze_detected", slug=slug, nnn=nnn)
+                ledger.append(sdir, {"type": "watchdog_freeze"})
+                ctx.froze.add(target)
+                line["events"].append(f"freeze:{key}:{nnn:03d}")
+            if rec.get("turn_active"):
+                # a turn is in flight: once the freeze outlives the
+                # threshold, escalate (ESC + frozen-form nudge + push,
+                # then the gen probe)
+                if (target not in escalated
+                        and _may_nudge(ctx, focus, key, nnn)
+                        and frozen_nudge_due(
+                            ticks, True,
+                            frozen_minutes=float(ctx.cfg.get(
+                                "watchdog_frozen_nudge_minutes", 20)),
+                            interval_s=float(
+                                ctx.cfg.get("watchdog_interval_s",
+                                            300)))):
+                    _escalate_frozen(ctx, key, nnn, target, cap,
+                                     last_ts, now, line, ticks,
+                                     sent_text, sessions, focus)
+                    escalated.add(target)
+            elif target not in ctx.frozen_esc:
+                # picker (no turn in flight): ONE force-cancel Esc +
+                # push, no nudge (no model call — no _may_nudge gate)
+                try:
+                    ctx.send(target, "Escape")
+                except Exception:
+                    _log_error("send")
+                _push(ctx.cfg, "frozen_nudge", slug=slug, nnn=nnn,
+                      frozen_minutes=int(ticks * float(
+                          ctx.cfg.get("watchdog_interval_s",
+                                      300)) // 60))
+                ctx.frozen_esc.add(target)
+                line["events"].append(f"frozen_esc:{key}:{nnn:03d}")
     return line
 
 
@@ -1156,7 +1378,7 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 recover=None, cycle=None, last_cycle_ts=None,
                 record_cycle_ts=None, list_panes=None,
                 ps_snapshot=None, read_transcript=None, kill=None,
-                is_alive=None, kill_session=None) -> int:
+                is_alive=None, kill_session=None, probe_gen=None) -> int:
     """The watchdog loop (P10-D2 ``watchdog run`` — the plist AND the
     integration tests use it). ``watchdog_enabled: false`` → return 0
     immediately (after config load, before the loop — no tick, no I/O).
@@ -1199,6 +1421,11 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
         kill=kill if kill is not None else kill_process,
         kill_session=kill_session if kill_session is not None
         else kill_tmux_session,
+        # Phase 22: the parameter is probe_gen (NOT probe_generation —
+        # a same-named parameter would shadow the module function inside
+        # the default lambda → calling None → crash)
+        probe_generation=(probe_gen if probe_gen is not None
+                          else (lambda: probe_generation(cfg))),
     )
     ticks = 0
     last_tick = None

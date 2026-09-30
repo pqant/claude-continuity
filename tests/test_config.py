@@ -143,6 +143,16 @@ def test_defaults_have_phase10_keys():
         "sudo -n /usr/local/libexec/dgx-network-recovery"
 
 
+def test_defaults_have_phase22_keys():
+    # Phase 22 frozen-turn escalation: a frozen pane with the turn in
+    # flight escalates after this many frozen minutes (at 300 s ticks,
+    # ticks >= 4 = 20 min). The generation probe timeout must cover a
+    # slow-but-healthy completion (healthy box: ~0.5 s; a hung vLLM
+    # generation is exactly what the probe is looking for).
+    assert config.DEFAULTS["watchdog_frozen_nudge_minutes"] == 20
+    assert config.DEFAULTS["watchdog_gen_probe_timeout_s"] == 180
+
+
 def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
     (cc_home / "config.json").write_text(json.dumps({
         "watchdog_enabled": True,

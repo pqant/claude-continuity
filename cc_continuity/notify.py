@@ -258,9 +258,16 @@ def build_message(event: str, *, slug: str, nnn: int,
         b = (f"proj={slug} {p} /exit hung {int(fields['age_s'])}s — "
              f"killed ({fields['mode']})")
     elif event == "frozen_nudge":
-        t, pr = "🧊 cc-continuity: frozen turn — escalated", "urgent"
-        b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
-             f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")
+        if fields.get("nudge") is None:
+            # picker variant (Phase 22-C): frozen pane WITHOUT a turn in
+            # flight — the daemon sent a single ESC, no nudge
+            t, pr = "🧊 cc-continuity: frozen pane — ESC sent", "urgent"
+            b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
+                 "no turn active")
+        else:
+            t, pr = "🧊 cc-continuity: frozen turn — escalated", "urgent"
+            b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
+                 f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")
     else:
         raise ValueError(f"unknown notify event {event!r}")
     if len(b) > 200:
