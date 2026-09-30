@@ -36,7 +36,7 @@ class FakeIO:
     def __init__(self, pane=PROMPT_PANE, health_ok=True, sessions=None,
                  panes=None, procmap=None, transcript=None,
                  alive_pids=None, kill_result="term",
-                 kill_session_result=True, gen_ok=True):
+                 kill_session_result=True, gen_ok=True, process_start=0.0):
         self.pane = pane
         self.ok = health_ok
         self.sessions = sessions
@@ -60,6 +60,10 @@ class FakeIO:
         self.kill_session_calls = []
         self.ps_calls = 0
         self.read_calls = []
+        # cp-069: process start ts for the start-time guard. 0.0 = an OLD
+        # process (the real-hang default, keeps existing tests meaningful);
+        # None = ps failure / unknown (the degrade path).
+        self.process_start = process_start
         # Phase 22: the generation probe (frozen-turn escalation)
         self.gen_ok = gen_ok
         self.gen_probe_calls = 0
@@ -81,6 +85,9 @@ class FakeIO:
 
     def is_alive(self, pid):
         return pid in self.alive_pids
+
+    def process_start_ts(self, pid):
+        return self.process_start
 
     def kill(self, pid):
         self.kills.append(pid)
@@ -1502,7 +1509,8 @@ def _exit_ctx(io, cfg_over=None, now=10_000.0):
                    list_panes=io.list_panes, ps_snapshot=io.ps_snapshot,
                    read_transcript=io.read_transcript,
                    is_alive=io.is_alive, kill=io.kill,
-                   kill_session=io.kill_session)
+                   kill_session=io.kill_session,
+                   process_start_ts=io.process_start_ts)
 
 
 # --- exit_hang_limit_s -----------------------------------------------------------
@@ -1980,6 +1988,86 @@ def test_check_exit_hangs_each_project_killed_ps_once(cc_home, monkeypatch):
     assert sorted(io.kills) == [24822, 25652]
     assert io.ps_calls == 1  # one ps scan for the whole pass
     assert {a["key"] for a in actions} == {"proj-a", "proj-b"}
+
+
+# --- cp-069: the marker must be this process's own /exit -------------------------
+#
+# The 2026-09-30 incident: every FRESH connector claude was killed ~5 s
+# after launch because read_transcript_entries picked the dir's newest
+# transcript — a 2-day-old file whose tail is an OLD /exit marker. The
+# guard: a marker older than the process START is not this process's /exit.
+
+def test_check_exit_hangs_stale_marker_fresh_process_not_killed(
+        cc_home, monkeypatch):
+    # the dir's newest transcript holds a 2-hour-old marker; the pane's
+    # claude started 10 s ago (a --continue replay / a pre-start
+    # transcript) -> no kill, no push, no log, NOT zombie-guarded
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript=_exit_entries(now=10_000.0, age=7200.0),
+                  process_start=10_000.0 - 10.0)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert pushes == []
+    assert not (paths.logs_dir() / "watchdog.log").is_file()
+    assert 24822 not in ctx.exit_hang_killed
+
+
+def test_check_exit_hangs_unknown_process_start_not_killed(cc_home,
+                                                           monkeypatch):
+    # ps race: the start time is unknown -> degrade to no-kill (a
+    # destructive action never runs on an unverified state; the next
+    # pass retries)
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(process_start=None)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert pushes == []
+    assert not (paths.logs_dir() / "watchdog.log").is_file()
+    assert 24822 not in ctx.exit_hang_killed
+
+
+def test_process_start_ts_ps_command_and_seconds():
+    cmds = []
+
+    def run(cmd, **kw):
+        cmds.append(cmd)
+        return _P(0, b"  03:45\n")
+
+    got = watchdogd.process_start_ts(777, now=lambda: 100_000.0, runner=run)
+    assert cmds == [["ps", "-o", "etime=", "-p", "777"]]
+    assert got == 100_000.0 - 225.0
+
+
+def test_process_start_ts_hours_and_days_forms():
+    # BSD etime: H:MM:SS (>=1h) and D-H:MM:SS (>=1d)
+    h = watchdogd.process_start_ts(1, now=lambda: 100_000.0,
+                                   runner=lambda *a, **k: _P(0, b"03:08:00\n"))
+    assert h == 100_000.0 - (3 * 3600 + 8 * 60)
+    d = watchdogd.process_start_ts(1, now=lambda: 100_000.0,
+                                   runner=lambda *a, **k:
+                                   _P(0, b"03-03:49:06\n"))
+    assert d == 100_000.0 - (3 * 86400 + 3 * 3600 + 49 * 60 + 6)
+
+
+def test_process_start_ts_failure_none():
+    # rc != 0 / runner error / malformed output -> None (the caller
+    # degrades to no-kill)
+    assert watchdogd.process_start_ts(1, now=lambda: 0.0,
+                                      runner=lambda *a, **k: _P(1, b"")) \
+        is None
+
+    def boom(*a, **k):
+        raise OSError("no ps")
+
+    assert watchdogd.process_start_ts(1, now=lambda: 0.0, runner=boom) \
+        is None
+    assert watchdogd.process_start_ts(1, now=lambda: 0.0,
+                                      runner=lambda *a, **k: _P(0, b"junk\n")) \
+        is None
 
 
 # --- kill_tmux_session (GATE: zombie session / progress-pane cleanup) ---------------

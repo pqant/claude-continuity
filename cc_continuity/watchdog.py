@@ -22,7 +22,7 @@ __all__ = [
     "pane_idle", "pane_pending", "power_cycle_due",
     "EXIT_MARKER", "EXIT_CEREMONY_PREFIXES", "EXIT_SYNTHETIC",
     "parse_entry_ts", "transcript_slug", "find_exit_marker_ts",
-    "exit_hang_due", "find_claude_pid",
+    "exit_hang_due", "EXIT_HANG_START_EPS_S", "find_claude_pid",
 ]
 
 # --- liveness outcomes (P10-D6) ---------------------------------------------
@@ -352,6 +352,11 @@ EXIT_CEREMONY_PREFIXES = ("<local-command-stdout>",
                           "<local-command-caveat>")
 #: The assistant synthetic line CC writes seconds after a hung /exit.
 EXIT_SYNTHETIC = "No response requested."
+#: cp-069: tolerance for the start-time guard. ``ps etime`` is
+#: second-granular, so the computed start ts can sit up to ~1 s AFTER the
+#: true start; a marker a few seconds before that estimate is not yet
+#: "older than the process". Days-old stale markers are far outside it.
+EXIT_HANG_START_EPS_S = 5.0
 
 
 def parse_entry_ts(ts: str) -> float | None:
@@ -411,7 +416,7 @@ def _is_exit_ceremony(etype: str, text: str) -> bool:
 
 
 def exit_hang_due(entries, now: float, limit_s: float,
-                  alive: bool = True) -> bool:
+                  alive: bool = True, start_ts: float | None = None) -> bool:
     """True when a live CC process has hung on /exit past the grace.
 
     ``entries``: list of ``(ts, etype, text)``. Decision (cp-059
@@ -422,9 +427,17 @@ def exit_hang_due(entries, now: float, limit_s: float,
     a tool-only assistant turn with empty text (a retry / a prompt
     arriving during a long TTFT keeps the process alive).
     ``alive=False``: the process is already gone → nothing to kill.
+    ``start_ts`` (cp-069): the process START ts. The dir's newest
+    transcript may belong to an OLDER conversation (a --continue/--resume
+    replay, or a transcript written before this process started): a
+    marker older than ``start_ts`` (minus :data:`EXIT_HANG_START_EPS_S`)
+    is not this process's /exit → never due. ``None`` = no start-time
+    info → the guard is inactive.
     """
     marker_ts = find_exit_marker_ts(entries)
     if marker_ts is None or not alive:
+        return False
+    if start_ts is not None and marker_ts < start_ts - EXIT_HANG_START_EPS_S:
         return False
     if now - marker_ts <= limit_s:
         return False

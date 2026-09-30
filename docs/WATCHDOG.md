@@ -249,6 +249,20 @@ Detection (all per pass, one `ps` scan total):
    `/exit` marker is older than the grace AND has **no user prompt
    after the marker** (a prompt = the user gave up on `/exit` —
    never touched);
+   **Start-time guard (Phase 21.1, 2026-09-30):** the marker must be
+   **this process's own** `/exit`. `read_transcript_entries` picks the
+   dir's NEWEST transcript by mtime — that file can belong to an OLDER
+   conversation (a `--continue`/`--resume` replay re-serves an old
+   tail, or a fresh process is read before its own transcript exists).
+   2026-09-30 incident: every fresh connector `claude` was killed ~5 s
+   after launch against a 2-day-old marker. The guard: the process
+   start ts (`ps -o etime= -p <pid>`, second-granular) is fetched ONLY
+   for kill candidates; a marker older than start −
+   `EXIT_HANG_START_EPS_S` (5 s) → **no kill**. The real 20.8 h hang is
+   unaffected (its marker was written by the process itself, hours
+   after its start). An unknown start (ps race/failure) degrades to
+   **no kill** — a destructive action never runs on an unverified
+   state; the next pass retries;
 4. kill: SIGTERM, 5 s, then SIGKILL; then the **GATE cleanup** —
    `tmux kill-session -t <target>`: the killed claude was the
    session's main pane, and the orphaned **progress-pane would keep
@@ -509,3 +523,16 @@ line is submitted with a bare Enter on the next unchanged tick.
   probe + 600 s after_s + shared relay) has not been exercised against a
   real DGX yet — first real freeze. No staging (outage-test protocol: no
   staging).
+- 2026-09-30: **Phase 21.1 — start-time guard (stale-marker
+  false-positive fix).** The 2026-09-30 incident: every FRESH connector
+  `claude` was killed ~5 s after launch (4 kills 09:56–09:58, nnn
+  11–14). Root cause: `read_transcript_entries` picks the project dir's
+  NEWEST transcript by mtime; the connector dir's newest file was a
+  2-day-old transcript whose tail is an OLD `/exit` marker (09-28
+  20:44). A fresh process (and `--continue`/`--resume` replays) matched
+  that stale marker → `exit_hang_due` True → false-positive kill. The
+  guard (this process's OWN marker only) was implemented TDD: 9 new
+  tests, **1076 pass**. `watchdog.py` + `watchdogd.py` deployed via the
+  `diff -q` loop (zero diff after), daemon restarted (PID 52997, clean,
+  no errors.log). **Live verification PENDING**: the user re-launches
+  the connector CC → no kill. No staging (outage-test protocol).
