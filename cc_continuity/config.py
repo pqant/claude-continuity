@@ -65,6 +65,20 @@ DEFAULTS: dict = {
     # be revived at once and overload the model. False (default) = legacy
     # behavior, every eligible session may be nudged.
     "watchdog_nudge_only_most_recent": False,
+    # Phase 22 frozen-turn escalation: a FROZEN pane with the turn in flight
+    # (turn_active) is escalated (ESC force-cancel + frozen-form nudge +
+    # generation probe) once it has been frozen this many minutes (consecutive
+    # unchanged full ticks × interval). A frozen pane WITHOUT a turn (a
+    # picker, a legitimate user wait) gets a single ESC + push at FROZEN and
+    # never a nudge.
+    "watchdog_frozen_nudge_minutes": 20,
+    # Phase 22: the curl timeout for the generation probe's
+    # /v1/chat/completions call (the 5-token "ping" completion). A healthy
+    # box answers in well under a second; a HUNG vLLM generation (vLLM
+    # frozen, /health still 200) never answers, so the timeout IS the
+    # detection. Must cover a slow-but-healthy generation, not just the
+    # healthy median.
+    "watchdog_gen_probe_timeout_s": 180,
     # On a failed health probe the daemon runs this (macOS root wrapper,
     # passwordless sudo) to re-establish the DGX route, then re-probes. Empty
     # string disables the step. See setup_dgx_network_recovery.sh.

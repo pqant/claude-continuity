@@ -7,6 +7,7 @@ run_forever disabled exit 0."""
 import json
 import os
 import signal
+import subprocess
 
 import pytest
 
@@ -35,7 +36,7 @@ class FakeIO:
     def __init__(self, pane=PROMPT_PANE, health_ok=True, sessions=None,
                  panes=None, procmap=None, transcript=None,
                  alive_pids=None, kill_result="term",
-                 kill_session_result=True):
+                 kill_session_result=True, gen_ok=True):
         self.pane = pane
         self.ok = health_ok
         self.sessions = sessions
@@ -59,6 +60,9 @@ class FakeIO:
         self.kill_session_calls = []
         self.ps_calls = 0
         self.read_calls = []
+        # Phase 22: the generation probe (frozen-turn escalation)
+        self.gen_ok = gen_ok
+        self.gen_probe_calls = 0
 
     def list_panes(self, target):
         if self.panes is None:
@@ -100,6 +104,16 @@ class FakeIO:
             return self.ok[min(self.probe_calls - 1, len(self.ok) - 1)]
         return self.ok
 
+    def probe_generation(self):
+        self.gen_probe_calls += 1
+        if isinstance(self.gen_ok, Exception):
+            raise self.gen_ok
+        if isinstance(self.gen_ok, list):
+            # a list is a call sequence; the last value repeats
+            return self.gen_ok[min(self.gen_probe_calls - 1,
+                                   len(self.gen_ok) - 1)]
+        return self.gen_ok
+
     def recover(self):
         self.recover_calls += 1
         return self.recover_result
@@ -138,7 +152,8 @@ def _ctx(io, cfg_over=None, now=10_000.0, down=False):
                   capture=io.capture, list_sessions=io.list_sessions,
                   send=io.send, sleep=io.sleep, recover=io.recover,
                   cycle=io.cycle, last_cycle_ts=io.last_cycle_ts,
-                  record_cycle_ts=io.record_cycle_ts, now=now)
+                  record_cycle_ts=io.record_cycle_ts, now=now,
+                  probe_generation=io.probe_generation)
     if down:
         ctx.health.feed(False, now)
         ctx.health.feed(False, now)
@@ -209,9 +224,10 @@ def test_run_forever_runs_max_ticks(cc_home):
                                now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send)
+                               send=io.send, probe_gen=io.probe_generation)
     assert rc == 0
     assert io.probe_calls == 3
+    assert io.gen_probe_calls == 0  # no suspicion → no gen probe
     assert (paths.logs_dir() / "watchdog.log").is_file()
 
 
@@ -228,7 +244,7 @@ def test_run_forever_tick_exception_survives(cc_home):
                                now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send)
+                               send=io.send, probe_gen=io.probe_generation)
     assert rc == 0
     assert io.probe_calls == 2  # continued past the crashed tick
     assert (paths.logs_dir() / "errors.log").is_file()
@@ -252,7 +268,8 @@ def test_run_forever_fast_pass_every_iteration_tick_at_interval(cc_home):
                                ps_snapshot=io.ps_snapshot,
                                read_transcript=io.read_transcript,
                                is_alive=io.is_alive, kill=io.kill,
-                               kill_session=io.kill_session)
+                               kill_session=io.kill_session,
+                               probe_gen=io.probe_generation)
     assert rc == 0
     # two full ticks (first immediate at now=0, second at now=300)
     assert io.probe_calls == 2
@@ -335,6 +352,101 @@ def test_last_ledger_ts_excludes_watchdog_entries(cc_home):
 
 def test_probe_health_empty_url_is_liveness_only():
     assert watchdogd.probe_health({"watchdog_health_url": ""}) is True
+
+
+# --- Phase 22 generation probe (frozen-turn escalation) -----------------------
+
+
+class _FakeGenRunner:
+    """Stands in for ``subprocess.run`` for ``probe_generation``: a list of
+    fixed per-call results ``(stdout, rc)`` or an Exception (last repeats).
+    Records every call — the two-step probe is asserted on the call list."""
+
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((cmd, kw))
+        item = self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+        if isinstance(item, Exception):
+            raise item
+
+        class _P:
+            pass
+        p = _P()
+        p.stdout = item[0]
+        p.returncode = item[1]
+        return p
+
+
+GEN_MODELS_JSON = b'{"data":[{"id":"qwen3.8-27b"}]}'
+
+
+def test_probe_generation_empty_url_is_liveness_only():
+    assert watchdogd.probe_generation(
+        {"watchdog_health_url": ""}, runner=_FakeGenRunner([])) is True
+
+
+def test_gen_base_url_strips_path():
+    assert watchdogd._gen_base_url("http://127.0.0.1:8000/health") \
+        == "http://127.0.0.1:8000"
+    assert watchdogd._gen_base_url("http://127.0.0.1:8000") \
+        == "http://127.0.0.1:8000"
+    assert watchdogd._gen_base_url("http://127.0.0.1:8000/health/") \
+        == "http://127.0.0.1:8000"
+
+
+def test_probe_generation_success():
+    r = _FakeGenRunner([(GEN_MODELS_JSON, 0), (b"200", 0)])
+    ok = watchdogd.probe_generation(
+        {"watchdog_health_url": "http://127.0.0.1:8000/health"}, runner=r)
+    assert ok is True
+    # step 1: GET {base}/v1/models (the model name is asked from the
+    # server, never config); step 2: POST {base}/v1/chat/completions
+    assert r.calls[0][0][-1] == "http://127.0.0.1:8000/v1/models"
+    post = r.calls[1][0]
+    assert post[post.index("POST") + 1] \
+        == "http://127.0.0.1:8000/v1/chat/completions"
+    assert "-X" in post and "POST" in post
+    assert "-w" in post and "%{http_code}" in post
+    payload = json.loads(post[post.index("-d") + 1])
+    assert payload == {"model": "qwen3.8-27b", "max_tokens": 5,
+                       "messages": [{"role": "user", "content": "ping"}]}
+
+
+def test_probe_generation_non_200_is_down():
+    r = _FakeGenRunner([(GEN_MODELS_JSON, 0), (b"503", 0)])
+    assert watchdogd.probe_generation(
+        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        runner=r) is False
+
+
+def test_probe_generation_models_failure_is_down():
+    # a failed GET means generation cannot be verified (the server is
+    # exactly what is in question) — the POST is never attempted
+    r = _FakeGenRunner([(b"", 7)])  # rc 7 = connection refused
+    assert watchdogd.probe_generation(
+        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        runner=r) is False
+    assert len(r.calls) == 1
+
+
+def test_probe_generation_malformed_models_is_down():
+    r = _FakeGenRunner([(b"not json", 0), (b"200", 0)])
+    assert watchdogd.probe_generation(
+        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        runner=r) is False
+
+
+def test_probe_generation_post_timeout_is_down():
+    r = _FakeGenRunner([(GEN_MODELS_JSON, 0),
+                        (subprocess.TimeoutExpired(cmd="curl",
+                                                   timeout=180))])
+    assert watchdogd.probe_generation(
+        {"watchdog_health_url": "http://127.0.0.1:8000/health",
+         "watchdog_gen_probe_timeout_s": 180},
+        runner=r) is False
 
 
 # --- recover_network (P10 network recovery) ----------------------------------
@@ -805,26 +917,188 @@ def test_tick_frozen_pushes_once(cc_home, monkeypatch):
     assert l2["sessions"][0]["outcome"] == "WAIT"
     l3 = watchdogd.tick(ctx)  # 2 unchanged ticks → FROZEN (P10-P3)
     assert l3["sessions"][0]["outcome"] == "FROZEN"
-    assert [p[0] for p in pushes] == ["freeze_detected"]
+    # Phase 22-C: no turn in flight (turn_active=False) → the PICKER
+    # path: ONE force-cancel Esc + ONE frozen_nudge push, no nudge
+    # (deliberate behavior change from the announce-only Phase 10)
+    assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
+    assert pushes[1][3]["frozen_minutes"] == 10  # ticks=2 → 2×300//60
+    assert io.sends == [("cc-proj-a-0a9b", "Escape")]
     assert ledger.read(paths.session_dir("proj-a", 1))[-1]["type"] \
         == "watchdog_freeze"
-    l4 = watchdogd.tick(ctx)  # still FROZEN — but the push fires ONCE
+    l4 = watchdogd.tick(ctx)  # still FROZEN — the Esc/push fires ONCE
     assert l4["sessions"][0]["outcome"] == "FROZEN"
-    assert [p[0] for p in pushes] == ["freeze_detected"]
+    assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
+    assert io.sends == [("cc-proj-a-0a9b", "Escape")]
 
 
 def test_tick_frozen_dedup_seeded_from_ledger(cc_home, monkeypatch):
     pushes = _capture_pushes(monkeypatch)
-    io = FakeIO(health_ok=True, pane=BUSY_PANE)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE,
+                sessions=["cc-proj-a-0a9b"])
     sdir = _mk(turn_active=False)
     _stale_prompt(sdir, now=10_000.0)
     ledger.append(sdir, {"type": "watchdog_freeze"})  # pushed pre-restart
     ctx = _ctx(io, now=10_000.0)
-    ctx.froze = watchdogd._seed_froze()  # run_forever seeds at startup
-    assert ("proj-a", 1) in ctx.froze
+    ctx.froze = watchdogd._seed_froze(io.list_sessions)
+    # Phase 22: per-TARGET (the pane), not (key, nnn)
+    assert "cc-proj-a-0a9b" in ctx.froze
     for _ in range(3):
         watchdogd.tick(ctx)
-    assert pushes == []  # no re-push after the daemon restart
+    # the seeded announce is deduped (no freeze_detected re-push after
+    # the daemon restart), but the picker path still sends its ONE
+    # Esc + frozen_nudge push (a SEPARATE in-memory dedup: frozen_esc)
+    assert [p[0] for p in pushes] == ["frozen_nudge"]
+    assert io.sends == [("cc-proj-a-0a9b", "Escape")]
+
+
+def test_tick_frozen_turn_escalates_after_threshold(cc_home, monkeypatch):
+    # Phase 22-C: a FROZEN pane WITH a turn in flight escalates once
+    # the freeze outlives watchdog_frozen_nudge_minutes (default 20 min
+    # = 1200s at 300s ticks): ESC force-cancel + the frozen-form nudge
+    # + the frozen_nudge push, THEN the generation probe (ONLY on
+    # suspicion — the run's first probe is the escalation tick)
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE)
+    _mk(turn_active=True)
+    _stale_prompt(paths.session_dir("proj-a", 1), now=10_000.0)
+    ctx = _ctx(io, now=10_000.0)
+    l1 = watchdogd.tick(ctx)  # WAIT
+    assert l1["sessions"][0]["outcome"] == "WAIT"
+    l2 = watchdogd.tick(ctx)  # WAIT
+    assert l2["sessions"][0]["outcome"] == "WAIT"
+    l3 = watchdogd.tick(ctx)  # FROZEN (ticks=2): 600s < 1200s → not due
+    assert l3["sessions"][0]["outcome"] == "FROZEN"
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    assert io.sends == []
+    assert io.gen_probe_calls == 0  # no suspicion yet → no probe
+    l4 = watchdogd.tick(ctx)  # ticks=3: 900s < 1200s → still not due
+    assert l4["sessions"][0]["outcome"] == "FROZEN"
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    assert io.sends == []
+    l5 = watchdogd.tick(ctx)  # ticks=4: 1200s >= 1200s → escalate
+    assert l5["sessions"][0]["outcome"] == "FROZEN"
+    frozen_text = watchdog.build_nudge_text("continue", now=10_000.0,
+                                            frozen_minutes=20)
+    assert io.sends == [("cc-proj-a-0a9b", "Escape"),
+                        ("cc-proj-a-0a9b", frozen_text, "Enter")]
+    assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
+    ev, slug, nnn, fields = pushes[1]
+    assert (slug, nnn) == ("proj-a", 1)
+    assert fields["frozen_minutes"] == 20
+    assert fields["nudge"] == 1
+    assert fields["max_nudges"] == 3
+    assert io.gen_probe_calls == 1  # ONLY the escalation tick
+    assert ledger.read(paths.session_dir("proj-a", 1))[-1]["type"] \
+        == "watchdog_nudge"
+
+
+def test_tick_frozen_multi_record_same_pane_escalates_once(cc_home,
+                                                            monkeypatch):
+    # Phase 22-C: stale records may resolve to the SAME pane — the
+    # announce is deduped per PANE (one freeze_detected), and the
+    # escalation per pane per tick (the tick-local escalated set: one
+    # nudge, one push, one gen probe for the whole pane)
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE,
+                sessions=["cc-proj-a-0a9b"])
+    _mk(key="proj-a", nnn=1, turn_active=True, tmux="cc-proj-a-0a9b")
+    _mk(key="proj-a", nnn=2, turn_active=True, tmux="cc-proj-a-0a9b")
+    _stale_prompt(paths.session_dir("proj-a", 1), now=10_000.0)
+    _stale_prompt(paths.session_dir("proj-a", 2), now=10_000.0)
+    ctx = _ctx(io, now=10_000.0)
+    for _ in range(2):
+        watchdogd.tick(ctx)  # both WAIT
+    l3 = watchdogd.tick(ctx)  # both FROZEN → ONE freeze push (per pane)
+    assert [l["outcome"] for l in l3["sessions"]] == ["FROZEN", "FROZEN"]
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    watchdogd.tick(ctx)  # ticks=3: 900s < 1200s → not due
+    assert [p[0] for p in pushes] == ["freeze_detected"]
+    l5 = watchdogd.tick(ctx)  # ticks=4: due → ONE escalation
+    assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
+    assert io.gen_probe_calls == 1
+    assert len([s for s in io.sends if s[-1] == "Enter"]) == 1
+    assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
+
+
+def test_tick_frozen_gen_down_power_cycles(cc_home, monkeypatch):
+    # Phase 22-C Wave 4: the generation probe (ONLY on suspicion) goes
+    # DOWN (2-fail debounce) while LIVENESS stays UP — a hung vLLM
+    # still serves /health, so the per-tick liveness probe can never
+    # see it. Sustained gen-DOWN past power_cycle_after_s (default
+    # 600s) triggers the SHARED power cycle (the same relay and the
+    # same cooldown file as the liveness cycle — one relay, one
+    # 30-min window).
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE,
+                gen_ok=[False, False, False])
+    io.cycle_result = {"ok": True, "state": "cycled"}
+    _mk(turn_active=True)
+    _stale_prompt(paths.session_dir("proj-a", 1), now=10_000.0)
+    ctx = _ctx(io, cfg_over={"power_plug_ip": "192.0.2.34"},
+               now=10_000.0)
+    watchdogd.tick(ctx)  # WAIT
+    ctx.now = 10_600.0
+    watchdogd.tick(ctx)  # WAIT
+    ctx.now = 11_200.0
+    l3 = watchdogd.tick(ctx)  # FROZEN announce; 600s < 1200s → not due
+    assert l3["sessions"][0]["outcome"] == "FROZEN"
+    ctx.now = 11_800.0
+    watchdogd.tick(ctx)  # ticks=3: 900s < 1200s → not due
+    ctx.now = 12_400.0
+    l5 = watchdogd.tick(ctx)  # escalate: NUDGE + gen fail 1 (debounce)
+    assert io.gen_probe_calls == 1
+    assert ctx.gen.status == "UNKNOWN"
+    assert "gen_down" not in l5["events"]
+    assert io.cycle_calls == 0
+    ctx.now = 13_000.0
+    l6 = watchdogd.tick(ctx)  # RESEND + gen fail 2 → DOWN (down_since=now)
+    assert ctx.gen.status == "DOWN"
+    assert "gen_down" in l6["events"]
+    assert io.cycle_calls == 0  # down age 0 < 600s
+    ctx.now = 13_600.0
+    l7 = watchdogd.tick(ctx)  # RESEND + gen fail 3 → age 600s ≥ 600s
+    assert io.cycle_calls == 1
+    assert l7["power_cycle"]["ok"] is True
+    assert any(p[0] == "dgx_power_cycle" for p in pushes)
+    assert io.recorded_cycle == [13_600.0]
+
+
+def test_tick_frozen_gen_up_recovers(cc_home, monkeypatch):
+    # Phase 22-C Wave 4: gen DOWN (2 fails) → UP (ok again): the dgx_up
+    # push + _recover_stuck_turns (the existing outage recovery) fire
+    # on the GEN transition (liveness was never DOWN). The FROZEN
+    # session itself must NOT be double-nudged by the recovery pass
+    # (its last_ts is stale → the normal loop owns it).
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, pane=BUSY_PANE,
+                gen_ok=[False, False, True])
+    _mk(turn_active=True)
+    _stale_prompt(paths.session_dir("proj-a", 1), now=10_000.0)
+    ctx = _ctx(io, now=10_000.0)
+    watchdogd.tick(ctx)  # WAIT
+    ctx.now = 10_600.0
+    watchdogd.tick(ctx)  # WAIT
+    ctx.now = 11_200.0
+    watchdogd.tick(ctx)  # FROZEN announce; 600s < 1200s → not due
+    ctx.now = 11_800.0
+    watchdogd.tick(ctx)  # ticks=3: not due
+    ctx.now = 12_400.0
+    l5 = watchdogd.tick(ctx)  # escalate: NUDGE + gen fail 1
+    assert io.gen_probe_calls == 1
+    assert ctx.gen.status == "UNKNOWN"
+    ctx.now = 13_000.0
+    l6 = watchdogd.tick(ctx)  # RESEND + gen fail 2 → DOWN
+    assert ctx.gen.status == "DOWN"
+    ctx.now = 13_600.0
+    l7 = watchdogd.tick(ctx)  # RESEND + gen ok → UP
+    assert "dgx_up" in l7["events"]
+    dgu = [p for p in pushes if p[0] == "dgx_up"][0]
+    assert dgu[3]["downtime_s"] == 600.0  # 13_600 - down_since 13_000
+    assert io.gen_probe_calls == 3
+    # the recovery pass did NOT nudge the FROZEN session (stale
+    # last_ts): no OUTAGE-form nudge text was ever sent
+    assert not any("Model sunucusu" in s[1] for s in io.sends
+                   if len(s) > 1)
 
 
 def test_tick_unresolvable_never_nudges(cc_home, monkeypatch):
