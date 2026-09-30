@@ -79,9 +79,15 @@ class FakeIO:
         self.ps_calls += 1
         return self.procmap
 
-    def read_transcript(self, path):
-        self.read_calls.append(path)
-        return self.transcript
+    def read_transcript(self, path, session_id=None):
+        self.read_calls.append((path, session_id))
+        t = self.transcript
+        if isinstance(t, dict):
+            # cp-070: per-session dispatch — "<newest>" = the legacy
+            # dir-newest read (session_id None / absent)
+            return t.get("<newest>") if session_id is None \
+                else t.get(session_id)
+        return t
 
     def is_alive(self, pid):
         return pid in self.alive_pids
@@ -1765,6 +1771,51 @@ def test_read_transcript_entries_reads_tail_only(cc_home, monkeypatch,
     assert [e[2] for e in got] == [EXIT_MARK + "  "]
 
 
+# --- cp-070: read_transcript_entries session attribution ---------------------------
+
+def test_read_transcript_entries_session_id_reads_own_file(cc_home,
+                                                           monkeypatch,
+                                                           tmp_path):
+    # session_id -> exactly <sid>.jsonl, even when another file is
+    # NEWER by mtime (the --continue replay file)
+    root = _transcript_root(tmp_path, monkeypatch)
+    _write_jsonl(root, "-Users-devx-proj", "replay.jsonl", [
+        {"type": "user", "timestamp": "2026-09-30T14:10:27.000000Z",
+         "message": {"content": "replay"}}], mtime=2_000.0)
+    _write_jsonl(root, "-Users-devx-proj", "sid-abc.jsonl", [
+        {"type": "user", "timestamp": "2026-09-30T14:00:00.000000Z",
+         "message": {"content": "own"}}], mtime=1_000.0)
+    got = watchdogd.read_transcript_entries("/Users/devx/proj", "sid-abc")
+    assert [e[2] for e in got] == ["own"]
+
+
+def test_read_transcript_entries_session_id_missing_file_none(cc_home,
+                                                              monkeypatch,
+                                                              tmp_path):
+    # a fresh session has no <sid>.jsonl yet -> None (no marker possible)
+    root = _transcript_root(tmp_path, monkeypatch)
+    _write_jsonl(root, "-Users-devx-proj", "other.jsonl", [
+        {"type": "user", "timestamp": "2026-09-30T14:10:27.000000Z",
+         "message": {"content": "other"}}], mtime=2_000.0)
+    assert watchdogd.read_transcript_entries("/Users/devx/proj",
+                                             "sid-missing") is None
+
+
+@pytest.mark.parametrize("sid", [None, ""])
+def test_read_transcript_entries_session_id_empty_keeps_legacy(
+        cc_home, monkeypatch, tmp_path, sid):
+    # None / empty session_id -> the legacy dir-newest read
+    root = _transcript_root(tmp_path, monkeypatch)
+    _write_jsonl(root, "-Users-devx-proj", "old.jsonl", [
+        {"type": "user", "timestamp": "2026-09-28T20:00:00.000000Z",
+         "message": {"content": "old"}}], mtime=1_000.0)
+    _write_jsonl(root, "-Users-devx-proj", "new.jsonl", [
+        {"type": "user", "timestamp": "2026-09-28T21:00:00.000000Z",
+         "message": {"content": "new"}}], mtime=2_000.0)
+    got = watchdogd.read_transcript_entries("/Users/devx/proj", sid)
+    assert [e[2] for e in got] == ["new"]
+
+
 # --- check_exit_hangs ---------------------------------------------------------------
 
 def test_check_exit_hangs_kills_hung_claude(cc_home, monkeypatch):
@@ -2068,6 +2119,72 @@ def test_process_start_ts_failure_none():
     assert watchdogd.process_start_ts(1, now=lambda: 0.0,
                                       runner=lambda *a, **k: _P(0, b"junk\n")) \
         is None
+
+
+# --- cp-070: the marker must be in THIS session's own transcript -------------------
+#
+# The 2026-09-30 16:10 incident: a --continue replay of an old
+# conversation wrote a fresh /exit marker to its OWN (old) transcript
+# file; the dir-newest read attributed it to a DIFFERENT live session's
+# CC (started before the marker, so the cp-069 start-time guard passed)
+# -> false-positive kill. Fix: read the session's OWN transcript
+# (session_id -> <sid>.jsonl); no own file -> no marker -> no kill.
+
+def test_check_exit_hangs_other_sessions_marker_not_killed(cc_home,
+                                                           monkeypatch):
+    # the session's own transcript is empty; the dir's NEWEST file
+    # (another session) holds a fresh marker -> no kill, no push, no log
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript={
+        "sid-proj-a-1": [],
+        "<newest>": _exit_entries(),
+    })
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert pushes == []
+    assert not (paths.logs_dir() / "watchdog.log").is_file()
+    assert 24822 not in ctx.exit_hang_killed
+
+
+def test_check_exit_hangs_own_file_missing_not_killed(cc_home, monkeypatch):
+    # a fresh session has no transcript yet; the dir's newest (another
+    # session) holds a fresh marker -> no kill (a CC that wrote nothing
+    # cannot have hung on /exit)
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript={"<newest>": _exit_entries()})
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert pushes == []
+
+
+def test_check_exit_hangs_own_marker_killed(cc_home, monkeypatch):
+    # the marker IS in the session's own transcript -> still killed
+    # (guard against over-correction of the cp-069 guard)
+    pushes = _capture_pushes(monkeypatch)
+    _mk(turn_active=False)
+    io = _hung_io(transcript={"sid-proj-a-1": _exit_entries()})
+    ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert [a["nnn"] for a in actions] == [1]
+    assert pushes  # the push still fires
+
+
+def test_check_exit_hangs_no_session_id_falls_back_to_newest(cc_home,
+                                                             monkeypatch):
+    # a record WITHOUT session_id keeps the legacy dir-newest read
+    # (old-format degrade path; the cp-069 start-time guard still applies)
+    _mk(turn_active=False)
+    state.update_fields("proj-a", 1, session_id=None)
+    io = _hung_io()
+    ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert [a["nnn"] for a in actions] == [1]
 
 
 # --- kill_tmux_session (GATE: zombie session / progress-pane cleanup) ---------------

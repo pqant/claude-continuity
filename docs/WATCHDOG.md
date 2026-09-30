@@ -262,7 +262,16 @@ Detection (all per pass, one `ps` scan total):
    unaffected (its marker was written by the process itself, hours
    after its start). An unknown start (ps race/failure) degrades to
    **no kill** — a destructive action never runs on an unverified
-   state; the next pass retries;
+   state; the next pass retries.
+   **Session attribution (Phase 21.2, 2026-09-30):** the start-time
+   guard compares marker age to process age but not OWNERSHIP — a
+   FRESH marker from ANOTHER session's transcript (a `--continue`/
+   `--resume` replay writing its `/exit` to its own old file, which
+   becomes the dir's newest) can still be attributed to this session's
+   CC (2026-09-30 16:10 false-positive kill). So `read_transcript_entries`
+   reads the session's OWN `<sid>.jsonl` (keyed by the record's
+   `session_id`); no own file → `None` → no marker → no kill. Records
+   without `session_id` keep the legacy dir-newest read;
 4. kill: SIGTERM, 5 s, then SIGKILL; then the **GATE cleanup** —
    `tmux kill-session -t <target>`: the killed claude was the
    session's main pane, and the orphaned **progress-pane would keep
@@ -534,5 +543,32 @@ line is submitted with a bare Enter on the next unchanged tick.
   guard (this process's OWN marker only) was implemented TDD: 9 new
   tests, **1076 pass**. `watchdog.py` + `watchdogd.py` deployed via the
   `diff -q` loop (zero diff after), daemon restarted (PID 52997, clean,
-  no errors.log). **Live verification PENDING**: the user re-launches
-  the connector CC → no kill. No staging (outage-test protocol).
+  no errors.log). **Live outcome (reality, 2026-09-30):** the guard's
+  target direction (a fresh process matched against a 2-day-old marker)
+  did NOT recur — the 13:47 connector "hang" was a *different* failure
+  mode (a clean `/exit` whose CC died, leaving a zombie session on the
+  orphaned progress-pane — no hung `/exit` to kill), so the guard
+  regression was **not** exercised against a real hang. A SEPARATE
+  false-positive did occur at 16:10:59: a FRESH marker (16:10:27, a
+  `--continue` replay's clean `/exit`) was attributed to an OLDER live
+  CC (started 15:53) — the opposite direction, which the start-time
+  guard structurally cannot catch (it only compares marker age to
+  process age, not ownership). Phase 21.2 closes that. No staging
+  (outage-test protocol).
+- 2026-09-30: **Phase 21.2 — session attribution (the 16:10
+  false-positive kill).** Root cause of the 16:10:59 kill (event
+  `nnn 64, pane cc-connector-7470, pid 86934, age_s 32.49`):
+  `read_transcript_entries` reads the project dir's **newest** transcript
+  by mtime. A `--continue`/`--resume` of an old conversation (a7c36f64)
+  wrote a fresh `/exit` marker to its OWN (old) file at 16:10:27; that
+  file became the dir's newest, so the marker was attributed to a
+  DIFFERENT live session's CC (7470, started 15:53, before the marker).
+  The Phase 21.1 start-time guard (marker must be newer than the
+  process start) PASSED — the marker WAS newer — so the kill fired. The
+  fix: `read_transcript_entries(cwd, session_id=None)` reads the
+  session's **own** `<sid>.jsonl` when `session_id` is known (no own
+  file → `None` → no marker → no kill); `check_exit_hangs` now passes
+  `rec["session_id"]`. Records without `session_id` keep the legacy
+  dir-newest read. 8 new tests (3 unit + 3 daemon + 1 legacy-fallback
+  guard), **1084 pass**. `watchdogd.py` + `test_watchdogd.py` deployed
+  via the `diff -q` loop, daemon kickstarted.
