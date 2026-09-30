@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -82,6 +83,32 @@ def _last_nonempty(capture: str) -> str | None:
         if line.strip():
             return line
     return None
+
+
+def _frozen_progress_pane(ctx: "TickCtx", target: str, cap: str) -> bool:
+    """Phase 23 (fix b): True when the captured pane is a progress-pane
+    (the session's own usage display), not a CC — so a FROZEN
+    classification is spurious and must not be acted on. A progress-only
+    session (the CC died; the session survives on the orphaned progress-
+    pane) shows a static "◆ NN% Active Usage" line; the 14:03/16:04
+    events sent a spurious frozen escalation (ESC + nudge) to exactly
+    such a pane. Either signal suffices: the captured tail IS a progress
+    usage line (checks the CAPTURED pane — catches a live CC in ANOTHER
+    pane while the active pane is the progress display); OR the procmap
+    shows NO claude process in any of the session's panes (no CC to be
+    frozen). Never raises — an I/O failure degrades to False (no skip)."""
+    tail = _last_nonempty(cap) or ""
+    if _PROGRESS_TAIL_RE.search(tail):
+        return True
+    try:
+        procmap = ctx.ps_snapshot()
+        panes = ctx.list_panes(target)
+    except Exception:
+        _log_error("frozen_progress ps")
+        return False
+    if not panes or not procmap:
+        return False
+    return all(find_claude_pid(p["pid"], procmap) is None for p in panes)
 
 
 def _push(cfg: dict, event: str, *, slug: str, nnn: int, **fields) -> bool:
@@ -366,6 +393,17 @@ _TRANSCRIPT_TAIL_BYTES = 512 * 1024
 #: Phase 21: kill_process poll step between SIGTERM and the SIGKILL
 #: deadline.
 _KILL_POLL_S = 0.2
+#: Phase 23 (fix a): how long a session must have been ``off`` (per the
+#: record's ``updated`` ts) before its still-alive tmux session is killed
+#: as a zombie — a freshly-ended session may be mid-relaunch; the grace
+#: avoids racing a legitimate restart. Fixed (not configurable).
+ZOMBIE_GRACE_S = 120.0
+#: Phase 23 (fix b): a progress-pane usage line ("◆ NN% Active Usage",
+#: optional leading whitespace / glyph). When the CAPTURED pane's last
+#: non-empty line matches this, the capture is a progress display (the
+#: session's own usage readout), not a CC — a FROZEN classification of it
+#: is spurious and must not be acted on.
+_PROGRESS_TAIL_RE = re.compile(r"^\s*◆?\s*\d+% Active Usage")
 
 
 def exit_hang_limit_s() -> float:
@@ -652,6 +690,36 @@ def collect_live_sessions() -> list[tuple[str, int, dict]]:
     return out
 
 
+def collect_off_sessions() -> list[tuple[str, int, dict]]:
+    """Phase 23 (fix a): (key, nnn, record) for every session whose
+    ``off`` is true — the zombie candidates (ended on disk, but the tmux
+    session may still be alive on the orphaned progress-pane). The mirror
+    of ``collect_live_sessions``. Unreadable state.json → skip (never
+    raises — P10-D12)."""
+    out: list[tuple[str, int, dict]] = []
+    root = paths.projects_dir()
+    if not root.is_dir():
+        return out
+    for proj in sorted(root.iterdir()):
+        sessions = proj / "sessions"
+        if not proj.is_dir() or not sessions.is_dir():
+            continue
+        for sess in sorted(sessions.iterdir()):
+            if not sess.is_dir() or not sess.name.isdigit():
+                continue
+            try:
+                rec = json.loads(
+                    (sess / "state.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if not rec.get("off"):
+                continue
+            out.append((proj.name, int(sess.name), rec))
+    return out
+
+
 def resolve_pane(rec: dict, slug: str,
                  sessions: list[str] | None) -> str | None:
     """P10-D9/P10-P6: the nudge target. The hook-recorded
@@ -798,6 +866,10 @@ class TickCtx:
     gen: HealthState = dataclasses.field(default_factory=HealthState)
     probe_generation: object = None  # () -> bool (Phase 22 gen probe)
     frozen_esc: set = dataclasses.field(default_factory=set)
+    # Phase 23 (fix a): daemon-lifetime zombie dedup. Session names are
+    # random, so a cleaned session never reappears — one kill, ever. A
+    # FAILED kill (rc != 0) is NOT added (the next tick retries).
+    zombie_killed: set = dataclasses.field(default_factory=set)
 
 
 def _verify(ctx: TickCtx, key: str, nnn: int, slug: str,
@@ -1306,6 +1378,12 @@ def tick(ctx: TickCtx) -> dict:
             _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
                         sent_text=sent_text)
         elif outcome == "FROZEN":
+            # Phase 23 (fix b): the captured pane is a progress-pane (not
+            # a CC) — a progress-only session's static usage display is
+            # FROZEN-classified; acting on it sends a spurious frozen
+            # escalation to a non-CC pane. Skip ALL FROZEN handling.
+            if _frozen_progress_pane(ctx, target, cap):
+                continue
             # Phase 22-C: per-PANE (target) announce dedup — stale
             # records may resolve to the same pane; ONE announcement
             # per pane per run.
@@ -1344,6 +1422,12 @@ def tick(ctx: TickCtx) -> dict:
                                       300)) // 60))
                 ctx.frozen_esc.add(target)
                 line["events"].append(f"frozen_esc:{key}:{nnn:03d}")
+
+    # 2c. zombie-session cleanup (Phase 23, fix a): an off session whose
+    #     tmux session survived on the orphaned progress-pane (no CC, no
+    #     restart) is killed. A tick step (300 s cadence), NOT the 5 s
+    #     fast pass — it is a cleanup, and it re-scans the off records.
+    check_zombie_sessions(ctx, line)
     return line
 
 
@@ -1464,6 +1548,100 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
             _log_line({"ts": now, "events": [f"exit_hang_killed:{key}"],
                        **action})
             actions.append(action)
+    return actions
+
+
+def check_zombie_sessions(ctx: TickCtx, line: dict) -> list[dict]:
+    """Phase 23 (fix a): zombie-session cleanup — a tick step (300 s
+    cadence). A clean ``/exit`` whose CC died can leave the tmux session
+    ALIVE on the orphaned progress-pane (no CC, no restart — launch is
+    one-shot): the 2026-09-30 c19b zombie the user's "kill it" commands
+    could not reach (they landed in the progress pane).
+
+    Kill requires ALL of (every check fail-safe — a destructive action
+    never runs on an unverified state):
+      1. an ``off=True`` record whose ``tmux_session`` is set;
+      2. that session still exists in ``list_sessions()``;
+      3. NO live (off=False) record resolves to it (a shared / in-place
+         rotation pane is never killed);
+      4. NO ``claude`` process in any of its panes (ONE ``ps_snapshot``;
+         the progress-pane is python, not claude);
+      5. it has been ``off`` for more than ``ZOMBIE_GRACE_S`` (per the
+         record's ``updated`` ts — a fresh off may be mid-relaunch).
+    The attached state is deliberately NOT consulted: an attached user
+    staring at a dead prompt is exactly the pain point, and the kill
+    returns their terminal to the shell.
+
+    Action: ``kill_session(S)`` (the GATE helper) + a ``zombie_cleaned``
+    push + one tick-log event. On success S joins the daemon-lifetime
+    ``ctx.zombie_killed`` (session names are random — a cleaned S never
+    comes back); on rc != 0 it is NOT added, so the next tick retries.
+    A no-op pass appends NOTHING to the log. Never raises (P10-D12).
+    Returns the actions taken (one dict per kill)."""
+    try:
+        sessions = ctx.list_sessions()
+    except Exception:
+        _log_error("zombie list_sessions")
+        return []
+    if sessions is None:
+        return []
+    # (3): the set of sessions a live record RESOLVES to — never kill one
+    # of these (shared pane / in-place rotation). Same resolution the
+    # nudge path uses, so a live record's fallback target is protected too.
+    live_targets: set = set()
+    for key, _nnn, rec in collect_live_sessions():
+        target = resolve_pane(rec, notify.project_slug(key), sessions)
+        if target:
+            live_targets.add(target)
+    now = ctx.now if ctx.now is not None else time.time()
+    # cheap filters FIRST (1, 2, 3, 5) — a no-op pass still writes zero ps
+    cands: list[tuple[str, int, str]] = []
+    for key, nnn, rec in collect_off_sessions():
+        s = rec.get("tmux_session")
+        if not (isinstance(s, str) and s.strip()):
+            continue
+        s = s.strip()
+        if s in ctx.zombie_killed or s not in sessions or s in live_targets:
+            continue
+        up = (parse_entry_ts(rec["updated"])
+              if isinstance(rec.get("updated"), str) else None)
+        if up is None or now - up <= ZOMBIE_GRACE_S:
+            continue
+        cands.append((key, nnn, s))
+    if not cands:
+        return []
+    # (4): ONE process map for the whole pass
+    try:
+        procmap = ctx.ps_snapshot()
+    except Exception:
+        _log_error("zombie ps_snapshot")
+        return []
+    if not procmap:
+        return []
+    actions: list[dict] = []
+    for key, nnn, s in cands:
+        try:
+            panes = ctx.list_panes(s)
+        except Exception:
+            _log_error("zombie list_panes")
+            continue
+        if not panes:
+            continue  # cannot verify the session is empty -> no kill
+        if any(find_claude_pid(p["pid"], procmap) is not None
+               for p in panes):
+            continue  # a CC is alive here -> not a zombie
+        try:
+            killed = bool(ctx.kill_session(s))
+        except Exception:
+            _log_error("zombie kill_session")
+            continue
+        if not killed:
+            continue  # rc != 0: NOT deduped -> the next tick retries
+        slug = notify.project_slug(key)
+        _push(ctx.cfg, "zombie_cleaned", slug=slug, nnn=nnn, session=s)
+        ctx.zombie_killed.add(s)
+        line["events"].append(f"zombie_cleaned:{key}:{nnn:03d}")
+        actions.append({"key": key, "nnn": nnn, "session": s})
     return actions
 
 
