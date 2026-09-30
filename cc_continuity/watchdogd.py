@@ -546,28 +546,17 @@ def kill_tmux_session(session: str,
     return proc.returncode == 0
 
 
-def read_transcript_entries(cwd: str) -> list | None:
-    """Phase 21: the newest transcript under
-    ``<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<slug>`` as
-    ``(ts, etype, text)`` rows. Only the TAIL (512 KB) is read — a hung
-    CC stops writing, so the marker is always near the end (the partial
-    first line after the seek is dropped, same rule as any bad row).
-    No directory / no files / unreadable → None."""
-    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
-    d = Path(cfg_dir) / "projects" / transcript_slug(cwd)
+def _read_transcript_tail(f: Path) -> list | None:
+    """Phase 21: the TAIL (512 KB) of ``f`` as ``(ts, etype, text)``
+    rows. A hung CC stops writing, so the marker is always near the end
+    (the partial first line after the seek is dropped, same rule as any
+    bad row). Unreadable → None."""
     try:
-        files = [f for f in d.glob("*.jsonl") if f.is_file()]
-    except OSError:
-        return None
-    if not files:
-        return None
-    newest = max(files, key=lambda f: f.stat().st_mtime)
-    try:
-        size = newest.stat().st_size
-        with open(newest, "rb") as f:
+        size = f.stat().st_size
+        with open(f, "rb") as fh:
             if size > _TRANSCRIPT_TAIL_BYTES:
-                f.seek(size - _TRANSCRIPT_TAIL_BYTES)
-            data = f.read()
+                fh.seek(size - _TRANSCRIPT_TAIL_BYTES)
+            data = fh.read()
     except OSError:
         return None
     out: list[tuple[float, str, str]] = []
@@ -600,6 +589,36 @@ def read_transcript_entries(cwd: str) -> list | None:
             body = ""
         out.append((ts, etype, body))
     return out
+
+
+def read_transcript_entries(cwd: str,
+                            session_id: str | None = None) -> list | None:
+    """Phase 21: the newest transcript under
+    ``<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<slug>`` as
+    ``(ts, etype, text)`` rows.
+    cp-070 (session attribution): with ``session_id``, read exactly
+    ``<sid>.jsonl`` — the dir's newest file may be ANOTHER session's
+    transcript (a --continue/--resume replay writes a fresh /exit marker
+    to its own old file), and attributing it to this session's CC is the
+    2026-09-30 16:10 false-positive kill. A marker must live in THIS
+    session's transcript; no own file → None (no marker possible).
+    Without ``session_id`` (old-format records) the legacy dir-newest
+    read stands. No directory / no files / unreadable → None."""
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
+    d = Path(cfg_dir) / "projects" / transcript_slug(cwd)
+    if session_id:
+        f = d / f"{session_id}.jsonl"
+        if not f.is_file():
+            return None
+        return _read_transcript_tail(f)
+    try:
+        files = [f for f in d.glob("*.jsonl") if f.is_file()]
+    except OSError:
+        return None
+    if not files:
+        return None
+    newest = max(files, key=lambda f: f.stat().st_mtime)
+    return _read_transcript_tail(newest)
 
 
 # --- session scan + pane resolution (P10-D5/D9) --------------------------------
@@ -763,7 +782,7 @@ class TickCtx:
     # a killed pid is skipped for the rest of the daemon's life.
     list_panes: object = None  # (target: str) -> list[dict] | None
     ps_snapshot: object = None  # () -> dict | None (the process map)
-    read_transcript: object = None  # (cwd: str) -> list | None
+    read_transcript: object = None  # (cwd, session_id: str|None) -> list|None
     is_alive: object = None  # (pid: int) -> bool
     kill: object = None  # (pid: int) -> str ("term"/"kill"/"dead")
     kill_session: object = None  # (target: str) -> bool (GATE cleanup)
@@ -1361,7 +1380,9 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
             by_target[target] = (key, nnn, rec, slug)
     # the turn guard BEFORE the ps scan: a mid-turn /exit waits for the
     # Stop hook to clear turn_active — all mid-turn means no ps at all
-    eligible = [(target, key, nnn, slug)
+    # cp-070: the record travels to the call site — the transcript read
+    # must be THIS session's own file (session_id), not the dir's newest
+    eligible = [(target, key, nnn, slug, rec)
                 for target, (key, nnn, rec, slug) in by_target.items()
                 if not rec.get("turn_active")]
     if not eligible:
@@ -1376,7 +1397,7 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
     now = ctx.now if ctx.now is not None else time.time()
     limit_s = exit_hang_limit_s()
     actions: list[dict] = []
-    for target, key, nnn, slug in eligible:
+    for target, key, nnn, slug, rec in eligible:
         try:
             panes = ctx.list_panes(target)
         except Exception:
@@ -1390,7 +1411,10 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
                 continue
             try:
                 alive = bool(ctx.is_alive(pid))
-                entries = ctx.read_transcript(pane["path"])
+                # cp-070: this session's OWN transcript (session_id);
+                # None/absent degrades to the legacy dir-newest read
+                entries = ctx.read_transcript(pane["path"],
+                                              rec.get("session_id"))
             except Exception:
                 _log_error("exit_hang transcript")
                 continue
