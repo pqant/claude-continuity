@@ -84,10 +84,13 @@ class FakeIO:
         self.read_calls.append((path, session_id))
         t = self.transcript
         if isinstance(t, dict):
-            # cp-070: per-session dispatch — "<newest>" = the legacy
-            # dir-newest read (session_id None / absent)
-            return t.get("<newest>") if session_id is None \
-                else t.get(session_id)
+            # cp-070: the session's OWN file when present; Phase 21.3:
+            # when the recorded session_id is STALE (its <sid>.jsonl
+            # absent from the dir) fall back to the dir's newest file —
+            # mirrors read_transcript_entries (own-if-present, else newest).
+            if session_id and session_id in t:
+                return t[session_id]
+            return t.get("<newest>")
         return t
 
     def is_alive(self, pid):
@@ -1790,16 +1793,24 @@ def test_read_transcript_entries_session_id_reads_own_file(cc_home,
     assert [e[2] for e in got] == ["own"]
 
 
-def test_read_transcript_entries_session_id_missing_file_none(cc_home,
-                                                              monkeypatch,
-                                                              tmp_path):
-    # a fresh session has no <sid>.jsonl yet -> None (no marker possible)
+def test_read_transcript_entries_session_id_missing_falls_back_newest(
+        cc_home, monkeypatch, tmp_path):
+    # Phase 21.3 (2026-10-01 connector-066 bug): the recorded session_id is
+    # STALE (its <sid>.jsonl does not exist) because CC took a new session id
+    # on a --resume/rotation without cc-continuity updating state.json. The
+    # process's REAL transcript is the dir's newest file -> fall back to it
+    # (the legacy dir-newest read) instead of giving up (None). An empty /
+    # missing dir still yields None (no file to read).
     root = _transcript_root(tmp_path, monkeypatch)
     _write_jsonl(root, "-Users-devx-proj", "other.jsonl", [
         {"type": "user", "timestamp": "2026-09-30T14:10:27.000000Z",
          "message": {"content": "other"}}], mtime=2_000.0)
-    assert watchdogd.read_transcript_entries("/Users/devx/proj",
-                                             "sid-missing") is None
+    got = watchdogd.read_transcript_entries("/Users/devx/proj",
+                                            "sid-missing")
+    assert [e[2] for e in got] == ["other"]
+    # ...a dir with NO files at all still returns None (nothing to read)
+    assert watchdogd.read_transcript_entries("/Users/devx/elsewhere",
+                                            "sid-missing") is None
 
 
 @pytest.mark.parametrize("sid", [None, ""])
@@ -2149,17 +2160,54 @@ def test_check_exit_hangs_other_sessions_marker_not_killed(cc_home,
     assert 24822 not in ctx.exit_hang_killed
 
 
-def test_check_exit_hangs_own_file_missing_not_killed(cc_home, monkeypatch):
-    # a fresh session has no transcript yet; the dir's newest (another
-    # session) holds a fresh marker -> no kill (a CC that wrote nothing
-    # cannot have hung on /exit)
+def test_check_exit_hangs_stale_sid_falls_back_kills(cc_home, monkeypatch):
+    # Phase 21.3 (the 2026-10-01 connector-066 bug): the record's
+    # session_id is STALE (no own <sid>.jsonl), but the process's REAL
+    # transcript — the dir's newest file — holds a fresh /exit marker and
+    # the process is alive past the grace. The killer falls back to the
+    # process's own transcript and kills. (Was `..._own_file_missing_not_
+    # killed`: cp-070's "own file missing -> no kill" was the bug — a
+    # stale id made the killer give up before finding the real marker.)
     pushes = _capture_pushes(monkeypatch)
     _mk(turn_active=False)
     io = _hung_io(transcript={"<newest>": _exit_entries()})
     ctx = _exit_ctx(io)
+    actions = watchdogd.check_exit_hangs(ctx)
+    assert io.kills == [24822]
+    assert [a["nnn"] for a in actions] == [1]
+    assert pushes  # the push fires
+
+
+def test_check_exit_hangs_stale_sid_no_marker_no_kill(cc_home, monkeypatch):
+    # Phase 21.3 safety: stale session_id, but the process's real
+    # transcript (dir newest) has NO /exit marker (the CC is just idle,
+    # not hung on /exit) -> no kill. An idle session must never be killed
+    # by a stray fallback read.
+    _mk(turn_active=False)
+    io = _hung_io(transcript={"<newest>": [
+        (9_960.0, "assistant", "still working, here is a result"),
+    ]})
+    ctx = _exit_ctx(io)
     watchdogd.check_exit_hangs(ctx)
     assert io.kills == []
-    assert pushes == []
+    assert 24822 not in ctx.exit_hang_killed
+
+
+def test_check_exit_hangs_stale_sid_fresh_process_not_killed(cc_home,
+                                                             monkeypatch):
+    # Phase 21.3 / 16:10 guard: stale session_id, the dir's newest holds a
+    # fresh marker, but THIS process is FRESH (started after the marker).
+    # The cp-069 start-time guard rejects a marker older than the process
+    # start -> no kill. (The realistic 16:10 replay: the foreign marker
+    # predates this process, so it is not this process's /exit.)
+    _mk(turn_active=False)
+    # marker at 9960 (now=10000, age 40); process started at 9990 (fresh)
+    io = _hung_io(transcript={"<newest>": _exit_entries()},
+                  process_start=9_990.0)
+    ctx = _exit_ctx(io)
+    watchdogd.check_exit_hangs(ctx)
+    assert io.kills == []
+    assert 24822 not in ctx.exit_hang_killed
 
 
 def test_check_exit_hangs_own_marker_killed(cc_home, monkeypatch):
