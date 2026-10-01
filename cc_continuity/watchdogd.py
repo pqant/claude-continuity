@@ -393,11 +393,15 @@ _TRANSCRIPT_TAIL_BYTES = 512 * 1024
 #: Phase 21: kill_process poll step between SIGTERM and the SIGKILL
 #: deadline.
 _KILL_POLL_S = 0.2
-#: Phase 23 (fix a): how long a session must have been ``off`` (per the
-#: record's ``updated`` ts) before its still-alive tmux session is killed
-#: as a zombie — a freshly-ended session may be mid-relaunch; the grace
-#: avoids racing a legitimate restart. Fixed (not configurable).
-ZOMBIE_GRACE_S = 120.0
+#: Phase 23 (fix a), tightened Phase 25: how long a session must have been
+#: ``off`` (per the record's ``updated`` ts) before its still-alive tmux
+#: session is killed as a zombie. Phase 25 dropped this 120 s -> 5 s and
+#: moved the check to the 5 s fast pass, so an orphaned progress-pane is
+#: reaped in ~5-10 s (grace + one poll) instead of ~7 min (300 s tick +
+#: 120 s grace). The small 5 s margin still avoids racing a legitimate
+#: relaunch, and a pane that actually holds a CC is never killed
+#: (condition 4). Fixed (not configurable).
+ZOMBIE_GRACE_S = 5.0
 #: Phase 23 (fix b): a progress-pane usage line ("◆ NN% Active Usage",
 #: optional leading whitespace / glyph). When the CAPTURED pane's last
 #: non-empty line matches this, the capture is a progress display (the
@@ -1431,11 +1435,9 @@ def tick(ctx: TickCtx) -> dict:
                 ctx.frozen_esc.add(target)
                 line["events"].append(f"frozen_esc:{key}:{nnn:03d}")
 
-    # 2c. zombie-session cleanup (Phase 23, fix a): an off session whose
-    #     tmux session survived on the orphaned progress-pane (no CC, no
-    #     restart) is killed. A tick step (300 s cadence), NOT the 5 s
-    #     fast pass — it is a cleanup, and it re-scans the off records.
-    check_zombie_sessions(ctx, line)
+    # 2c. zombie-session cleanup: moved to the 5 s fast pass in
+    #     run_forever (Phase 25) so an orphaned off-pane is reaped in
+    #     ~5-10 s, not on the 300 s tick. It no longer runs here.
     return line
 
 
@@ -1560,8 +1562,9 @@ def check_exit_hangs(ctx: TickCtx) -> list[dict]:
 
 
 def check_zombie_sessions(ctx: TickCtx, line: dict) -> list[dict]:
-    """Phase 23 (fix a): zombie-session cleanup — a tick step (300 s
-    cadence). A clean ``/exit`` whose CC died can leave the tmux session
+    """Phase 23 (fix a): zombie-session cleanup — a 5 s fast-pass step
+    (Phase 25: reaped in ~5-10 s, not the 300 s tick). A clean ``/exit``
+    whose CC died can leave the tmux session
     ALIVE on the orphaned progress-pane (no CC, no restart — launch is
     one-shot): the 2026-09-30 c19b zombie the user's "kill it" commands
     could not reach (they landed in the progress pane).
@@ -1675,11 +1678,11 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
     (P10-D12).
 
     Phase 21 — one loop, two cadences: EVERY iteration runs the
-    exit-hang fast pass (``EXIT_HANG_POLL_S`` = 5s); the full tick
-    (probe + session scan) only when ``watchdog_interval_s`` has
-    elapsed. The first iteration ticks immediately (the old
-    every-iteration-was-a-tick startup behavior). ``max_ticks`` counts
-    full ticks."""
+    fast pass (``EXIT_HANG_POLL_S`` = 5s) — the exit-hang check AND the
+    zombie-session cleanup (Phase 25); the full tick (probe + session
+    scan) only when ``watchdog_interval_s`` has elapsed. The first
+    iteration ticks immediately (the old every-iteration-was-a-tick
+    startup behavior). ``max_ticks`` counts full ticks."""
     if not cfg.get("watchdog_enabled"):
         return 0
     interval = float(cfg.get("watchdog_interval_s", 300))
@@ -1730,6 +1733,16 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
             check_exit_hangs(ctx)
         except Exception:
             _log_error("exit_hang")
+        # zombie-session cleanup (Phase 25): a 5 s fast-pass step, NOT the
+        # 300 s tick — an off pane orphaned on its progress-pane must be
+        # reaped in ~5-10 s (grace + one poll). A no-op pass writes nothing.
+        try:
+            zline = {"ts": ctx.now, "events": []}
+            check_zombie_sessions(ctx, zline)
+            if zline["events"]:
+                _log_line(zline)
+        except Exception:
+            _log_error("zombie")
         if last_tick is None or ctx.now - last_tick >= interval:
             last_tick = ctx.now
             try:

@@ -294,6 +294,36 @@ def test_run_forever_fast_pass_every_iteration_tick_at_interval(cc_home):
     assert io.ps_calls == 61
 
 
+def test_run_forever_zombie_check_runs_every_fast_pass(cc_home, monkeypatch):
+    # Phase 25: zombie cleanup is a 5 s fast-pass step (like exit-hang),
+    # NOT the 300 s full tick — an orphaned off-pane must be reaped in
+    # ~5-10 s, not ~7 min. So run_forever must call check_zombie_sessions
+    # once per loop iteration (61 at 5 s steps over 300 s), not once per
+    # tick (2).
+    io = FakeIO(health_ok=True, sessions=["cc-proj-a-0a9b"])
+    calls = {"n": 0}
+    real = watchdogd.check_zombie_sessions
+
+    def spy(ctx, line):
+        calls["n"] += 1
+        return real(ctx, line)
+
+    monkeypatch.setattr(watchdogd, "check_zombie_sessions", spy)
+    cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300}
+    rc = watchdogd.run_forever(cfg, max_ticks=2, sleep=lambda s: None,
+                               now=_advancing_now(5.0),
+                               probe=io.probe, capture=io.capture,
+                               list_sessions=io.list_sessions,
+                               send=io.send, list_panes=io.list_panes,
+                               ps_snapshot=io.ps_snapshot,
+                               read_transcript=io.read_transcript,
+                               is_alive=io.is_alive, kill=io.kill,
+                               kill_session=io.kill_session,
+                               probe_gen=io.probe_generation)
+    assert rc == 0
+    assert calls["n"] == 61  # every fast-pass iteration, not 2 full ticks
+
+
 # --- collect / resolve -------------------------------------------------------
 
 
@@ -2272,7 +2302,7 @@ def _m_off(key="proj-a", nnn=1, tmux=_ZS, off=True, updated_epoch=9000.0,
            turn_active=False):
     """An off record (the zombie candidate). updated_epoch pins the
     off-time: 9000.0 is 1000 s before the pinned now (10_000.0) → past
-    the 120 s grace; 9950.0 is 50 s → within grace."""
+    the 5 s grace (Phase 25); 9996.0 is 4 s → within grace."""
     state.create_session_state(key, f"{key}-{nnn:03d}", nnn,
                                session_id=f"sid-{key}-{nnn}",
                                initial_state="ACTIVE")
@@ -2366,9 +2396,9 @@ def test_check_zombie_sessions_claude_in_pane_no_kill(cc_home, monkeypatch):
 
 
 def test_check_zombie_sessions_within_grace_no_kill(cc_home, monkeypatch):
-    # off only 50 s ago (< the 120 s grace) -> wait, do not kill
+    # Phase 25: off only 4 s ago (< the 5 s grace) -> wait, do not kill
     pushes = _capture_pushes(monkeypatch)
-    _m_off(updated_epoch=9950.0)  # now=10_000 -> 50 s ago
+    _m_off(updated_epoch=9996.0)  # now=10_000 -> 4 s ago (< 5 s grace)
     io = _zombie_io()
     ctx = _exit_ctx(io)
     line = _zline()
