@@ -2330,6 +2330,27 @@ def test_check_zombie_sessions_live_record_points_to_s_no_kill(cc_home,
     assert _ZS not in ctx.zombie_killed
 
 
+def test_check_zombie_sessions_stale_live_fallback_no_shield(cc_home,
+                                                             monkeypatch):
+    # 2026-10-01 connector-3fe6 regression: a LIVE record whose OWN
+    # tmux_session is dead (absent from list_sessions) but which
+    # resolve_pane would prefix-fall-back to the orphaned zombie session
+    # must NOT shield it. Only a live record's DIRECT tmux_session
+    # protects a pane; a stale record's fallback target is not ownership.
+    pushes = _capture_pushes(monkeypatch)
+    _m_off(updated_epoch=9000.0)  # off zombie candidate -> _ZS
+    _mk(key="proj-a", nnn=2, tmux="cc-proj-a-dead",
+        turn_active=False)  # live record, dead pane
+    io = _zombie_io()  # sessions=(_ZS,) only
+    ctx = _exit_ctx(io)
+    line = _zline()
+    actions = watchdogd.check_zombie_sessions(ctx, line)
+    assert io.kill_session_calls == [_ZS]
+    assert len(actions) == 1 and actions[0]["session"] == _ZS
+    assert _ZS in ctx.zombie_killed
+    assert any(ev[0] == "zombie_cleaned" for ev in pushes)
+
+
 def test_check_zombie_sessions_claude_in_pane_no_kill(cc_home, monkeypatch):
     # a live claude in the session's panes -> NOT a zombie -> no kill
     pushes = _capture_pushes(monkeypatch)
