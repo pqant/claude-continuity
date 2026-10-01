@@ -1593,14 +1593,21 @@ def check_zombie_sessions(ctx: TickCtx, line: dict) -> list[dict]:
         return []
     if sessions is None:
         return []
-    # (3): the set of sessions a live record RESOLVES to — never kill one
-    # of these (shared pane / in-place rotation). Same resolution the
-    # nudge path uses, so a live record's fallback target is protected too.
+    # (3): the set of sessions a live record DIRECTLY names — never kill
+    # one of these (shared pane / in-place rotation). Deliberately the
+    # record's OWN tmux_session, NOT resolve_pane's prefix fallback: with
+    # many stale off=False records whose tmux_session is dead, the prefix
+    # fallback ("exactly one live cc-<slug> pane") resolves ALL of them to
+    # the one orphaned pane and would shield it from cleanup forever
+    # (2026-10-01 connector-3fe6: dead records 001-014/066 all fell back
+    # to the no-CC 3fe6 pane and blocked check_zombie_sessions). A pane a
+    # live record is truly using holds a CC — condition (4) already
+    # protects those; only the direct field is a real ownership claim here.
     live_targets: set = set()
-    for key, _nnn, rec in collect_live_sessions():
-        target = resolve_pane(rec, notify.project_slug(key), sessions)
-        if target:
-            live_targets.add(target)
+    for _key, _nnn, rec in collect_live_sessions():
+        t = rec.get("tmux_session")
+        if isinstance(t, str) and t.strip() and t.strip() in sessions:
+            live_targets.add(t.strip())
     now = ctx.now if ctx.now is not None else time.time()
     # cheap filters FIRST (1, 2, 3, 5) — a no-op pass still writes zero ps
     cands: list[tuple[str, int, str]] = []
