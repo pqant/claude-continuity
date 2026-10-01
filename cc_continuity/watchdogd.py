@@ -639,16 +639,24 @@ def read_transcript_entries(cwd: str,
     transcript (a --continue/--resume replay writes a fresh /exit marker
     to its own old file), and attributing it to this session's CC is the
     2026-09-30 16:10 false-positive kill. A marker must live in THIS
-    session's transcript; no own file → None (no marker possible).
-    Without ``session_id`` (old-format records) the legacy dir-newest
-    read stands. No directory / no files / unreadable → None."""
+    session's transcript.
+    Phase 21.3 (2026-10-01 connector-066 bug): when ``session_id`` is set
+    but its ``<sid>.jsonl`` is MISSING, the id is STALE — CC took a new
+    session id on a --resume/rotation without cc-continuity updating
+    state.json. Giving up (None) is exactly the exit-hang killer bug: it
+    could never find the real marker. Fall through to the legacy dir-newest
+    read — the process's REAL transcript is the newest file in its cwd-dir.
+    The cp-069 start-time guard + the no-activity-after rule in
+    ``exit_hang_due`` still screen the fallback read (a fresh process's
+    foreign marker is still rejected). No directory / no files / unreadable
+    → None."""
     cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
     d = Path(cfg_dir) / "projects" / transcript_slug(cwd)
     if session_id:
         f = d / f"{session_id}.jsonl"
-        if not f.is_file():
-            return None
-        return _read_transcript_tail(f)
+        if f.is_file():
+            return _read_transcript_tail(f)
+        # stale id -> fall through to the dir-newest read below (Phase 21.3)
     try:
         files = [f for f in d.glob("*.jsonl") if f.is_file()]
     except OSError:
