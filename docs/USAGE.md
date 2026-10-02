@@ -28,9 +28,10 @@ six `continuity-*` skills, the `cc-continuity` launcher on `PATH`, and the
 app copy in `~/.claude-continuity/app/`.
 
 > **Updating/reinstalling: always from the dev tree**
-> (`python3 -m cc_continuity.cli install`). Running the bare
-> `cc-continuity install` command from the already-installed app is not
-> supported and can corrupt the app directory (known issue, being tracked).
+> (`python3 -m cc_continuity.cli install`). The bare `cc-continuity install`
+> run from the already-installed app is refused with a clear error — the
+> installed copy is the install source, so copying it onto itself would
+> delete the live app. Re-run from the dev tree.
 
 ## 2. Daily use
 

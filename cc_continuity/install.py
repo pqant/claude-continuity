@@ -184,6 +184,13 @@ def copy_app(app_root: Path) -> Path:
     app_root = Path(app_root)
     pkg_src = Path(__file__).resolve().parent
     pkg_dst = app_root / "cc_continuity"
+    if pkg_src == pkg_dst.resolve():
+        # Bare `cc-continuity install` run from the installed app dir: the
+        # source IS the destination — rmtree+copytree would delete the live
+        # app (self-destruct). Refuse; install from the dev tree instead.
+        raise InstallError(
+            "refusing to install from the installed app dir "
+            f"({pkg_src}) — run install from the dev tree")
     if pkg_dst.exists():
         shutil.rmtree(pkg_dst)
     shutil.copytree(pkg_src, pkg_dst,
