@@ -339,6 +339,58 @@ def test_collect_live_sessions_filters(cc_home):
     assert got == {("proj-a", 1)}
 
 
+# --- Phase 26 (A fix b): read-side session_end skip --------------------------
+
+
+def test_session_ended_on_disk_chain_tail(cc_home):
+    sdir = _mk()
+    assert not watchdogd.session_ended_on_disk("proj-a", 1)  # no ledger
+    ledger.append(sdir, {"type": "user_prompt"})
+    assert not watchdogd.session_ended_on_disk("proj-a", 1)
+    ledger.append(sdir, {"type": "session_end", "reason": "other"})
+    assert watchdogd.session_ended_on_disk("proj-a", 1)
+    # a ghost daemon write after session_end does NOT un-end it (P10-P9
+    # idiom: the daemon's own entries are not chain activity — the 2026-10-01
+    # dev 001-036 cohort all end session_end, watchdog_freeze)
+    ledger.append(sdir, {"type": "watchdog_freeze"})
+    assert watchdogd.session_ended_on_disk("proj-a", 1)
+    ledger.append(sdir, {"type": "needs_human", "reason": "x",
+                         "source": "watchdog"})
+    assert watchdogd.session_ended_on_disk("proj-a", 1)
+    # chain activity after session_end (a new turn in the record) → live
+    ledger.append(sdir, {"type": "user_prompt"})
+    assert not watchdogd.session_ended_on_disk("proj-a", 1)
+
+
+def test_tick_skips_record_whose_chain_ends_session_end(cc_home, monkeypatch):
+    # the 2026-10-01 connector cohort: state ACTIVE/off=False, dead tmux,
+    # ledger chain ends session_end → NOT monitored: no session entry, no
+    # unresolvable event, no nudge
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, sessions=[])  # dead tmux
+    _mk(turn_active=True, tmux="cc-proj-a-dead")
+    sdir = paths.session_dir("proj-a", 1)
+    ledger.append(sdir, {"type": "session_start"})
+    ledger.append(sdir, {"type": "session_end", "reason": "other"})
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"] == []
+    assert not [e for e in line["events"] if e.startswith("unresolvable")]
+    assert io.sends == [] and pushes == []
+
+
+def test_tick_still_monitors_record_without_session_end(cc_home, monkeypatch):
+    # fail-open direction: a record without a session_end chain tail is
+    # monitored exactly as before (a live session is never unwatched)
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(health_ok=True, sessions=[])
+    _mk(turn_active=True, tmux="cc-proj-a-dead")
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "UNRESOLVABLE"
+    assert io.sends == [] and pushes == []
+
+
 def test_resolve_pane_field_wins_when_live():
     # the field wins over the (ambiguous) prefix fallback — but only while
     # it still exists in the live tmux session list
