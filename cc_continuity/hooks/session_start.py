@@ -7,9 +7,11 @@ var set by the Phase 7 wrapper, else the project counter). Plain
 startups register in ACTIVE; with a pending checkpoint (Phase 4
 ``pending_consumption``) the session starts in BOOTSTRAPPING and gets
 the C.5 notice. ``compact`` injects a short post-compaction state block
-(spec §6.7). ``resume``/``fork`` are no-op re-attaches (spec D1) that re-record the
-``tmux_session`` field (a resume may land in a NEW tmux session —
-regression 2026-09-27 046).
+(spec §6.7). ``resume``/``fork`` re-attach (spec D1) when the conversation has a record —
+re-recording the ``tmux_session`` field (a resume may land in a NEW tmux
+session — regression 2026-09-27 046) — and register a NEW record when it does
+not (Phase 27: CC's native auto-resume leaves the resumed conversation
+unmonitored).
 ``clear`` claims the latest claimable session (ROTATING / AMCL /
 CHECKPOINT_VERIFIED, successor unset) — successor record + C.4
 injection + ``runtime/<sid>.started`` — or registers exactly like a
@@ -40,12 +42,32 @@ def handle(ctx: HookContext) -> dict | None:
         # regression 2026-09-27 046: resuming a conversation in a NEW tmux
         # session (relaunch with --continue) must re-record the pane, or
         # the field stays stale (dead pane) and every nudge/digest
-        # CAPTURE_FAILED while the session looks fine. Re-attach only:
-        # no registration, no state change, no output.
+        # CAPTURE_FAILED while the session looks fine.
         if ctx.session is not None:
+            # Re-attach only: no registration, no state change, no output.
             _record_tmux_session(ctx.session["project_key"],
                                  int(ctx.session["nnn"]))
-        return None
+            return None
+        # Phase 27: a resumed conversation with NO matching record runs
+        # unmonitored — CC's native auto-resume (lastSessionId) abandons
+        # the startup session ~5 s after launch and the old conversation
+        # has no record of its own (2026-10-02: connector 067-071,
+        # a7c36f64 unmonitored for 3 weeks). Register it.
+        cwd = ctx.payload.get("cwd")
+        session_id = ctx.payload.get("session_id")
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        try:
+            root = project.resolve_root(cwd)
+            key = project.project_key_for_root(root)
+            _register(ctx, key, session_id, source=source)
+            return _pending_notice(ctx, key)
+        except Exception:
+            log_error(f"SessionStart({source}): registration failed for "
+                      f"{session_id}")
+            return None
     if source != "startup":
         return None
     cwd = ctx.payload.get("cwd")
@@ -101,17 +123,19 @@ def _clear(ctx: HookContext) -> dict | None:
         return None
 
 
-def _register(ctx: HookContext, key: str, session_id: str) -> None:
+def _register(ctx: HookContext, key: str, session_id: str,
+              source: str = "startup") -> None:
     record = project.ensure_project(ctx.payload["cwd"])
     sessions = record.get("sessions") or []
     predecessor = sessions[-1]["name"] if sessions else None
-    name, nnn = _decide_name(key, record["slug"])
+    name, nnn = _decide_name(key, record["slug"],
+                             allow_env=(source == "startup"))
     initial = "BOOTSTRAPPING" if _pending_checkpoint(key) else "ACTIVE"
     state.create_session_state(key, name, nnn, session_id,
                                predecessor=predecessor, initial_state=initial)
     project.record_session(key, name, session_id, nnn)
     ledger.append(paths.session_dir(key, nnn),
-                  {"type": "session_start", "source": "startup",
+                  {"type": "session_start", "source": source,
                    "name": name, "nnn": nnn})
     notify.safe_send(ctx.cfg, "session_started",
                      slug=notify.project_slug(key), nnn=nnn, name=name,
@@ -119,12 +143,19 @@ def _register(ctx: HookContext, key: str, session_id: str) -> None:
     _record_tmux_session(key, nnn)
 
 
-def _decide_name(key: str, slug: str) -> tuple[str, int]:
-    """Wrapper-supplied name wins when it ends in ``-<digits>`` (PRD §13)."""
-    env_name = os.environ.get("CC_CONTINUITY_NAME", "").strip()
-    _base, seq = naming.split_name(env_name)
-    if seq is not None:
-        return env_name, project.next_counter(key, requested=seq)
+def _decide_name(key: str, slug: str,
+                 allow_env: bool = True) -> tuple[str, int]:
+    """Wrapper-supplied name wins when it ends in ``-<digits>`` (PRD §13).
+
+    ``allow_env=False`` (Phase 27 resume/fork): the env name belongs to the
+    ABANDONED startup process that re-fired the resume hook — the counter
+    name wins, or the dead startup's name would be reused.
+    """
+    if allow_env:
+        env_name = os.environ.get("CC_CONTINUITY_NAME", "").strip()
+        _base, seq = naming.split_name(env_name)
+        if seq is not None:
+            return env_name, project.next_counter(key, requested=seq)
     nnn = project.next_counter(key)
     return naming.logical_name(slug, nnn), nnn
 
