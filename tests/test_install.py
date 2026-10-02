@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -87,6 +88,22 @@ def test_app_copy_has_no_pycache(fake_home):
     assert (app / "hooks" / "common.py").is_file()
     assert not list(app.rglob("__pycache__"))
     assert not list(app.rglob("*.pyc"))
+
+
+def test_copy_app_refuses_self_copy(tmp_path, monkeypatch):
+    # Bare `cc-continuity install` run from the installed app dir must raise,
+    # not rmtree itself (Phase 26.1). Simulated with a copy of the package so
+    # the dev tree is never at risk, even if the guard is missing.
+    app_root = tmp_path / "app"
+    pkg_copy = app_root / "cc_continuity"
+    real_pkg = Path(install.__file__).resolve().parent
+    shutil.copytree(real_pkg, pkg_copy,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    monkeypatch.setattr(install, "__file__", str(pkg_copy / "install.py"))
+    with pytest.raises(install.InstallError, match="dev tree"):
+        install.copy_app(app_root)
+    # The "installed" package must be untouched — no self-destruct.
+    assert (pkg_copy / "install.py").is_file()
 
 
 def test_realistic_seed_preserves_user_entries(fake_home):
