@@ -732,6 +732,32 @@ def collect_off_sessions() -> list[tuple[str, int, dict]]:
     return out
 
 
+def session_ended_on_disk(key: str, nnn: int) -> bool:
+    """Phase 26 (A fix b, read-side): True when the record's ledger
+    chain ends with ``session_end`` — the named session is over even
+    though state.json may still say ACTIVE/off=False (a non-resume exit
+    reason never flips ``off`` — the 2026-10-01 connector 001-008/
+    011-014/066 cohort: 13 UNRESOLVABLEs per 300 s tick).
+
+    The daemon's own entries (``_DAEMON_TYPES`` + watchdog-sourced
+    ``needs_human``) are excluded — the SAME idiom as ``last_ledger_ts``
+    (P10-P9): a ghost ``watchdog_freeze`` written after ``session_end``
+    (a dead record resolving onto a live pane) is daemon noise, not
+    chain activity. Missing/empty/corrupt ledger → False (fail open: a
+    live session is never unwatched)."""
+    try:
+        entries = ledger.read(paths.session_dir(key, nnn))
+    except (OSError, ValueError):
+        return False
+    for e in reversed(entries):
+        if e.get("type") in _DAEMON_TYPES:
+            continue
+        if e.get("type") == "needs_human" and e.get("source") == "watchdog":
+            continue
+        return e.get("type") == "session_end"
+    return False
+
+
 def resolve_pane(rec: dict, slug: str,
                  sessions: list[str] | None) -> str | None:
     """P10-D9/P10-P6: the nudge target. The hook-recorded
@@ -1329,6 +1355,15 @@ def tick(ctx: TickCtx) -> dict:
     escalated: set = set()
 
     for key, nnn, rec in collect_live_sessions():
+        # Phase 26 (A fix b, read-side): ledger chain ends with
+        # session_end → the named session is over; state.json may still
+        # say ACTIVE/off=False (a non-resume exit reason never flips
+        # off — the 2026-10-01 connector cohort). Not monitored: no
+        # entry, no unresolvable event. The kill paths (check_exit_hangs
+        # / check_zombie_sessions) do NOT use this skip — their
+        # live-record passes stay intact (Phase 21/23).
+        if session_ended_on_disk(key, nnn):
+            continue
         sid = (key, nnn)
         entry = {"key": key, "nnn": nnn, "outcome": None}
         line["sessions"].append(entry)
