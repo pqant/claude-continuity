@@ -2,8 +2,9 @@
 
 Register project + session (name from wrapper env or counter), create state
 in BOOTSTRAPPING, append a ledger entry, inject the C.5 notice when a
-checkpoint is pending consumption. Other sources (clear/resume/compact/fork)
-do not register — Phases 5–6 own them.
+checkpoint is pending consumption. "compact" does not register;
+"resume"/"fork" re-attach when the conversation has a record and register a
+new one when it does not (Phase 27 — CC native auto-resume).
 """
 
 import json
@@ -79,13 +80,80 @@ def test_repeated_startup_same_sid_is_idempotent(cc_home, tmp_path):
 
 
 # Phase 6: "clear" now registers (P6-D3) — it is no longer a no-op source.
-@pytest.mark.parametrize("source", ["resume", "compact", "fork"])
-def test_non_startup_sources_do_not_register(cc_home, tmp_path, source):
+# Phase 27: "resume"/"fork" now register when the conversation has no
+# record (CC native auto-resume) — only "compact" stays a no-op source.
+def test_compact_source_does_not_register(cc_home, tmp_path):
     repo = make_repo(tmp_path)
     p = fixture_payload("SessionStart", repo, session_id=SID)
-    p["source"] = source
+    p["source"] = "compact"
     assert run_hook("SessionStart", p) == 0
     assert not (paths.projects_dir() / project_key_for(repo) / "project.json").exists()
+
+
+def test_resume_without_record_registers_new_session(cc_home, tmp_path):
+    # Phase 27: CC native auto-resume (lastSessionId) abandons the startup
+    # session ~5 s after launch; the resumed conversation had no record and
+    # ran unmonitored. SessionStart(resume) with no matching record must
+    # register it.
+    repo = make_repo(tmp_path)
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "resume"
+    assert run_hook("SessionStart", p) == 0
+
+    pref = _project_record(repo)
+    assert pref["counter"] == 1
+    assert len(pref["sessions"]) == 1
+    s = pref["sessions"][0]
+    assert s["name"] == "spike-repo-001"
+    assert s["session_id"] == SID
+    assert s["nnn"] == 1
+
+    key = project_key_for(repo)
+    st = state.load_state(key, 1)
+    assert st["session_id"] == SID
+    assert st["state"] == "ACTIVE"
+
+    entries = ledger.read(paths.session_dir(key, 1))
+    assert len(entries) == 1
+    assert entries[0]["type"] == "session_start"
+    assert entries[0]["source"] == "resume"
+
+
+def test_fork_without_record_registers_new_session(cc_home, tmp_path):
+    repo = make_repo(tmp_path)
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "fork"
+    assert run_hook("SessionStart", p) == 0
+    key = project_key_for(repo)
+    assert state.load_state(key, 1)["session_id"] == SID
+    assert ledger.read(paths.session_dir(key, 1))[0]["source"] == "fork"
+
+
+def test_resume_with_existing_record_only_reattaches(cc_home, tmp_path):
+    # Phase 27 must not double-register: a resume whose conversation ALREADY
+    # has a record keeps the re-attach-only behavior (no new counter).
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo, session_id=SID))
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "resume"
+    assert run_hook("SessionStart", p) == 0
+    pref = _project_record(repo)
+    assert pref["counter"] == 1
+    assert len(pref["sessions"]) == 1
+
+
+def test_resume_ignores_wrapper_name(cc_home, monkeypatch, tmp_path):
+    # The CC_CONTINUITY_NAME env belongs to the ABANDONED startup process
+    # (same process re-fired the resume); the resumed conversation must
+    # register under the counter name, not the dead startup's.
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("CC_CONTINUITY_NAME", "proj-017")
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "resume"
+    run_hook("SessionStart", p)
+    key = project_key_for(repo)
+    assert state.load_state(key, 1)["name"] == "spike-repo-001"
+    assert _project_record(repo)["counter"] == 1
 
 
 def test_wrapper_name_with_numeric_suffix_wins(cc_home, monkeypatch, tmp_path):
@@ -473,16 +541,20 @@ def test_resume_rerecords_tmux_session(cc_home, tmp_path, fake_tmux_name,
     assert rec["state"] == "ACTIVE"  # re-attach only — no state change
 
 
-def test_resume_unregistered_sid_is_silent(cc_home, tmp_path,
-                                           fake_tmux_name):
-    # resume of a sid the system never registered: nothing to re-record
+def test_resume_unregistered_sid_registers_and_records_tmux(
+        cc_home, tmp_path, fake_tmux_name):
+    # Phase 27: a resume of a sid the system never registered now registers
+    # a fresh record (CC native auto-resume left these conversations
+    # unmonitored) and records the tmux session at registration.
     repo = make_repo(tmp_path)
     p = fixture_payload("SessionStart", repo,
                         session_id="99999999-9999-9999-9999-999999999999")
     p["source"] = "resume"
     assert run_hook("SessionStart", p) == 0
-    assert not (paths.projects_dir() / project_key_for(repo)
-                / "project.json").exists()
+    key = project_key_for(repo)
+    rec = state.load_state(key, 1)
+    assert rec["session_id"] == "99999999-9999-9999-9999-999999999999"
+    assert rec["tmux_session"] == "cc-spike-repo-0a9b"
 
 
 def test_clear_claim_records_tmux_session(cc_home, tmp_path, fake_tmux_name):
