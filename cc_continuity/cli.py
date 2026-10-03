@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from . import (__version__, checkpoint, config, ledger, naming,
+from . import (__version__, bootstrap, checkpoint, config, ledger, naming,
                paths, project, progress_pane, state, statusline,
                thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
@@ -214,6 +214,23 @@ def _resolve_session(root: Path, key: str) -> tuple[dict | None, dict | None]:
     if rec is not None and rec.get("project_key") != key:
         rec = None
     return rec, best[1]
+
+
+def _late_attach(root: Path, key: str, metric: dict | None) -> dict | None:
+    """Phase 28: register the running conversation when it has no record.
+
+    The status line's runtime marker carries the live session id even for
+    unregistered conversations (e.g. a process started before the Phase 27
+    resume registration — 2026-10-03 connector a7c36f64). Returns the
+    fresh state record, or None when no marker/sid is available.
+    """
+    sid = metric.get("session_id") if metric else None
+    if not isinstance(sid, str) or not sid:
+        return None
+    cfg = config.load_config()
+    _key, nnn = bootstrap.register_session(root, sid, cfg=cfg)
+    print(f"registered {nnn:03d} (no record existed)")
+    return state.load_state(_key, nnn)
 
 
 def collect_status(cwd: str | Path | None = None) -> dict:
@@ -412,10 +429,12 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
     key = project.project_key_for_root(root)
     record, metric = _resolve_session(root, key)
     if record is None:
-        print("No registered session for this project "
-              "(a project registers itself on its first hook).",
-              file=sys.stderr)
-        return 1
+        record = _late_attach(root, key, metric)
+        if record is None:
+            print("No registered session for this project "
+                  "(a project registers itself on its first hook).",
+                  file=sys.stderr)
+            return 1
     try:
         cp_id, degraded = checkpoint.finalize(key, record["nnn"], cfg=cfg,
                                               root=root, metric=metric)
@@ -436,9 +455,12 @@ def cmd_request_rotation(args: argparse.Namespace) -> int:
     key = project.project_key_for_root(root)
     record, metric = _resolve_session(root, key)
     if record is None:
-        print("No registered session for this project "
-              "(a project registers itself on its first hook).", file=sys.stderr)
-        return 1
+        record = _late_attach(root, key, metric)
+        if record is None:
+            print("No registered session for this project "
+                  "(a project registers itself on its first hook).",
+                  file=sys.stderr)
+            return 1
     nnn = int(record["nnn"])
     ratio = (metric.get("ratio") if metric and not statusline.is_stale(metric)
              else None)

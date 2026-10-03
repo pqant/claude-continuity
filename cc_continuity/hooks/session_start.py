@@ -22,10 +22,7 @@ skeleton for every event that carries ``CLAUDE_ENV_FILE``.
 
 from __future__ import annotations
 
-import json
 import math
-import os
-import subprocess
 
 from .. import (bootstrap, checkpoint, ledger, lock, naming, notify, paths,
                 project, state, statusline)
@@ -45,8 +42,8 @@ def handle(ctx: HookContext) -> dict | None:
         # CAPTURE_FAILED while the session looks fine.
         if ctx.session is not None:
             # Re-attach only: no registration, no state change, no output.
-            _record_tmux_session(ctx.session["project_key"],
-                                 int(ctx.session["nnn"]))
+            bootstrap.record_tmux_session(ctx.session["project_key"],
+                                          int(ctx.session["nnn"]))
             return None
         # Phase 27: a resumed conversation with NO matching record runs
         # unmonitored — CC's native auto-resume (lastSessionId) abandons
@@ -62,7 +59,7 @@ def handle(ctx: HookContext) -> dict | None:
         try:
             root = project.resolve_root(cwd)
             key = project.project_key_for_root(root)
-            _register(ctx, key, session_id, source=source)
+            _register(ctx, session_id, source=source)
             return _pending_notice(ctx, key)
         except Exception:
             log_error(f"SessionStart({source}): registration failed for "
@@ -80,7 +77,7 @@ def handle(ctx: HookContext) -> dict | None:
         root = project.resolve_root(cwd)
         key = project.project_key_for_root(root)
         if ctx.session is None:
-            _register(ctx, key, session_id)
+            _register(ctx, session_id)
         return _pending_notice(ctx, key)
     except Exception:
         log_error(f"SessionStart(startup): registration failed for {session_id}")
@@ -113,101 +110,28 @@ def _clear(ctx: HookContext) -> dict | None:
         if res is not None:
             bootstrap.write_started(session_id)
             notify_claimed(ctx.cfg, key, res)
-            _record_tmux_session(key, res["new_nnn"])
+            bootstrap.record_tmux_session(key, res["new_nnn"])
             return session_start_output(res["bootstrap_text"])
         if ctx.session is None:
-            _register(ctx, key, session_id)
+            _register(ctx, session_id)
         return _pending_notice(ctx, key)
     except Exception:
         log_error(f"SessionStart(clear): claim failed for {session_id}")
         return None
 
 
-def _register(ctx: HookContext, key: str, session_id: str,
+def _register(ctx: HookContext, session_id: str,
               source: str = "startup") -> None:
-    record = project.ensure_project(ctx.payload["cwd"])
-    sessions = record.get("sessions") or []
-    predecessor = sessions[-1]["name"] if sessions else None
-    name, nnn = _decide_name(key, record["slug"],
-                             allow_env=(source == "startup"))
-    initial = "BOOTSTRAPPING" if _pending_checkpoint(key) else "ACTIVE"
-    state.create_session_state(key, name, nnn, session_id,
-                               predecessor=predecessor, initial_state=initial)
-    project.record_session(key, name, session_id, nnn)
-    ledger.append(paths.session_dir(key, nnn),
-                  {"type": "session_start", "source": source,
-                   "name": name, "nnn": nnn})
-    notify.safe_send(ctx.cfg, "session_started",
-                     slug=notify.project_slug(key), nnn=nnn, name=name,
-                     host=notify.host())
-    _record_tmux_session(key, nnn)
-
-
-def _decide_name(key: str, slug: str,
-                 allow_env: bool = True) -> tuple[str, int]:
-    """Wrapper-supplied name wins when it ends in ``-<digits>`` (PRD §13).
-
-    ``allow_env=False`` (Phase 27 resume/fork): the env name belongs to the
-    ABANDONED startup process that re-fired the resume hook — the counter
-    name wins, or the dead startup's name would be reused.
-    """
-    if allow_env:
-        env_name = os.environ.get("CC_CONTINUITY_NAME", "").strip()
-        _base, seq = naming.split_name(env_name)
-        if seq is not None:
-            return env_name, project.next_counter(key, requested=seq)
-    nnn = project.next_counter(key)
-    return naming.logical_name(slug, nnn), nnn
-
-
-def _tmux_bin() -> str:
-    return os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
-
-
-def _record_tmux_session(key: str, nnn: int) -> None:
-    """P10-D9.1: record the pane's tmux session name (the watchdog's
-    primary nudge target).
-
-    Only when ``$TMUX`` is set; one fast subprocess (2 s timeout — the
-    hook keeps its ~100 ms budget in the common case); every failure
-    path is swallowed — this must never break the hook (P10-D12).
-    """
-    if not os.environ.get("TMUX"):
-        return
-    try:
-        proc = subprocess.run(
-            [_tmux_bin(), "display-message", "-p", "#{session_name}"],
-            capture_output=True, timeout=2)
-    except (OSError, subprocess.SubprocessError):
-        return
-    if proc.returncode != 0:
-        return
-    name = proc.stdout.decode(errors="replace").strip()
-    if not name:
-        return
-    try:
-        state.update_fields(key, nnn, tmux_session=name)
-    except Exception:
-        pass
+    bootstrap.register_session(ctx.payload["cwd"], session_id,
+                               cfg=ctx.cfg, source=source,
+                               allow_env=(source == "startup"))
 
 
 def _pending_notice(ctx: HookContext, key: str) -> dict | None:
-    cp = _pending_checkpoint(key)
+    cp = bootstrap.pending_checkpoint(key)
     if cp is None:
         return None
     return session_start_output(_c5_text(cp, key))
-
-
-def _pending_checkpoint(key: str) -> dict | None:
-    try:
-        rec = json.loads(
-            (paths.project_dir(key) / "project.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    cp = rec.get("latest_checkpoint")
-    if isinstance(cp, dict) and cp.get("pending_consumption"):
-        return cp
-    return None
 
 
 def _compact_notice(ctx: HookContext) -> dict | None:

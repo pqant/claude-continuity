@@ -218,6 +218,54 @@ def test_cli_checkpoint_no_session(cc_home, tmp_path, capsys):
     assert "No registered session" in r.stderr
 
 
+def _unregistered_with_marker(tmp_path):
+    """A repo with a status-line runtime marker but no record — the
+    Phase 28 late-attach case (live conversation, never registered)."""
+    from cc_continuity import project as _project
+    from cc_continuity import statusline as _sl
+    repo = make_repo(tmp_path)
+    root = _project.resolve_root(repo)
+    _sl.write_metric({"session_id": SID, "project_dir": str(root),
+                      "ts": time.time()})
+    return repo, root
+
+
+def test_cli_checkpoint_unregistered_registers_and_finalizes(cc_home, tmp_path):
+    # Phase 28: the running conversation has no record — the command
+    # registers it (counter name, source=manual) and checkpoints it,
+    # instead of erroring with "No registered session".
+    from cc_continuity import paths as _paths
+    from cc_continuity import project as _project
+    repo, root = _unregistered_with_marker(tmp_path)
+    r = _run_cli("checkpoint", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": ""})
+    assert r.returncode == 0, r.stderr
+    assert "registered 001" in r.stdout
+    assert "DEGRADED" in r.stdout
+    key = _project.project_key_for_root(root)
+    st = state.load_state(key, 1)
+    assert st["session_id"] == SID
+    assert st["name"] == "spike-repo-001"
+    assert st["state"] == "CHECKPOINT_VERIFIED"
+    entries = ledger.read(_paths.session_dir(key, 1))
+    entries[0].pop("ts")  # ledger.append always adds ts
+    assert entries[0] == {"type": "session_start", "source": "manual",
+                          "name": "spike-repo-001", "nnn": 1}
+
+
+def test_cli_request_rotation_unregistered_registers(cc_home, tmp_path):
+    # Phase 28: the same late-attach hole, same fix, for request-rotation.
+    from cc_continuity import project as _project
+    repo, root = _unregistered_with_marker(tmp_path)
+    r = _run_cli("request-rotation", cwd=repo,
+                 env_extra={"CC_CONTINUITY_SESSION": ""})
+    assert r.returncode == 0, r.stderr
+    assert "registered 001" in r.stdout
+    assert "Rotation pending" in r.stdout
+    key = _project.project_key_for_root(root)
+    assert state.load_state(key, 1)["state"] == "ROTATION_PENDING"
+
+
 def test_cli_validate_e2e(cc_home, tmp_path):
     repo, key, nnn, sid = _registered(tmp_path)
     from cc_continuity import paths as _paths

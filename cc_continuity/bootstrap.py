@@ -13,11 +13,13 @@ the ``UserPromptSubmit`` ``CONTINUITY RESUME`` fallback (P6-D5).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import (atomic, checkpoint, ledger, naming, paths, state, thresholds,
-               validate)
+from . import (atomic, checkpoint, ledger, naming, notify, paths,
+               project, state, thresholds, validate)
 
 
 def _now() -> str:
@@ -61,6 +63,105 @@ def write_started(session_id: str) -> Path:
     path = paths.runtime_dir() / f"{session_id}.started"
     atomic.atomic_write_text(path, "started\n")
     return path
+
+
+def pending_checkpoint(key: str) -> dict | None:
+    """``latest_checkpoint`` while ``pending_consumption`` (else None)."""
+    try:
+        rec = json.loads(
+            (paths.project_dir(key) / "project.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    cp = rec.get("latest_checkpoint")
+    if isinstance(cp, dict) and cp.get("pending_consumption"):
+        return cp
+    return None
+
+
+def _decide_name(key: str, slug: str,
+                 allow_env: bool = True) -> tuple[str, int]:
+    """Wrapper-supplied name wins when it ends in ``-<digits>`` (PRD §13).
+
+    ``allow_env=False`` (Phase 27 resume/fork, Phase 28 CLI late attach):
+    the env name belongs to the ABANDONED startup process — the counter
+    name wins, or the dead startup's name would be reused.
+    """
+    if allow_env:
+        env_name = os.environ.get("CC_CONTINUITY_NAME", "").strip()
+        _base, seq = naming.split_name(env_name)
+        if seq is not None:
+            return env_name, project.next_counter(key, requested=seq)
+    nnn = project.next_counter(key)
+    return naming.logical_name(slug, nnn), nnn
+
+
+def _tmux_bin() -> str:
+    return os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
+
+
+def record_tmux_session(key: str, nnn: int) -> None:
+    """P10-D9.1: record the pane's tmux session name (the watchdog's
+    primary nudge target).
+
+    Only when ``$TMUX`` is set; one fast subprocess (2 s timeout — the
+    hook keeps its ~100 ms budget in the common case); every failure
+    path is swallowed — this must never break the hook (P10-D12).
+    """
+    if not os.environ.get("TMUX"):
+        return
+    try:
+        proc = subprocess.run(
+            [_tmux_bin(), "display-message", "-p", "#{session_name}"],
+            capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if proc.returncode != 0:
+        return
+    name = proc.stdout.decode(errors="replace").strip()
+    if not name:
+        return
+    try:
+        state.update_fields(key, nnn, tmux_session=name)
+    except Exception:
+        pass
+
+
+def register_session(cwd, session_id: str, *, cfg: dict,
+                     source: str = "manual",
+                     allow_env: bool = False) -> tuple[str, int]:
+    """Register a conversation that has no record (late attach).
+
+    Phase 28: ``cc-continuity checkpoint`` / ``request-rotation`` run in
+    a session whose conversation was never registered (e.g. a process
+    started before the Phase 27 resume registration — 2026-10-03
+    connector a7c36f64, unmonitored at 72%). Creates its record the way
+    the SessionStart hook does — per-operation locking, since the helpers
+    take the project lock themselves and a wrapping ``lock.held`` would
+    self-deadlock (flock is not re-entrant): counter name (unless
+    ``allow_env``), state ACTIVE (BOOTSTRAPPING when a checkpoint is
+    pending), one ``session_start`` ledger entry, the
+    ``session_started`` push, tmux re-record.
+    Returns ``(key, nnn)``.
+    """
+    root = project.resolve_root(Path(cwd))
+    key = project.project_key_for_root(root)
+    record = project.ensure_project(str(cwd))
+    sessions = record.get("sessions") or []
+    predecessor = sessions[-1]["name"] if sessions else None
+    name, nnn = _decide_name(key, record["slug"], allow_env=allow_env)
+    initial = "BOOTSTRAPPING" if pending_checkpoint(key) else "ACTIVE"
+    state.create_session_state(key, name, nnn, session_id,
+                               predecessor=predecessor,
+                               initial_state=initial)
+    project.record_session(key, name, session_id, nnn)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "session_start", "source": source,
+                   "name": name, "nnn": nnn})
+    notify.safe_send(cfg, "session_started",
+                     slug=notify.project_slug(key), nnn=nnn, name=name,
+                     host=notify.host())
+    record_tmux_session(key, nnn)
+    return key, nnn
 
 
 def _new_work_since_handoff(cp_dir: Path, key: str,
