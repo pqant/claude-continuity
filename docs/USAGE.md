@@ -103,6 +103,11 @@ cc-continuity rotate --session <sid> --pane <pane> --rotation-id <id>
                                      # rotator entry — called by the Stop hook, not manual
 ```
 
+If the running conversation has no record yet (e.g. its process started
+before the Phase 27 resume registration), `checkpoint` /
+`request-rotation` register it first (counter name, ledger
+`source=manual`) and then proceed (Phase 28).
+
 ### Install and configuration
 
 ```bash
