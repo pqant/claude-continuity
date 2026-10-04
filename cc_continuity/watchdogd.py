@@ -374,6 +374,22 @@ def send_keys(target: str, *keys: str) -> bool:
     return proc.returncode == 0
 
 
+def send_literal(target: str, text: str) -> bool:
+    """tmux send-keys -t <target> -l <text> — text byte-for-byte (no
+    key-name parsing; newlines stay newlines). Phase 29: the nudge
+    text must land as ONE burst (the TUI reads it as a paste -> box
+    lines), and the submitting Enter goes as a SEPARATE call — an
+    Enter inside the same PTY burst is a paste newline, not a
+    submit (live bug cp-083: the nudge sat unsubmitted forever)."""
+    try:
+        proc = subprocess.run(
+            [_tmux_bin(), "send-keys", "-t", target, "-l", text],
+            capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 # --- exit-hang killer (Phase 21) -------------------------------------------------
 #
 # CC 2.1.209 can hang on /exit: the marker entry is written but the
@@ -876,6 +892,7 @@ class TickCtx:
     capture: object      # (target: str) -> str | None
     list_sessions: object  # () -> list[str] | None
     send: object         # (target: str, *keys: str) -> bool
+    send_text: object = None  # (target: str, text: str) -> bool (Phase 29 literal)
     now: float | None = None
     recover: object = None  # () -> dict (recover_network); None = no recovery
     cycle: object = None  # () -> dict (cycle_power); None = no auto-cycle
@@ -1000,6 +1017,15 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
     FROZEN > STALLED/PLAIN (pinned in test_watchdog). On the first
     physical NUDGE a ``frozen_nudge`` push goes out instead of
     ``turn_dead``.
+    Phase 29: the text goes out via ``ctx.send_text`` (tmux
+    ``send-keys -l`` — literal, one PTY burst) and the submitting
+    Enter as a SEPARATE ``ctx.send`` call. The TUI paste-detects a
+    single burst, so an Enter inside the same burst is a literal
+    newline, not a submit (the cp-083 bug: the nudge sat unsubmitted
+    and re-nudged forever). A text failure sends NO Enter (a blind
+    Enter would submit a stale/empty box); a lost Enter self-heals
+    via the input-box-aware ``pane_pending`` → SEND_ENTER on the next
+    tick.
     ``sent_text``: the text of the LAST nudge the daemon actually sent
     (``_last_nudge_text``) — the pending check must match THAT, because
     the freshly built text's context block differs per tick. On the
@@ -1054,7 +1080,9 @@ def _nudge_path(ctx: TickCtx, key: str, nnn: int, target: str, cap: str,
                 _log_error("send")
             (ctx.sleep or time.sleep)(ESCAPE_SETTLE_S)
         try:
-            ok = ctx.send(target, text, "Enter")
+            ok = ctx.send_text(target, text)
+            if ok:
+                ok = ctx.send(target, "Enter")
         except Exception:
             _log_error("send")
             ok = False
@@ -1701,6 +1729,7 @@ def check_zombie_sessions(ctx: TickCtx, line: dict) -> list[dict]:
 def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 sleep=time.sleep, now=time.time, probe=None,
                 capture=None, list_sessions=None, send=None,
+                send_text=None,
                 recover=None, cycle=None, last_cycle_ts=None,
                 record_cycle_ts=None, list_panes=None,
                 ps_snapshot=None, read_transcript=None, kill=None,
@@ -1732,6 +1761,7 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
         list_sessions=list_sessions if list_sessions is not None
         else list_tmux_sessions,
         send=send if send is not None else send_keys,
+        send_text=send_text if send_text is not None else send_literal,
         recover=(recover if recover is not None
                  else (lambda: recover_network(cfg))),
         cycle=(cycle if cycle is not None

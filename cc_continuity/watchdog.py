@@ -16,7 +16,7 @@ __all__ = [
     "ALIVE", "FROZEN", "IDLE_WAITING", "SKIP", "STALLED", "TURN_DEAD",
     "WAIT",
     "DONE", "GIVE_UP", "NUDGE", "RESEND", "SEND_ENTER", "WAIT_HEALTH",
-    "ERROR_TAIL_RE", "PROMPT_RE",
+    "ERROR_TAIL_RE", "INPUT_LINE_RE", "PROMPT_RE",
     "Episode", "HealthState",
     "build_nudge_text", "classify", "error_in_tail", "nudge_action",
     "pane_idle", "pane_pending", "power_cycle_due",
@@ -45,6 +45,16 @@ DONE = "DONE"
 # --- pane markers (P10-D6; module constants, not config — YAGNI) -------------
 #: Claude Code prompt glyph — "pane at prompt" = last non-empty line.
 PROMPT_RE = re.compile(r"^\s*❯")
+#: Input-box line: "❯" at column 0 or 2-space indented (first line of
+#: a multi-line box), NBSP/space/EOL after the symbol. CC 2.1.209
+#: renderings. Phase 29: shared with rotator (was rotator-private).
+INPUT_LINE_RE = re.compile(r"^ {0,2}❯([\xa0 ]|$)")
+
+
+def is_frame_line(s: str) -> bool:
+    """True for the input box's long "─" frame lines."""
+    s2 = s.strip()
+    return len(s2) >= 30 and s2.count("─") >= 0.8 * len(s2)
 #: Error strings observed in CC 2.x failure panes (2026-09). The bare
 #: ``error:`` option carries its own boundaries: a trailing ``\b`` inside
 #: the group would never match after the colon (no word boundary follows
@@ -162,7 +172,7 @@ def frozen_nudge_due(ticks: int, turn_active: bool, *,
     return ticks * interval_s >= minutes * 60
 
 
-def pane_pending(capture: str, nudge_text: str) -> bool:
+def _pane_pending_legacy(capture: str, nudge_text: str) -> bool:
     """True when the nudge text sits UNsubmitted in the input line: the
     last non-empty line is a prompt line containing ``nudge_text``
     (P10-D7.3 — the 11:30 lost-Enter case; the daemon then sends a bare
@@ -190,6 +200,42 @@ def pane_pending(capture: str, nudge_text: str) -> bool:
             break
     return (nudge_last is not None and last is not None
             and nudge_last in last.strip())
+
+
+def pane_pending(capture: str, nudge_text: str) -> bool:
+    """True when the nudge text sits UNsubmitted in the input box; the
+    daemon then sends a bare Enter instead of re-typing it (P10-D7.3).
+
+    Phase 29 — input-box aware: the statusline block renders BELOW the
+    box's bottom frame line, so the capture's last line is a status
+    line, never the box. The box's last line sits DIRECTLY ABOVE the
+    bottom-most frame line; when a nudge is pending it is the nudge's
+    last non-empty line (a long line may wrap -> tail fragment). No
+    frame line (busy spinner / error screen, no-frame fixtures) ->
+    legacy last-line match (P10-D7.3).
+    """
+    lines = capture.splitlines()
+    bottom = None
+    for i in range(len(lines) - 1, -1, -1):
+        if is_frame_line(lines[i]):
+            bottom = i
+            break
+    if bottom is None:
+        return _pane_pending_legacy(capture, nudge_text)
+    if bottom == 0:
+        return False
+    above = lines[bottom - 1]
+    m = INPUT_LINE_RE.match(above)
+    box_last = (above[m.end():].rstrip() if m is not None
+                else above.strip())
+    if not box_last:
+        return False
+    nudge_last = None
+    for line in reversed(nudge_text.splitlines()):
+        if line.strip():
+            nudge_last = line.strip()
+            break
+    return nudge_last is not None and nudge_last.endswith(box_last)
 
 
 # --- nudge text (Phase 19: the bare "continue" is "too little") ----------------
