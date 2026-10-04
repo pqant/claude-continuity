@@ -238,6 +238,50 @@ def test_pane_pending_multiline_tail_mismatch_is_false():
     assert watchdog.pane_pending(cap, text) is False
 
 
+# --- pane_pending Phase 29: input-box aware ----------------------------------
+# The statusline block renders BELOW the box's bottom frame line, so the
+# capture's last line is a status line, never the box: a pending nudge is
+# invisible to the legacy last-line match. The box's last line sits directly
+# ABOVE the bottom-most frame line.
+
+
+_FRAME = "─" * 100
+_STATUS = ("  [qwen3.8-27b | API] │ proj git:(main) │ sess-001\n"
+           "  Context ████░░░░░░ 39%\n"
+           "  ⏵⏵ bypass permissions on (shift+tab to cycle)")
+
+
+def test_pane_pending_box_above_statusline_block():
+    # the multi-line nudge sits in the box (❯ on the first line, tail line
+    # directly above the bottom frame); the statusline block is below.
+    tail = "[cc-continuity watchdog] The turn stalled (50 min idle) — Continue from where you left off."
+    cap = (f"⏺ done\n❯ continue\n{_FRAME}\n{tail}\n{_FRAME}\n{_STATUS}\n")
+    text = "continue\n\n" + tail
+    assert watchdog.pane_pending(cap, text) is True
+
+
+def test_pane_pending_wrapped_tail_line():
+    # the nudge's last line WRAPS at the pane width: the line above the
+    # bottom frame is the tail fragment (no ❯ glyph).
+    cap = (f"⏺ done\n❯ continue\n{_FRAME}\n"
+           "If unsure, check git status and\n"
+           "the last output.\n"
+           f"{_FRAME}\n{_STATUS}\n")
+    text = ("continue\n\n"
+            "If unsure, check git status and the last output first.")
+    assert watchdog.pane_pending(cap, text) is True
+
+
+def test_pane_pending_empty_box_with_statusline():
+    cap = f"⏺ done\n❯\n{_FRAME}\n{_STATUS}\n"
+    assert watchdog.pane_pending(cap, "continue") is False
+
+
+def test_pane_pending_other_text_in_box_is_false():
+    cap = f"⏺ done\n❯ something else\n{_FRAME}\n{_STATUS}\n"
+    assert watchdog.pane_pending(cap, "continue") is False
+
+
 # --- build_nudge_text (Phase 19: the bare "continue" is "too little") ---------
 
 

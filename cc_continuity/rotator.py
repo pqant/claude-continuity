@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -35,7 +34,7 @@ import time
 from pathlib import Path
 
 from . import (atomic, ledger, lock, naming, notify, paths, state,
-               statusline, thresholds)
+               statusline, thresholds, watchdog)
 from .hooks.common import log_event
 
 #: PRD §11 wait windows (seconds). Module constants so tests can shrink
@@ -53,16 +52,6 @@ SETTLE_POLLS = 2
 #: Cap for the pending-prompt note appended to the C.8 continuation prompt.
 PENDING_NOTE_CAP = 800
 
-#: Input-box line: "❯" at column 0 (active line, NBSP after the symbol)
-#: or 2-space indented (first line of a multi-line box), then optional
-#: NBSP/space. Renderings captured from Claude Code 2.1.209.
-_INPUT_LINE_RE = re.compile(r"^ {0,2}❯([\xa0 ]|$)")
-
-
-def _is_frame_line(s: str) -> bool:
-    """True for the input box's long "─" frame lines."""
-    s2 = s.strip()
-    return len(s2) >= 30 and s2.count("─") >= 0.8 * len(s2)
 
 
 class RotatorSpawnError(RuntimeError):
@@ -211,7 +200,7 @@ def _parse_input_box(pane_text: str) -> str:
     lines = pane_text.splitlines()
     bottom = None
     for i in range(len(lines) - 1, -1, -1):
-        if _is_frame_line(lines[i]):
+        if watchdog.is_frame_line(lines[i]):
             bottom = i
             break
     if bottom is None:
@@ -219,9 +208,9 @@ def _parse_input_box(pane_text: str) -> str:
     out: list[str] = []
     for i in range(bottom - 1, -1, -1):
         s = lines[i]
-        if _is_frame_line(s):
+        if watchdog.is_frame_line(s):
             continue
-        m = _INPUT_LINE_RE.match(s)
+        m = watchdog.INPUT_LINE_RE.match(s)
         if m is None:
             break
         out.append(s[m.end():].rstrip())

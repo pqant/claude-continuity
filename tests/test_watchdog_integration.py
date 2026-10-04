@@ -142,7 +142,8 @@ def test_e2e_dead_turn_down_wait_up_nudge_enter_verified(cc_home, tmp_path,
                   probe=lambda: watchdogd.probe_health(cfg),
                   capture=watchdogd.capture_pane,
                   list_sessions=watchdogd.list_tmux_sessions,
-                  send=watchdogd.send_keys, now=10_000.0)
+                  send=watchdogd.send_keys,
+                  send_text=watchdogd.send_literal, now=10_000.0)
 
     # 1-2: the server dies → DOWN after 2 failed probes; the dead turn
     #      must WAIT for the server (a nudge is a model call, P10-D7.1)
@@ -251,7 +252,8 @@ def test_e2e_restart_detection_no_dead_turn(cc_home, tmp_path, monkeypatch):
                   probe=lambda: watchdogd.probe_health(cfg),
                   capture=watchdogd.capture_pane,
                   list_sessions=watchdogd.list_tmux_sessions,
-                  send=watchdogd.send_keys, now=10_000.0)
+                  send=watchdogd.send_keys,
+                  send_text=watchdogd.send_literal, now=10_000.0)
 
     hstate["code"] = 500
     watchdogd.tick(ctx)            # failure 1: no transition yet

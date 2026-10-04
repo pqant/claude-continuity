@@ -155,6 +155,12 @@ class FakeIO:
         self.sends.append((target, *keys))
         return True
 
+    def send_text(self, target, text):
+        # Phase 29: the literal-text call (tmux send-keys -l) — recorded
+        # in the same ``sends`` list (arity 2, no "Enter" argument).
+        self.sends.append((target, text))
+        return True
+
 
 def _ctx(io, cfg_over=None, now=10_000.0, down=False):
     """A TickCtx on a liveness+health cfg; ``down`` pre-feeds two failed
@@ -167,7 +173,8 @@ def _ctx(io, cfg_over=None, now=10_000.0, down=False):
     ctx = TickCtx(cfg=cfg, health=HealthState(), episodes={},
                   prev_captures={}, froze=set(), probe=io.probe,
                   capture=io.capture, list_sessions=io.list_sessions,
-                  send=io.send, sleep=io.sleep, recover=io.recover,
+                  send=io.send, send_text=io.send_text, sleep=io.sleep,
+                  recover=io.recover,
                   cycle=io.cycle, last_cycle_ts=io.last_cycle_ts,
                   record_cycle_ts=io.record_cycle_ts, now=now,
                   probe_generation=io.probe_generation)
@@ -229,7 +236,7 @@ def test_run_forever_disabled_exits_0(cc_home):
     rc = watchdogd.run_forever(cfg, max_ticks=5, sleep=lambda s: None,
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send)
+                               send=io.send, send_text=io.send_text)
     assert rc == 0
     assert io.probe_calls == 0  # the loop never started
 
@@ -241,7 +248,8 @@ def test_run_forever_runs_max_ticks(cc_home):
                                now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send, probe_gen=io.probe_generation)
+                               send=io.send, send_text=io.send_text,
+                               probe_gen=io.probe_generation)
     assert rc == 0
     assert io.probe_calls == 3
     assert io.gen_probe_calls == 0  # no suspicion → no gen probe
@@ -261,7 +269,8 @@ def test_run_forever_tick_exception_survives(cc_home):
                                now=_advancing_now(305.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send, probe_gen=io.probe_generation)
+                               send=io.send, send_text=io.send_text,
+                               probe_gen=io.probe_generation)
     assert rc == 0
     assert io.probe_calls == 2  # continued past the crashed tick
     assert (paths.logs_dir() / "errors.log").is_file()
@@ -280,7 +289,7 @@ def test_run_forever_fast_pass_every_iteration_tick_at_interval(cc_home):
                                now=_advancing_now(5.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send,
+                               send=io.send, send_text=io.send_text,
                                list_panes=io.list_panes,
                                ps_snapshot=io.ps_snapshot,
                                read_transcript=io.read_transcript,
@@ -314,7 +323,8 @@ def test_run_forever_zombie_check_runs_every_fast_pass(cc_home, monkeypatch):
                                now=_advancing_now(5.0),
                                probe=io.probe, capture=io.capture,
                                list_sessions=io.list_sessions,
-                               send=io.send, list_panes=io.list_panes,
+                               send=io.send, send_text=io.send_text,
+                               list_panes=io.list_panes,
                                ps_snapshot=io.ps_snapshot,
                                read_transcript=io.read_transcript,
                                is_alive=io.is_alive, kill=io.kill,
@@ -710,8 +720,10 @@ def test_tick_turn_dead_nudges_when_up(cc_home, monkeypatch):
     line = watchdogd.tick(ctx)
     assert line["sessions"][0]["outcome"] == "TURN_DEAD"
     # Phase 19: force-cancel Escape, then the ENRICHED text (50 dk).
+    # Phase 29: literal text + separate Enter (2 calls).
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
-                        ("cc-proj-a-0a9b", _turn_dead_text(50), "Enter")]
+                        ("cc-proj-a-0a9b", _turn_dead_text(50)),
+                        ("cc-proj-a-0a9b", "Enter")]
     assert [p[0] for p in pushes] == ["turn_dead"]
     assert ctx.episodes[("proj-a", 1)].n == 1
     entries = ledger.read(sdir)
@@ -740,7 +752,8 @@ def test_tick_turn_dead_down_waits_then_up_nudges(cc_home, monkeypatch):
     # 10_300 — the normal loop owns it); the loop's nudge is the plain
     # form with the 2nd tick's idle minutes (55 dk).
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
-                        ("cc-proj-a-0a9b", _turn_dead_text(55), "Enter")]
+                        ("cc-proj-a-0a9b", _turn_dead_text(55)),
+                        ("cc-proj-a-0a9b", "Enter")]
     assert ctx.episodes[("proj-a", 1)].waiting_health is True
 
 
@@ -773,7 +786,7 @@ def test_tick_dgx_up_nudges_stuck_midturn_fresh_ledger(cc_home, monkeypatch):
     # Phase 19: ESC first, then the OUTAGE-form text (the DOWN/UP ts
     # strings are TZ-local — assert structure, not exact ts).
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
-    text = [s for s in io.sends if s[-1] == "Enter"][0][1]
+    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
     assert text.startswith("continue\n\n")
     assert "The model server is back online:" in text
     assert "(15 min down)" in text
@@ -809,10 +822,10 @@ def test_tick_dgx_up_recovery_fires_once_not_every_up_tick(cc_home):
     io.ok = True
     ctx.now = 10_900.0
     watchdogd.tick(ctx)  # transition tick -> one nudge
-    assert len(io.sends) == 2  # Phase 19: ESC + text+Enter
+    assert len(io.sends) == 3  # Phase 29: ESC + literal text + separate Enter
     ctx.now = 11_000.0  # still UP, NOT a transition -> no re-nudge
     watchdogd.tick(ctx)
-    assert len(io.sends) == 2
+    assert len(io.sends) == 3
 
 
 # --- tick: nudge restriction to the most-recently-active session ---------------
@@ -844,7 +857,8 @@ def test_tick_only_most_recent_nudged_when_config_on(cc_home, monkeypatch):
     assert by[("proj-b", 1)] == "TURN_DEAD"
     # only the most-recent eligible (a) is nudged; b stays dormant.
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
-                        ("cc-proj-a-0a9b", _turn_dead_text(50), "Enter")]
+                        ("cc-proj-a-0a9b", _turn_dead_text(50)),
+                        ("cc-proj-a-0a9b", "Enter")]
 
 
 def test_tick_focus_healthy_most_recent_preempts_dead_older(cc_home, monkeypatch):
@@ -878,8 +892,8 @@ def test_tick_turn_dead_nudges_all_when_config_off(cc_home, monkeypatch):
     ctx = _ctx(io, now=10_000.0)  # key not set -> off
     watchdogd.tick(ctx)
     assert {s[0] for s in io.sends} == {"cc-proj-a-0a9b", "cc-proj-b-0b9c"}
-    # Phase 19: ESC + text+Enter per session
-    assert len(io.sends) == 4
+    # Phase 29: ESC + literal text + separate Enter per session
+    assert len(io.sends) == 6
 
 
 def test_tick_dgx_up_recovery_only_most_recent_when_config_on(cc_home, monkeypatch):
@@ -900,7 +914,7 @@ def test_tick_dgx_up_recovery_only_most_recent_when_config_on(cc_home, monkeypat
     # Phase 19: ESC first, then the OUTAGE-form text (the DOWN/UP ts
     # strings are TZ-local — assert structure, not exact ts).
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
-    text = [s for s in io.sends if s[-1] == "Enter"][0][1]
+    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
     assert text.startswith("continue\n\n")
     assert "The model server is back online:" in text
     kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
@@ -926,11 +940,13 @@ def test_tick_dgx_up_recovery_nudges_all_when_config_off(cc_home, monkeypatch):
     ctx.now = 10_900.0
     watchdogd.tick(ctx)
     assert {s[0] for s in io.sends} == {"cc-proj-a-0a9b", "cc-proj-b-0b9c"}
-    # Phase 19: ESC + text+Enter per session, all OUTAGE-form.
-    assert len(io.sends) == 4
+    # Phase 29: ESC + literal text + separate Enter per session, all
+    # OUTAGE-form.
+    assert len(io.sends) == 6
     kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
-    assert all(f"(15 dk {kapaliydi})" in s[1]
-               for s in io.sends if s[-1] == "Enter")
+    texts = [s[1] for s in io.sends if s[1].startswith("continue")]
+    assert len(texts) == 2
+    assert all(f"(15 dk {kapaliydi})" in t for t in texts)
 
 
 def test_tick_verification_pushes_recovered(cc_home, monkeypatch):
@@ -960,15 +976,16 @@ def test_tick_send_enter_on_unchanged_pending_pane(cc_home, monkeypatch):
     _stale_prompt(sdir, now=10_000.0)
     ctx = _ctx(io, now=10_000.0)
     t1 = _turn_dead_text(50)
-    watchdogd.tick(ctx)  # NUDGE: ESC + text + Enter; the Enter was lost…
+    watchdogd.tick(ctx)  # NUDGE: ESC + literal text + Enter; Enter was lost…
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
-                        ("cc-proj-a-0a9b", t1, "Enter")]
+                        ("cc-proj-a-0a9b", t1),
+                        ("cc-proj-a-0a9b", "Enter")]
     # …and the MULTI-LINE text now sits in the input box (the 11:30 case).
     io.pane = "some output line\n❯ continue\n" + t1.split("\n\n", 1)[1]
     ctx.now = 10_300.0
     l2 = watchdogd.tick(ctx)
     assert l2["sessions"][0]["outcome"] == "ALIVE"  # capture CHANGED
-    assert io.sends[-1] == ("cc-proj-a-0a9b", t1, "Enter")  # no-op
+    assert len(io.sends) == 3  # no-op: nothing new sent
     ctx.now = 10_600.0
     l3 = watchdogd.tick(ctx)  # now UNCHANGED → WAIT (multiline input)
     assert l3["sessions"][0]["outcome"] == "WAIT"
@@ -990,11 +1007,15 @@ def test_tick_give_up_after_three_unverified(cc_home, monkeypatch):
     assert ep.n == 3
     assert ep.given_up is True
     assert [p[0] for p in pushes] == ["turn_dead", "needs_human"]
-    # Phase 19: tick 1 ESC + T50, ticks 2-3 plain RESEND T55/T60, tick 4 []
+    # Phase 19: tick 1 ESC + T50, ticks 2-3 plain RESEND T55/T60, tick 4 [].
+    # Phase 29: each text is a literal call, the Enter a separate call.
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
-    assert io.sends[1] == ("cc-proj-a-0a9b", _turn_dead_text(50), "Enter")
-    assert io.sends[2] == ("cc-proj-a-0a9b", _turn_dead_text(55), "Enter")
-    assert io.sends[3] == ("cc-proj-a-0a9b", _turn_dead_text(60), "Enter")
+    assert io.sends[1] == ("cc-proj-a-0a9b", _turn_dead_text(50))
+    assert io.sends[2] == ("cc-proj-a-0a9b", "Enter")
+    assert io.sends[3] == ("cc-proj-a-0a9b", _turn_dead_text(55))
+    assert io.sends[4] == ("cc-proj-a-0a9b", "Enter")
+    assert io.sends[5] == ("cc-proj-a-0a9b", _turn_dead_text(60))
+    assert io.sends[6] == ("cc-proj-a-0a9b", "Enter")
     entries = ledger.read(sdir)
     assert entries[-1]["type"] == "needs_human"
     assert entries[-1]["source"] == "watchdog"
@@ -1079,7 +1100,8 @@ def test_tick_frozen_turn_escalates_after_threshold(cc_home, monkeypatch):
     frozen_text = watchdog.build_nudge_text("continue", now=10_000.0,
                                             frozen_minutes=20)
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
-                        ("cc-proj-a-0a9b", frozen_text, "Enter")]
+                        ("cc-proj-a-0a9b", frozen_text),
+                        ("cc-proj-a-0a9b", "Enter")]
     assert [p[0] for p in pushes] == ["freeze_detected", "frozen_nudge"]
     ev, slug, nnn, fields = pushes[1]
     assert (slug, nnn) == ("proj-a", 1)
@@ -1289,7 +1311,8 @@ def test_tick_nudge_esc_precedes_text_and_settles(cc_home, monkeypatch):
     t = "cc-proj-a-0a9b"
     assert io.sends[0] == (t, "Escape")
     assert io.slept == [0.75]
-    assert io.sends[1] == (t, _turn_dead_text(50), "Enter")
+    assert io.sends[1] == (t, _turn_dead_text(50))
+    assert io.sends[2] == (t, "Enter")
 
 
 def test_tick_resend_does_not_escape(cc_home, monkeypatch):
@@ -1306,8 +1329,9 @@ def test_tick_resend_does_not_escape(cc_home, monkeypatch):
     io.sends.clear()
     io.slept.clear()
     ctx.now = 10_300.0
-    watchdogd.tick(ctx)  # RESEND: text + Enter only
-    assert io.sends == [("cc-proj-a-0a9b", _turn_dead_text(55), "Enter")]
+    watchdogd.tick(ctx)  # RESEND: literal text + separate Enter only
+    assert io.sends == [("cc-proj-a-0a9b", _turn_dead_text(55)),
+                        ("cc-proj-a-0a9b", "Enter")]
     assert io.slept == []
 
 
@@ -1325,7 +1349,7 @@ def test_tick_dgx_up_nudge_text_includes_power_cycle_when_in_window(
     io.ok = True
     ctx.now = 10_900.0
     watchdogd.tick(ctx)
-    text = [s for s in io.sends if s[-1] == "Enter"][0][1]
+    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
     assert chr(0x2192) + " power_cycle " in text
     kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
     assert f"(15 dk {kapaliydi})" in text
@@ -1341,7 +1365,7 @@ def test_tick_dgx_up_nudge_text_includes_power_cycle_when_in_window(
     io2.ok = True
     ctx2.now = 10_900.0
     watchdogd.tick(ctx2)
-    text2 = [s for s in io2.sends if s[-1] == "Enter"][0][1]
+    text2 = [s[1] for s in io2.sends if s[1].startswith("continue")][0]
     assert "power_cycle" not in text2
     assert f"(15 dk {kapaliydi})" in text2
 
@@ -1597,7 +1621,7 @@ def _exit_ctx(io, cfg_over=None, now=10_000.0):
     return TickCtx(cfg=cfg, health=HealthState(), episodes={},
                    prev_captures={}, froze=set(), probe=io.probe,
                    capture=io.capture, list_sessions=io.list_sessions,
-                   send=io.send, now=now,
+                   send=io.send, send_text=io.send_text, now=now,
                    list_panes=io.list_panes, ps_snapshot=io.ps_snapshot,
                    read_transcript=io.read_transcript,
                    is_alive=io.is_alive, kill=io.kill,
