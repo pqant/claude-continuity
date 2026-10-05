@@ -6,15 +6,29 @@ Phase 6). If reason == ``resume``, the startup's process was abandoned
 when it resumed a different conversation (relaunch with --continue): mark
 the session ``off`` so it does not linger as a live zombie in scans
 (regression 2026-09-27 047).
+
+Phase 30: the ledger entry is always appended, but the PUSH goes through
+the end-churn guard (``_end_push_allowed``) — a third-party app that
+re-spawns ``claude`` in the same project every minute used to push once
+a minute, indefinitely (live: ClaudeBar probe, 89 pushes / ~90 min).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import time
 
-from .. import ledger, notify, state
+from .. import atomic, ledger, notify, paths, state
 from .common import HookContext, log_error, log_event
+
+#: End-churn guard (Phase 30): >=3 session_end entries in the last
+#: SESSION_END_PUSH_STORM_WINDOW_S open a SESSION_END_PUSH_COOLDOWN_S
+#: suppression window for the push (the ledger entry is never touched).
+SESSION_END_PUSH_STORM_WINDOW_S = 10 * 60
+SESSION_END_PUSH_STORM_THRESHOLD = 3
+SESSION_END_PUSH_COOLDOWN_S = 30 * 60
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -24,9 +38,10 @@ def handle(ctx: HookContext) -> dict | None:
     if ctx.session is None:
         return None
     ledger.append(ctx.session_dir, {"type": "session_end", "reason": reason})
-    notify.safe_send(ctx.cfg, "session_end",
-                     slug=notify.project_slug(ctx.session["project_key"]),
-                     nnn=int(ctx.session["nnn"]), reason=reason)
+    if _end_push_allowed(ctx):
+        notify.safe_send(ctx.cfg, "session_end",
+                         slug=notify.project_slug(ctx.session["project_key"]),
+                         nnn=int(ctx.session["nnn"]), reason=reason)
     if reason == "clear" and ctx.session.get("state") == "ROTATING":
         log_event(
             f"SessionEnd reason=clear while state=ROTATING "
@@ -45,6 +60,51 @@ def handle(ctx: HookContext) -> dict | None:
             log_error("SessionEnd(resume): marking session off failed")
     _cleanup_progress_pane()
     return None
+
+
+def _end_push_allowed(ctx: HookContext) -> bool:
+    """The Phase 30 end-churn guard; decides only the PUSH, never the
+    ledger append (audit data). Never raises — any error fails OPEN
+    (the push goes).
+
+    With >=``SESSION_END_PUSH_STORM_THRESHOLD`` ``session_end`` entries
+    in this session's last 10 minutes, the first such end opens a
+    suppression window (one event-log line, recorded in the project's
+    ``push-suppress.json``); ends inside the cooldown are silent; when
+    the cooldown elapses the next end pushes again and reopens the
+    window — a continuing storm stays visible at 1 push / cooldown, not
+    1 / minute. A missing or corrupt state file starts a fresh window.
+    """
+    try:
+        now = time.time()
+        ends = [e for e in ledger.read(ctx.session_dir)
+                if e.get("type") == "session_end"
+                and isinstance(e.get("ts"), (int, float))
+                and e["ts"] >= now - SESSION_END_PUSH_STORM_WINDOW_S]
+        if len(ends) < SESSION_END_PUSH_STORM_THRESHOLD:
+            return True
+        st = (paths.project_dir(ctx.session["project_key"])
+              / "push-suppress.json")
+        rearm = False
+        try:
+            last = json.loads(st.read_text(encoding="utf-8"))["ts"]
+            rearm = (isinstance(last, (int, float))
+                     and now - last >= SESSION_END_PUSH_COOLDOWN_S)
+        except (OSError, ValueError, KeyError):
+            pass  # missing (first window) or corrupt -> fresh window
+        atomic.atomic_write_json(st, {"ts": now, "ends": len(ends)})
+        if rearm:
+            # window elapsed: the push goes out (the storm stays
+            # visible) and the window reopens from this end
+            return True
+        log_event(
+            f"session_end push suppressed (churn: {len(ends)} ends in "
+            f"10m, project {ctx.session['project_key']}, "
+            f"session {int(ctx.session['nnn']):03d})")
+        return False
+    except Exception:
+        log_error("SessionEnd: push storm guard error (failing open)")
+        return True
 
 
 def _cleanup_progress_pane() -> None:
