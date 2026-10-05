@@ -219,3 +219,128 @@ def test_session_end_drops_only_own_server_entry(
         (paths.runtime_dir() / "progress-pane.json").read_text())
     assert "s1111@7" not in rec
     assert rec["s2222@7"] == {"pane_id": "%32", "ts": 1.0}
+
+
+# ------------------- Phase 30: SessionEnd push storm guard
+#
+# A third-party app (a menu-bar monitor) re-spawns `claude` in the same
+# project every ~60 s; CC native auto-resume re-attaches to the last
+# conversation and the probe dies seconds later — one SessionEnd push
+# per minute, indefinitely (live: probe-004 89 pushes / ~90 min,
+# probe-005 74). The ledger entry is ALWAYS appended (audit data); only
+# the push is limited: >=3 ends in a 10 m window open a suppression
+# window (one event-log line); ends inside the 30 m cooldown are silent;
+# an elapsed cooldown re-arms — the next end pushes again and reopens
+# the window, so a continuing storm stays visible at 1 push / cooldown.
+import time
+
+from cc_continuity import notify as _notify
+from cc_continuity.hooks import session_end as se_mod
+
+_STATE_FILE = "push-suppress.json"
+
+
+def _enable_notify(cc_home):
+    (cc_home / "config.json").write_text(_json.dumps({
+        "notify_enabled": True,
+        "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+
+
+def _capture_sends(monkeypatch):
+    sent = []
+    monkeypatch.setattr(_notify, "send",
+                        lambda ep, title, body, prio, **kw: sent.append(
+                            (title, body)) or True)
+    return sent
+
+
+def test_session_end_first_two_ends_still_push(cc_home, tmp_path,
+                                               monkeypatch):
+    # guardrail: below the churn threshold every end pushes as before
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    register_session(repo)
+    sent = _capture_sends(monkeypatch)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 2
+    assert sent[0] == ("■ cc-continuity: session ended",
+                       "proj=spike-repo 001 reason=other")
+
+
+def test_session_end_third_end_in_window_suppresses_push(cc_home, tmp_path,
+                                                         monkeypatch):
+    # the live probe storm, ends every ~61 s: the first two push; the
+    # third (>=3 in 10 m) opens the suppression window — no push, one
+    # event-log line, but the ledger entry is still appended
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    key, nnn = register_session(repo)
+    sent = _capture_sends(monkeypatch)
+    for _ in range(3):
+        run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 2  # the 3rd end's push was suppressed
+    ends = [e for e in ledger.read(paths.session_dir(key, nnn))
+            if e["type"] == "session_end"]
+    assert len(ends) == 3  # audit data is never suppressed
+    assert (paths.project_dir(key) / _STATE_FILE).is_file()
+    events = cc_home / "logs" / "events.log"
+    assert "session_end push suppressed" in events.read_text()
+
+
+def test_session_end_suppression_cooldown_rearms_push(cc_home, tmp_path,
+                                                      monkeypatch):
+    # after the cooldown elapses the next end pushes again (a continuing
+    # storm stays visible at 1 push / cooldown, not 1 / minute) and
+    # reopens the window for the following ends
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    register_session(repo)
+    sent = _capture_sends(monkeypatch)
+    monkeypatch.setattr(se_mod, "SESSION_END_PUSH_COOLDOWN_S", 0.2)
+    for _ in range(3):
+        run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 2  # 3rd suppressed, window open
+    time.sleep(0.3)  # cooldown elapsed
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 3  # re-armed: the push goes out
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 3  # window reopened: next end silent again
+
+
+def test_session_end_ends_outside_window_do_not_count(cc_home, tmp_path,
+                                                      monkeypatch):
+    # two ends from 12 minutes ago are outside the 10 m churn window:
+    # this end is the 1st that counts, so it pushes (no suppression)
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    key, nnn = register_session(repo)
+    d = paths.session_dir(key, nnn)
+    old = time.time() - 720
+    ledger.append(d, {"type": "session_end", "reason": "other", "ts": old})
+    ledger.append(d, {"type": "session_end", "reason": "other", "ts": old})
+    sent = _capture_sends(monkeypatch)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 1
+    assert not (cc_home / "logs" / "events.log").exists()
+
+
+def test_session_end_corrupt_state_file_self_heals(cc_home, tmp_path,
+                                                   monkeypatch):
+    # a corrupt push-suppress.json must not break the guard: the 3rd end
+    # is still suppressed and the state file is rewritten valid
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    key, nnn = register_session(repo)
+    sent = _capture_sends(monkeypatch)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    st = paths.project_dir(key) / _STATE_FILE
+    st.write_text("not-json{{", encoding="utf-8")
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 2  # still suppressed
+    rec = _json.loads(st.read_text(encoding="utf-8"))
+    assert isinstance(rec["ts"], (int, float))
+    assert "session_end push suppressed" in (
+        cc_home / "logs" / "events.log").read_text()
