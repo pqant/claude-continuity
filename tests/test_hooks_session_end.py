@@ -344,3 +344,90 @@ def test_session_end_corrupt_state_file_self_heals(cc_home, tmp_path,
     assert isinstance(rec["ts"], (int, float))
     assert "session_end push suppressed" in (
         cc_home / "logs" / "events.log").read_text()
+
+
+# ------------------- Phase 30.1: declared-noise projects + window fidelity
+#
+# The churn guard is behavioral (any app) but cannot NAME a source: the
+# SessionEnd payload carries cwd, never the spawning app. What
+# cc-continuity CAN name is the PROJECT (cwd -> project key) — and a
+# third-party app's probe dir IS its own project (ClaudeBar:
+# probe-12f448d3). Config's ``session_end_push_suppress_projects``
+# declares such projects: their SessionEnd pushes are suppressed from
+# the FIRST end (the churn guard would still let 2 through) and NEVER
+# re-arm (a declared noise source stays silent, not 1 push / cooldown);
+# each suppression window logs one line.
+#
+# Also pinned: a suppression window is opened ONCE. Ends inside the
+# cooldown must stay silent WITHOUT re-logging or rewriting the state —
+# a per-end rewrite would re-arm the window forever and the re-arm push
+# (storm stays visible at 1 / cooldown) would never fire during a
+# continuous storm.
+
+def _declare_project(cc_home, key):
+    (cc_home / "config.json").write_text(_json.dumps({
+        "notify_enabled": True,
+        "notify_endpoint": "https://ntfy.sh/example-topic",
+        "session_end_push_suppress_projects": [key]}),
+        encoding="utf-8")
+
+
+def test_session_end_window_is_not_reset_by_inside_ends(cc_home, tmp_path,
+                                                        monkeypatch):
+    # ends keep coming through the cooldown: the 4th (inside the window)
+    # stays silent — no re-log, no state rewrite; only an ELAPSED window
+    # re-arms the push
+    repo = make_repo(tmp_path)
+    _enable_notify(cc_home)
+    key, nnn = register_session(repo)
+    sent = _capture_sends(monkeypatch)
+    monkeypatch.setattr(se_mod, "SESSION_END_PUSH_COOLDOWN_S", 2.0)
+    for _ in range(4):
+        run_hook("SessionEnd", payload("SessionEnd", repo))
+        time.sleep(0.15)
+    assert len(sent) == 2  # 3rd and 4th suppressed
+    events = cc_home / "logs" / "events.log"
+    assert events.read_text().count("session_end push suppressed") == 1
+    st = paths.project_dir(key) / _STATE_FILE
+    opened = _json.loads(st.read_text(encoding="utf-8"))["ts"]
+    st.write_text(_json.dumps({"ts": opened - 999, "ends": 3}),
+                  encoding="utf-8")  # fake an elapsed window
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert len(sent) == 3  # re-armed: the push goes out
+
+
+def test_session_end_declared_project_suppresses_from_first_end(
+        cc_home, tmp_path, monkeypatch):
+    # a project key in session_end_push_suppress_projects: even the
+    # FIRST end pushes nothing (churn would let 2 through); the ledger
+    # entry is still appended; one log line opens the window
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    _declare_project(cc_home, key)
+    sent = _capture_sends(monkeypatch)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert sent == []
+    ends = [e for e in ledger.read(paths.session_dir(key, nnn))
+            if e["type"] == "session_end"]
+    assert len(ends) == 2  # audit data untouched
+    events = (cc_home / "logs" / "events.log").read_text()
+    assert events.count("session_end push suppressed") == 1
+    assert "declared project" in events
+
+
+def test_session_end_declared_project_rearm_stays_silent(cc_home, tmp_path,
+                                                         monkeypatch):
+    # unlike the churn re-arm, a declared project NEVER pushes again:
+    # after the cooldown the next end re-logs the window but no push
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    _declare_project(cc_home, key)
+    sent = _capture_sends(monkeypatch)
+    monkeypatch.setattr(se_mod, "SESSION_END_PUSH_COOLDOWN_S", 0.2)
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    time.sleep(0.3)  # window elapsed
+    run_hook("SessionEnd", payload("SessionEnd", repo))
+    assert sent == []
+    events = (cc_home / "logs" / "events.log").read_text()
+    assert events.count("session_end push suppressed") == 2

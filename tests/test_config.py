@@ -227,3 +227,9 @@ def test_load_config_merges_power_plug_keys(cc_home, tmp_path):
     assert cfg["power_plug_ip"] == "192.0.2.77"
     assert cfg["power_cycle_off_s"] == 20
     assert cfg["power_plug_port"] == 9999  # untouched default survives
+
+
+def test_defaults_have_phase30_keys():
+    # Phase 30.1: declared noise projects (e.g. a third-party app's probe
+    # dir — its own project) whose SessionEnd pushes are always suppressed.
+    assert config.DEFAULTS["session_end_push_suppress_projects"] == []

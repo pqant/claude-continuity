@@ -20,7 +20,7 @@ import os
 import subprocess
 import time
 
-from .. import atomic, ledger, notify, paths, state
+from .. import atomic, config, ledger, notify, paths, state
 from .common import HookContext, log_error, log_event
 
 #: End-churn guard (Phase 30): >=3 session_end entries in the last
@@ -67,39 +67,58 @@ def _end_push_allowed(ctx: HookContext) -> bool:
     ledger append (audit data). Never raises — any error fails OPEN
     (the push goes).
 
-    With >=``SESSION_END_PUSH_STORM_THRESHOLD`` ``session_end`` entries
-    in this session's last 10 minutes, the first such end opens a
-    suppression window (one event-log line, recorded in the project's
-    ``push-suppress.json``); ends inside the cooldown are silent; when
-    the cooldown elapses the next end pushes again and reopens the
-    window — a continuing storm stays visible at 1 push / cooldown, not
-    1 / minute. A missing or corrupt state file starts a fresh window.
+    Two triggers, one mechanism (the project's ``push-suppress.json``,
+    one event-log line per opened window):
+
+    * declared (Phase 30.1) — the project key is in config's
+      ``session_end_push_suppress_projects`` (a named noise source,
+      e.g. a third-party app's probe dir): suppressed from the FIRST
+      end and NEVER re-armed — a declared source stays silent, not
+      1 push / cooldown.
+    * churn — >=``SESSION_END_PUSH_STORM_THRESHOLD`` ``session_end``
+      entries in this session's last 10 minutes (live: ClaudeBar
+      probe, 89 pushes / ~90 min): the first such end opens a
+      suppression window; ends inside the cooldown are silent WITHOUT
+      touching the state (a rewrite would re-arm the window forever);
+      when the cooldown elapses the next end pushes again and reopens
+      the window — a continuing storm stays visible at 1 push /
+      cooldown, not 1 / minute.
+
+    A missing or corrupt state file starts a fresh window.
     """
     try:
         now = time.time()
+        key = ctx.session["project_key"]
+        declared = key in config.session_end_push_suppress(ctx.cfg)
         ends = [e for e in ledger.read(ctx.session_dir)
                 if e.get("type") == "session_end"
                 and isinstance(e.get("ts"), (int, float))
                 and e["ts"] >= now - SESSION_END_PUSH_STORM_WINDOW_S]
-        if len(ends) < SESSION_END_PUSH_STORM_THRESHOLD:
+        if not declared and len(ends) < SESSION_END_PUSH_STORM_THRESHOLD:
             return True
-        st = (paths.project_dir(ctx.session["project_key"])
-              / "push-suppress.json")
-        rearm = False
+        st = paths.project_dir(key) / "push-suppress.json"
+        fresh = False
+        elapsed = False
         try:
             last = json.loads(st.read_text(encoding="utf-8"))["ts"]
-            rearm = (isinstance(last, (int, float))
-                     and now - last >= SESSION_END_PUSH_COOLDOWN_S)
+            if isinstance(last, (int, float)):
+                if now - last < SESSION_END_PUSH_COOLDOWN_S:
+                    fresh = True
+                else:
+                    elapsed = True
         except (OSError, ValueError, KeyError):
-            pass  # missing (first window) or corrupt -> fresh window
+            pass  # missing (first window) or corrupt -> open a window
+        if fresh:
+            return False  # inside the window: silent, state untouched
         atomic.atomic_write_json(st, {"ts": now, "ends": len(ends)})
-        if rearm:
-            # window elapsed: the push goes out (the storm stays
+        if elapsed and not declared:
+            # churn window elapsed: the push goes out (the storm stays
             # visible) and the window reopens from this end
             return True
+        why = "declared project" if declared else \
+            f"churn: {len(ends)} ends in 10m"
         log_event(
-            f"session_end push suppressed (churn: {len(ends)} ends in "
-            f"10m, project {ctx.session['project_key']}, "
+            f"session_end push suppressed ({why}, project {key}, "
             f"session {int(ctx.session['nnn']):03d})")
         return False
     except Exception:

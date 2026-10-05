@@ -108,6 +108,14 @@ DEFAULTS: dict = {
         r"ghp_[A-Za-z0-9]{30,}",
     ],
     "log_level": "info",
+    # Phase 30.1: project keys whose SessionEnd pushes are ALWAYS
+    # suppressed — declared noise sources. A third-party app that
+    # re-spawns `claude` in a dedicated dir (a menu-bar monitor's probe
+    # dir) IS its own project; name that project here and its session
+    # end pushes go nowhere from the FIRST end, without waiting for the
+    # behavioral churn guard (which would still let 2 through). The
+    # ledger entry is still appended (audit data).
+    "session_end_push_suppress_projects": [],
 }
 
 
@@ -210,3 +218,17 @@ def progress_mode(cfg: dict) -> int:
     """
     v = cfg.get("progress_type", 0)
     return v if v in (0, 1, 2) else 0
+
+
+def session_end_push_suppress(cfg: dict) -> frozenset:
+    """Validated Phase 30.1 declared-noise project keys.
+
+    ``session_end_push_suppress_projects``: project keys whose
+    SessionEnd pushes are always suppressed. A missing key or any
+    invalid value (non-list, non-string entries) degrades to an empty
+    set, so an existing install behaves byte-identically to today.
+    """
+    v = cfg.get("session_end_push_suppress_projects")
+    if not isinstance(v, (list, tuple)):
+        return frozenset()
+    return frozenset(p for p in v if isinstance(p, str) and p)
