@@ -132,15 +132,13 @@ def test_defaults_have_phase10_keys():
     assert config.DEFAULTS["watchdog_interval_s"] == 300
     assert config.DEFAULTS["watchdog_stale_minutes"] == 45
     assert config.DEFAULTS["watchdog_max_nudges"] == 3
-    assert config.DEFAULTS["watchdog_nudge_text"] == "continue"
+    assert config.DEFAULTS["watchdog_nudge_text"] == "Continue."
     # Most-recent-only nudge restriction (DGX is a single shared model): off
     # by default = legacy behavior (every eligible session may be nudged).
     assert config.DEFAULTS["watchdog_nudge_only_most_recent"] is False
-    # P10 (network recovery): on a failed probe the daemon re-establishes the
-    # DGX route (macOS root wrapper, passwordless sudo) before re-probing.
-    # Empty string disables the step.
-    assert config.DEFAULTS["watchdog_network_recovery_cmd"] == \
-        "sudo -n /usr/local/libexec/dgx-network-recovery"
+    # On a failed probe the user-configured recovery command runs (opt-in);
+    # empty default disables the step.
+    assert config.DEFAULTS["watchdog_network_recovery_cmd"] == ""
 
 
 def test_defaults_have_phase22_keys():
@@ -166,9 +164,8 @@ def test_load_config_merges_watchdog_keys(cc_home, tmp_path):
     assert cfg["watchdog_stale_minutes"] == 30
     # unset keys keep defaults
     assert cfg["watchdog_max_nudges"] == 3
-    assert cfg["watchdog_nudge_text"] == "continue"
-    assert cfg["watchdog_network_recovery_cmd"] == \
-        "sudo -n /usr/local/libexec/dgx-network-recovery"
+    assert cfg["watchdog_nudge_text"] == "Continue."
+    assert cfg["watchdog_network_recovery_cmd"] == ""
 
 
 # --------------------------------------------------- progress_type (Phase 12)
@@ -209,12 +206,12 @@ def test_load_config_progress_type_merges(cc_home, tmp_path):
 
 
 # ------------------------------------------------- power plug (Phase 13)
-# The HS100 sits on the DGX power path; the IP is a placeholder default the
-# user overrides in config.json once the real plug LAN IP is known.
+# A Kasa-compatible smart plug on the LLM box's power path (opt-in);
+# empty default degrades the power-plug commands to ok:False.
 
 
 def test_defaults_have_phase13_power_plug_keys():
-    assert config.DEFAULTS["power_plug_ip"] == "192.0.2.99"
+    assert config.DEFAULTS["power_plug_ip"] == ""
     assert config.DEFAULTS["power_plug_port"] == 9999
     assert config.DEFAULTS["power_cycle_off_s"] == 8
 
@@ -227,6 +224,17 @@ def test_load_config_merges_power_plug_keys(cc_home, tmp_path):
     assert cfg["power_plug_ip"] == "192.0.2.77"
     assert cfg["power_cycle_off_s"] == 20
     assert cfg["power_plug_port"] == 9999  # untouched default survives
+
+
+def test_existing_personal_config_overrides_portable_defaults(cc_home, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({
+        "watchdog_network_recovery_cmd": "sudo -n /usr/local/bin/my-recovery",
+        "power_plug_ip": "192.0.2.99",
+        "watchdog_nudge_text": "my custom nudge"}), encoding="utf-8")
+    cfg = config.load_config(cwd=tmp_path)
+    assert cfg["watchdog_network_recovery_cmd"] == "sudo -n /usr/local/bin/my-recovery"
+    assert cfg["power_plug_ip"] == "192.0.2.99"
+    assert cfg["watchdog_nudge_text"] == "my custom nudge"
 
 
 def test_defaults_have_phase30_keys():
