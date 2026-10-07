@@ -57,7 +57,7 @@ DEFAULTS: dict = {
     "watchdog_interval_s": 300,
     "watchdog_stale_minutes": 45,
     "watchdog_max_nudges": 3,
-    "watchdog_nudge_text": "continue",
+    "watchdog_nudge_text": "Continue.",
     # The DGX model is a single shared resource. When True, at most ONE
     # session may be nudged per tick: the most-recently-active eligible one
     # (max last_ledger_ts — the same "most recently active" the digest relay
@@ -79,17 +79,18 @@ DEFAULTS: dict = {
     # detection. Must cover a slow-but-healthy generation, not just the
     # healthy median.
     "watchdog_gen_probe_timeout_s": 180,
-    # On a failed health probe the daemon runs this (macOS root wrapper,
-    # passwordless sudo) to re-establish the DGX route, then re-probes. Empty
-    # string disables the step. See setup_dgx_network_recovery.sh.
-    "watchdog_network_recovery_cmd":
-        "sudo -n /usr/local/libexec/dgx-network-recovery",
-    # Power-plug endpoint (Phase 13): the HS100 on the DGX power path,
-    # driven over the legacy Kasa LAN protocol. power_plug_ip is a
-    # placeholder — set the plug's real LAN IP in config.json; empty string
-    # degrades state/on/off/cycle to ok:False. power_plug_port is the
-    # PLUG's TCP port (not the local endpoint's, which is fixed 127.0.0.1:9999).
-    "power_plug_ip": "192.0.2.99",
+    # On a failed health probe the daemon runs this shell command (with
+    # the user's own rights) to repair connectivity, then re-probes.
+    # Empty string (default) disables the step; set a command in
+    # config.json to opt in.
+    "watchdog_network_recovery_cmd": "",
+    # Power-plug endpoint (Phase 13): a Kasa-compatible smart plug on
+    # the LLM box's power path, driven over the legacy Kasa LAN
+    # protocol. Empty string (default) degrades state/on/off/cycle to
+    # ok:False; set the plug's LAN IP in config.json to opt in.
+    # power_plug_port is the PLUG's TCP port (not the local endpoint's,
+    # which is fixed 127.0.0.1:9999).
+    "power_plug_ip": "",
     "power_plug_port": 9999,
     # Seconds the relay stays off during a cycle (DGX off-detection margin).
     "power_cycle_off_s": 8,
