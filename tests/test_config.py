@@ -241,3 +241,28 @@ def test_defaults_have_phase30_keys():
     # Phase 30.1: declared noise projects (e.g. a third-party app's probe
     # dir — its own project) whose SessionEnd pushes are always suppressed.
     assert config.DEFAULTS["session_end_push_suppress_projects"] == []
+
+
+# ------------------------------------------- redact pattern extensions (v0.1)
+# The public defaults stay generic; personal additions (a domain, an ntfy
+# topic) belong in redact_patterns_extra.
+
+
+def test_defaults_have_redact_patterns_extra():
+    assert config.DEFAULTS["redact_patterns_extra"] == []
+
+
+def test_redact_patterns_merges_base_and_extra():
+    cfg = dict(config.DEFAULTS)
+    cfg["redact_patterns_extra"] = [r"myorg[a-z0-9-]*\.com"]
+    pats = config.redact_patterns(cfg)
+    assert pats == config.DEFAULTS["redact_patterns"] + [r"myorg[a-z0-9-]*\.com"]
+
+
+def test_redact_patterns_invalid_types_degrade_to_base():
+    assert config.redact_patterns({"redact_patterns": "nope"}) == \
+        config.DEFAULTS["redact_patterns"]
+    assert config.redact_patterns({"redact_patterns": [1, 2]}) == \
+        config.DEFAULTS["redact_patterns"]
+    assert config.redact_patterns({"redact_patterns_extra": "nope"}) == \
+        config.DEFAULTS["redact_patterns"]

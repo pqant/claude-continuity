@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from .. import checkpoint, ledger, redact, state, thresholds
+from .. import checkpoint, config, ledger, redact, state, thresholds
 from .common import HookContext
 
 EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
@@ -45,7 +45,7 @@ def _tool_entry(ctx: HookContext) -> dict:
     elif tool == "Bash":
         command = tool_input.get("command")
         if isinstance(command, str):
-            entry["command"] = redact.Redactor(ctx.cfg.get("redact_patterns")
+            entry["command"] = redact.Redactor(config.redact_patterns(ctx.cfg)
                                                ).redact(command)[0][:MAX_COMMAND_CHARS]
         if _dict(ctx.payload.get("tool_response")).get("interrupted"):
             entry["interrupted"] = True
@@ -180,7 +180,7 @@ def handle_failure(ctx: HookContext) -> dict | None:
     if ctx.payload.get("tool_name") == "Bash":
         command = _dict(ctx.payload.get("tool_input")).get("command")
         if isinstance(command, str):
-            entry["command"] = redact.Redactor(ctx.cfg.get("redact_patterns")
+            entry["command"] = redact.Redactor(config.redact_patterns(ctx.cfg)
                                                ).redact(command)[0][:MAX_COMMAND_CHARS]
     error = ctx.payload.get("error")
     if isinstance(error, str) and error.strip():
