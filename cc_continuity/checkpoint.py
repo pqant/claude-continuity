@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import atomic, gitsnap, ledger, lock, naming, notify, paths, redact, state
+from . import (atomic, config, gitsnap, ledger, lock, naming, notify, paths,
+               redact, state)
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -98,7 +99,7 @@ def validate_draft(text: str, cfg: dict) -> DraftReport:
     are replaced with ``[REDACTED]`` in ``redacted_text`` and counted in
     ``warnings`` — redaction never fails the draft.
     """
-    redacted_text, warnings = redact.Redactor(cfg.get("redact_patterns")).redact(text)
+    redacted_text, warnings = redact.Redactor(config.redact_patterns(cfg)).redact(text)
     problems: list = []
     h2 = [t for lvl, t in _parse_headings(redacted_text) if lvl == 2]
     for h in TEMPLATE_HEADINGS:

@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 import re
 
-from .. import (atomic, bootstrap, ledger, lock, paths, project, redact,
-                state)
+from .. import (atomic, bootstrap, config, ledger, lock, paths, project,
+                redact, state)
 from .common import HookContext, log_error, notify_claimed
 
 MAX_PROMPT_CHARS = 2000  # PRD §9, verbatim
@@ -45,7 +45,7 @@ def handle(ctx: HookContext) -> dict | None:
             return None
     key, nnn = rec["project_key"], int(rec["nnn"])
     sdir = paths.session_dir(key, nnn)
-    text = redact.Redactor(ctx.cfg.get("redact_patterns")).redact(
+    text = redact.Redactor(config.redact_patterns(ctx.cfg)).redact(
         prompt[:MAX_PROMPT_CHARS])[0]
     entry = {"type": "user_prompt", "text": text}
     agent_id = ctx.payload.get("agent_id")

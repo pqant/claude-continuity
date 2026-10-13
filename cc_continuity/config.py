@@ -108,6 +108,9 @@ DEFAULTS: dict = {
         r"sk-[A-Za-z0-9]{20,}",
         r"ghp_[A-Za-z0-9]{30,}",
     ],
+    # Extra user patterns appended to redact_patterns (opt-in, e.g. a
+    # personal domain or ntfy topic). The public defaults stay generic.
+    "redact_patterns_extra": [],
     "log_level": "info",
     # Phase 30.1: project keys whose SessionEnd pushes are ALWAYS
     # suppressed — declared noise sources. A third-party app that
@@ -233,3 +236,23 @@ def session_end_push_suppress(cfg: dict) -> frozenset:
     if not isinstance(v, (list, tuple)):
         return frozenset()
     return frozenset(p for p in v if isinstance(p, str) and p)
+
+
+def redact_patterns(cfg: dict) -> list:
+    """Merged redaction patterns: ``redact_patterns`` +
+    ``redact_patterns_extra``. A missing key falls back to the
+    defaults; a non-list value or a list with no usable string
+    patterns also falls back to the defaults — an empty pattern
+    set would mean no redaction at all, so it is never allowed.
+    Individual non-string entries are dropped.
+    """
+    base = cfg.get("redact_patterns")
+    if not isinstance(base, (list, tuple)):
+        base = DEFAULTS["redact_patterns"]
+    base = [p for p in base if isinstance(p, str) and p]
+    if not base:
+        base = DEFAULTS["redact_patterns"]
+    extra = cfg.get("redact_patterns_extra") or []
+    if not isinstance(extra, (list, tuple)):
+        extra = []
+    return base + [p for p in extra if isinstance(p, str) and p]

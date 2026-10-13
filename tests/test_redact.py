@@ -72,3 +72,9 @@ def test_convenience_function_returns_str():
     result = redact.redact("password = hunter2")
     assert isinstance(result, str)
     assert "hunter2" not in result
+
+
+def test_extra_patterns_are_applied():
+    r = redact.Redactor(["sk-[A-Za-z0-9]{20,}", r"(?i)myorg[a-z0-9-]*\.com"])
+    out, n = r.redact("visit myorg-internal.com and sk-ABCDEFGHIJKLMNOPQRST")
+    assert "myorg-internal.com" not in out and out.count("[REDACTED]") == 2
