@@ -238,7 +238,7 @@ def pane_pending(capture: str, nudge_text: str) -> bool:
     return nudge_last is not None and nudge_last.endswith(box_last)
 
 
-# --- nudge text (Phase 19: the bare "continue" is "too little") ----------------
+# --- nudge text (Phase 19: the bare base line is too little) ------------------
 
 
 def _ts_hms(ts: float) -> str:
@@ -292,16 +292,18 @@ def build_nudge_text(base: str, *, now: float,
         ]
     elif frozen_minutes is not None:
         lines.append(
-            f"[cc-continuity watchdog] Turn {frozen_minutes} min frozen — "
-            f"I cancelled it. check git status and the last output, "
-            f"Continue from where you left off.")
+            f"[cc-continuity watchdog] The turn was frozen for "
+            f"{frozen_minutes} min — I cancelled it. Check git status "
+            f"and the last output, then continue from where you "
+            f"left off.")
     elif stalled:
         lines.append("[cc-continuity watchdog] "
-                     "The last turn ended in error — continue from where you left off.")
+                     "The last turn ended in error — "
+                     "continue from where you left off.")
     else:
         lines.append(f"[cc-continuity watchdog] The turn stalled "
                      f"({idle_minutes} min idle) — "
-                     f"Continue from where you left off.")
+                     f"continue from where you left off.")
     return "\n".join(lines)
 
 
