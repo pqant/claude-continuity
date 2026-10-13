@@ -277,6 +277,26 @@ def test_resolve_ntfy_tty_prompt():
         install.resolve_ntfy(None, is_tty=True, prompt=lambda *_: "bad url")
 
 
+def test_resolve_ntfy_tty_prompt_is_english_generic():
+    # public release: English prompt, generic example (no personal topic)
+    seen = []
+
+    def prompt(text):
+        seen.append(text)
+        return ""
+
+    assert install.resolve_ntfy(None, is_tty=True, prompt=prompt) == ""
+    assert seen == ["ntfy endpoint? (e.g. https://ntfy.sh/<topic> "
+                    "— Enter = off) "]
+
+
+def test_validate_endpoint_error_is_english_generic():
+    # public release: the error's example is generic English
+    with pytest.raises(install.InstallError,
+                       match=r"\(e\.g\. https://ntfy\.sh/<topic>\) or 'off'"):
+        install.validate_endpoint("not-a-url")
+
+
 def test_install_ntfy_flag_writes_config(fake_home):
     install.install(fake_home, window=262144, runner=FakeRun(),
                     ntfy="https://ntfy.sh/example-topic")
