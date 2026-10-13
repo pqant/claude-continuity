@@ -23,8 +23,9 @@ BUSY_PANE = "line one\nline two"  # not at prompt
 
 def _turn_dead_text(n):
     """The Phase 19 plain-form nudge text for ``n`` idle minutes."""
-    return ("continue\n\n[cc-continuity watchdog] "
-            f"The turn stalled ({n} min idle) — Continue from where you left off.")
+    return ("Continue.\n\n[cc-continuity watchdog] "
+            f"The turn stalled ({n} min idle) — continue from where you "
+            f"left off.")
 
 
 class FakeIO:
@@ -167,7 +168,7 @@ def _ctx(io, cfg_over=None, now=10_000.0, down=False):
     probes (cold start UNKNOWN → DOWN)."""
     cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300,
            "watchdog_stale_minutes": 45, "watchdog_max_nudges": 3,
-           "watchdog_nudge_text": "continue",
+           "watchdog_nudge_text": "Continue.",
            "watchdog_health_url": "http://127.0.0.1:1/health"}
     cfg.update(cfg_over or {})
     ctx = TickCtx(cfg=cfg, health=HealthState(), episodes={},
@@ -263,7 +264,7 @@ def test_run_forever_tick_exception_survives(cc_home):
     _stale_prompt(paths.session_dir("proj-a", 1))
     cfg = {"watchdog_enabled": True, "watchdog_interval_s": 300,
            "watchdog_stale_minutes": "not-a-number",
-           "watchdog_max_nudges": 3, "watchdog_nudge_text": "continue",
+           "watchdog_max_nudges": 3, "watchdog_nudge_text": "Continue.",
            "watchdog_health_url": ""}
     rc = watchdogd.run_forever(cfg, max_ticks=2, sleep=lambda s: None,
                                now=_advancing_now(305.0),
@@ -786,8 +787,8 @@ def test_tick_dgx_up_nudges_stuck_midturn_fresh_ledger(cc_home, monkeypatch):
     # Phase 19: ESC first, then the OUTAGE-form text (the DOWN/UP ts
     # strings are TZ-local — assert structure, not exact ts).
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
-    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
-    assert text.startswith("continue\n\n")
+    text = [s[1] for s in io.sends if s[1].startswith("Continue.")][0]
+    assert text.startswith("Continue.\n\n")
     assert "The model server is back online:" in text
     assert "(15 min down)" in text
     assert "check git status and the last output" in text
@@ -914,11 +915,10 @@ def test_tick_dgx_up_recovery_only_most_recent_when_config_on(cc_home, monkeypat
     # Phase 19: ESC first, then the OUTAGE-form text (the DOWN/UP ts
     # strings are TZ-local — assert structure, not exact ts).
     assert io.sends[0] == ("cc-proj-a-0a9b", "Escape")
-    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
-    assert text.startswith("continue\n\n")
+    text = [s[1] for s in io.sends if s[1].startswith("Continue.")][0]
+    assert text.startswith("Continue.\n\n")
     assert "The model server is back online:" in text
-    kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
-    assert f"(15 dk {kapaliydi})" in text
+    assert "(15 min down)" in text
     assert len([s for s in io.sends if s[-1] == "Enter"]) == 1  # only a
     assert "dgx_up_recovery:proj-a:001" in line2["events"]
     assert not any(e.startswith("dgx_up_recovery:proj-b")
@@ -943,10 +943,9 @@ def test_tick_dgx_up_recovery_nudges_all_when_config_off(cc_home, monkeypatch):
     # Phase 29: ESC + literal text + separate Enter per session, all
     # OUTAGE-form.
     assert len(io.sends) == 6
-    kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
-    texts = [s[1] for s in io.sends if s[1].startswith("continue")]
+    texts = [s[1] for s in io.sends if s[1].startswith("Continue.")]
     assert len(texts) == 2
-    assert all(f"(15 dk {kapaliydi})" in t for t in texts)
+    assert all("(15 min down)" in t for t in texts)
 
 
 def test_tick_verification_pushes_recovered(cc_home, monkeypatch):
@@ -981,7 +980,7 @@ def test_tick_send_enter_on_unchanged_pending_pane(cc_home, monkeypatch):
                         ("cc-proj-a-0a9b", t1),
                         ("cc-proj-a-0a9b", "Enter")]
     # …and the MULTI-LINE text now sits in the input box (the 11:30 case).
-    io.pane = "some output line\n❯ continue\n" + t1.split("\n\n", 1)[1]
+    io.pane = "some output line\n❯ Continue.\n" + t1.split("\n\n", 1)[1]
     ctx.now = 10_300.0
     l2 = watchdogd.tick(ctx)
     assert l2["sessions"][0]["outcome"] == "ALIVE"  # capture CHANGED
@@ -1097,7 +1096,7 @@ def test_tick_frozen_turn_escalates_after_threshold(cc_home, monkeypatch):
     assert io.sends == []
     l5 = watchdogd.tick(ctx)  # ticks=4: 1200s >= 1200s → escalate
     assert l5["sessions"][0]["outcome"] == "FROZEN"
-    frozen_text = watchdog.build_nudge_text("continue", now=10_000.0,
+    frozen_text = watchdog.build_nudge_text("Continue.", now=10_000.0,
                                             frozen_minutes=20)
     assert io.sends == [("cc-proj-a-0a9b", "Escape"),
                         ("cc-proj-a-0a9b", frozen_text),
@@ -1252,8 +1251,8 @@ def test_tick_frozen_gen_up_recovers(cc_home, monkeypatch):
     assert io.gen_probe_calls == 3
     # the recovery pass did NOT nudge the FROZEN session (stale
     # last_ts): no OUTAGE-form nudge text was ever sent
-    assert not any("Model sunucusu" in s[1] for s in io.sends
-                   if len(s) > 1)
+    assert not any("The model server is back online" in s[1]
+                   for s in io.sends if len(s) > 1)
 
 
 def test_tick_unresolvable_never_nudges(cc_home, monkeypatch):
@@ -1349,10 +1348,9 @@ def test_tick_dgx_up_nudge_text_includes_power_cycle_when_in_window(
     io.ok = True
     ctx.now = 10_900.0
     watchdogd.tick(ctx)
-    text = [s[1] for s in io.sends if s[1].startswith("continue")][0]
+    text = [s[1] for s in io.sends if s[1].startswith("Continue.")][0]
     assert chr(0x2192) + " power_cycle " in text
-    kapaliydi = "kapal" + chr(0x131) + "yd" + chr(0x131)  # byte-safe (dotless i)
-    assert f"(15 dk {kapaliydi})" in text
+    assert "(15 min down)" in text
 
     # a cycle ts BEFORE the outage window must not appear
     io2 = FakeIO(health_ok=False)
@@ -1365,9 +1363,9 @@ def test_tick_dgx_up_nudge_text_includes_power_cycle_when_in_window(
     io2.ok = True
     ctx2.now = 10_900.0
     watchdogd.tick(ctx2)
-    text2 = [s[1] for s in io2.sends if s[1].startswith("continue")][0]
+    text2 = [s[1] for s in io2.sends if s[1].startswith("Continue.")][0]
     assert "power_cycle" not in text2
-    assert f"(15 dk {kapaliydi})" in text2
+    assert "(15 min down)" in text2
 
 
 def test_tick_pending_multiline_nudge_submitted_via_send_enter(
@@ -1380,11 +1378,11 @@ def test_tick_pending_multiline_nudge_submitted_via_send_enter(
     io = FakeIO(health_ok=True)
     sdir = _mk(turn_active=True)
     ledger.append(sdir, {"type": "user_prompt", "ts": 1_000.0})  # stale
-    sent = watchdog.build_nudge_text("continue", now=10_900.0,
+    sent = watchdog.build_nudge_text("Continue.", now=10_900.0,
                                      down_since=10_000.0)
     ledger.append(sdir, {"type": "watchdog_nudge", "n": 1,
                          "text": sent, "ts": 9_000.0})
-    io.pane = "some output line\n❯ continue\n" + sent.split("\n\n", 1)[1]
+    io.pane = "some output line\n❯ Continue.\n" + sent.split("\n\n", 1)[1]
     ctx = _ctx(io, now=10_000.0)
     line = watchdogd.tick(ctx)
     assert line["sessions"][0]["outcome"] == "WAIT"

@@ -76,7 +76,7 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `watchdog_interval_s` | **`300`** | main-loop tick (≈ 5 min) |
 | `watchdog_stale_minutes` | **`45`** | ledger-silence threshold for "stale" |
 | `watchdog_max_nudges` | **`3`** | unverified nudges before `needs_human` |
-| `watchdog_nudge_text` | **`"continue"`** | the nudge prompt sent to the pane |
+| `watchdog_nudge_text` | **`"Continue."`** | the nudge prompt sent to the pane |
 | `watchdog_nudge_only_most_recent` | **`false`** | when on, at most one session per tick may be nudged — the focus session (see *Nudge focus*, Phase 16); off = legacy nudge-all |
 | `watchdog_network_recovery_cmd` | **`"sudo -n /usr/local/libexec/dgx-network-recovery"`** | local (Mac-side) route recovery run ONLY on a failed health probe; `""` = disabled |
 | `watchdog_frozen_nudge_minutes` | **`20`** | a FROZEN pane WITH a turn in flight escalates (ESC + nudge + generation probe) once the freeze outlives this (see *Frozen-turn escalation*, Phase 22) |
@@ -188,9 +188,8 @@ the session looked fine. Three parts:
 
 ### Nudge enrichment + force-cancel (Phase 19)
 
-A bare `continue` gave the session no context about WHY its turn
-stopped (the user called it eksik — too thin to resume on). Since
-Phase 19 every nudge
+A bare base line gave the session no context about WHY its turn
+stopped (too thin to resume on). Since Phase 19 every nudge
 is an ENRICHED prompt (`watchdog.build_nudge_text`): the base line (the
 configured `watchdog_nudge_text`) + a context block prefixed
 `[cc-continuity watchdog]`, in two forms:

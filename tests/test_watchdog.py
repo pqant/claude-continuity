@@ -198,43 +198,47 @@ def test_classify_no_ledger_treated_as_stale():
 
 
 def test_pane_pending_nudge_sitting_in_input_line():
-    assert watchdog.pane_pending("output\n❯ continue", "continue") is True
+    assert watchdog.pane_pending("output\n❯ Continue.", "Continue.") is True
 
 
 def test_pane_pending_empty_prompt():
-    assert watchdog.pane_pending("output\n❯ ", "continue") is False
+    assert watchdog.pane_pending("output\n❯ ", "Continue.") is False
 
 
 def test_pane_pending_not_at_prompt():
-    assert watchdog.pane_pending("continue was typed\nspinner",
-                                 "continue") is False
+    assert watchdog.pane_pending("Continue. was typed\nspinner",
+                                 "Continue.") is False
 
 
 def test_pane_pending_submitted_text_is_not_pending():
-    cap = "❯ continue\noutput\n❯ "
-    assert watchdog.pane_pending(cap, "continue") is False
+    cap = "❯ Continue.\noutput\n❯ "
+    assert watchdog.pane_pending(cap, "Continue.") is False
 
 
 def test_pane_pending_multiline_nudge_in_input_box():
     # Phase 19: the nudge is MULTI-LINE — the ❯ glyph sits on the FIRST
     # input line, the capture's last line is the nudge's own tail line.
-    cap = ("output\n❯ continue\n"
+    cap = ("output\n❯ Continue.\n"
            "[cc-continuity watchdog] The model server is back online:\n"
            "DOWN 02:46:40 → UP 02:55:00 (15 min down)\n"
-           "The in-flight turn died with the model. Continue from where you left off.\n"
+           "The in-flight turn died with the model. Continue from where "
+           "you left off.\n"
            "If unsure, check git status and the last output first.")
-    text = ("continue\n\n[cc-continuity watchdog] The model server is back online:\n"
+    text = ("Continue.\n\n[cc-continuity watchdog] The model server is "
+            "back online:\n"
             "DOWN 02:46:40 → UP 02:55:00 (15 min down)\n"
-            "The in-flight turn died with the model. Continue from where you left off.\n"
-            "If unsure, check git status and the last output first.")
+            "The in-flight turn died with the model. Continue from where "
+           "you left off.\n"
+           "If unsure, check git status and the last output first.")
     assert watchdog.pane_pending(cap, text) is True
 
 
 def test_pane_pending_multiline_tail_mismatch_is_false():
     # the pane's tail line is NOT the sent nudge's tail -> not pending
-    cap = "output\n❯ continue\nsome other tail line"
-    text = ("continue\n\n[cc-continuity watchdog] "
-            "The turn stalled (50 min idle) — Continue from where you left off.")
+    cap = "output\n❯ Continue.\nsome other tail line"
+    text = ("Continue.\n\n[cc-continuity watchdog] "
+            "The turn stalled (50 min idle) — continue from where you "
+            "left off.")
     assert watchdog.pane_pending(cap, text) is False
 
 
@@ -254,45 +258,47 @@ _STATUS = ("  [qwen3.8-27b | API] │ proj git:(main) │ sess-001\n"
 def test_pane_pending_box_above_statusline_block():
     # the multi-line nudge sits in the box (❯ on the first line, tail line
     # directly above the bottom frame); the statusline block is below.
-    tail = "[cc-continuity watchdog] The turn stalled (50 min idle) — Continue from where you left off."
-    cap = (f"⏺ done\n❯ continue\n{_FRAME}\n{tail}\n{_FRAME}\n{_STATUS}\n")
-    text = "continue\n\n" + tail
+    tail = ("[cc-continuity watchdog] The turn stalled (50 min idle) — "
+            "continue from where you left off.")
+    cap = (f"⏺ done\n❯ Continue.\n{_FRAME}\n{tail}\n{_FRAME}\n{_STATUS}\n")
+    text = "Continue.\n\n" + tail
     assert watchdog.pane_pending(cap, text) is True
 
 
 def test_pane_pending_wrapped_tail_line():
     # the nudge's last line WRAPS at the pane width: the line above the
     # bottom frame is the tail fragment (no ❯ glyph).
-    cap = (f"⏺ done\n❯ continue\n{_FRAME}\n"
+    cap = (f"⏺ done\n❯ Continue.\n{_FRAME}\n"
            "If unsure, check git status and\n"
-           "the last output.\n"
+           "the last output first.\n"
            f"{_FRAME}\n{_STATUS}\n")
-    text = ("continue\n\n"
+    text = ("Continue.\n\n"
             "If unsure, check git status and the last output first.")
     assert watchdog.pane_pending(cap, text) is True
 
 
 def test_pane_pending_empty_box_with_statusline():
     cap = f"⏺ done\n❯\n{_FRAME}\n{_STATUS}\n"
-    assert watchdog.pane_pending(cap, "continue") is False
+    assert watchdog.pane_pending(cap, "Continue.") is False
 
 
 def test_pane_pending_other_text_in_box_is_false():
     cap = f"⏺ done\n❯ something else\n{_FRAME}\n{_STATUS}\n"
-    assert watchdog.pane_pending(cap, "continue") is False
+    assert watchdog.pane_pending(cap, "Continue.") is False
 
 
-# --- build_nudge_text (Phase 19: the bare "continue" is "too little") ---------
+# --- build_nudge_text (Phase 19: the bare "continue" alone is too little) ----
 
 
 def test_build_nudge_text_outage_block():
-    text = watchdog.build_nudge_text("continue", now=10_900.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_900.0,
                                      down_since=10_000.0,
                                      cycle_ts=10_500.0)
     lines = text.splitlines()
-    assert lines[0] == "continue"
+    assert lines[0] == "Continue."
     assert lines[1] == ""
-    assert lines[2] == "[cc-continuity watchdog] The model server is back online:"
+    assert lines[2] == ("[cc-continuity watchdog] "
+                        "The model server is back online:")
     assert lines[3].startswith("DOWN ")
     assert " → power_cycle " in lines[3]
     assert " → UP " in lines[3]
@@ -304,46 +310,48 @@ def test_build_nudge_text_outage_block():
 
 
 def test_build_nudge_text_outage_without_cycle():
-    text = watchdog.build_nudge_text("continue", now=10_600.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_600.0,
                                      down_since=10_000.0)
     assert "power_cycle" not in text
     assert "(10 min down)" in text
 
 
 def test_build_nudge_text_plain_turn_dead():
-    text = watchdog.build_nudge_text("continue", now=10_000.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_000.0,
                                      idle_minutes=50)
-    assert text == ("continue\n\n[cc-continuity watchdog] "
+    assert text == ("Continue.\n\n[cc-continuity watchdog] "
                     "The turn stalled (50 min idle) "
-                    "— Continue from where you left off.")
+                    "— continue from where you left off.")
 
 
 def test_build_nudge_text_stalled():
-    text = watchdog.build_nudge_text("continue", now=10_000.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_000.0,
                                      idle_minutes=50, stalled=True)
-    assert text == ("continue\n\n[cc-continuity watchdog] "
-                    "The last turn ended in error — continue from where you left off.")
+    assert text == ("Continue.\n\n[cc-continuity watchdog] "
+                    "The last turn ended in error — continue from where "
+                    "you left off.")
 
 
 def test_build_nudge_text_frozen():
     # Phase 22: the frozen-turn escalation — the daemon ESC-cancelled the
     # in-flight turn, so the text says so and tells the session to check
     # its state before resuming
-    text = watchdog.build_nudge_text("continue", now=10_000.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_000.0,
                                      frozen_minutes=25)
-    assert text == ("continue\n\n[cc-continuity watchdog] "
-                    "Turn 25 min frozen — I cancelled it. "
-                    "check git status and the last output, "
-                    "Continue from where you left off.")
+    assert text == ("Continue.\n\n[cc-continuity watchdog] "
+                    "The turn was frozen for 25 min — "
+                    "I cancelled it. Check git status "
+                    "and the last output, then continue from where you "
+                    "left off.")
 
 
 def test_build_nudge_text_outage_wins_over_frozen():
     # the OUTAGE form is the more specific context (the model went down
     # and came back) — it must not be replaced by the frozen block
-    text = watchdog.build_nudge_text("continue", now=10_900.0,
+    text = watchdog.build_nudge_text("Continue.", now=10_900.0,
                                      down_since=10_000.0,
                                      frozen_minutes=25)
-    assert "dondu" not in text
+    assert "frozen" not in text
     assert "The model server is back online" in text
 
 
