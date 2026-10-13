@@ -5,22 +5,24 @@ Captures the *entire* working tree (modifications, staged, untracked;
 ``refs/continuity/<slug>/cp-<NNN>`` without touching the real index, the
 worktree, or any branch:
 
-    tmp_index = mktemp;  cp <git-path index> tmp_index   (best effort)
+    tmp_index = mktemp   # fresh, empty — never copied from the real index
     GIT_INDEX_FILE=tmp_index git add -A
     tree     = GIT_INDEX_FILE=tmp_index git write-tree
     commit   = git commit-tree $tree [-p HEAD] -m "continuity cp-<NNN> (<slug>)"
     git update-ref refs/continuity/<slug>/cp-<NNN> $commit
 
-``git rev-parse --git-path index`` (not ``.git/index``) keeps this correct in
-linked worktrees. Repos with no commits omit ``-p HEAD``. Snapshot commits
-use a fixed identity so they never depend on the user's git config.
-These refs are not in any default refspec and are never pushed.
+The throwaway index starts empty, not as a copy of the real index: a copy
+would import the real index's stat cache, and ``git add -A`` trusts that
+cache — masking a same-size rewrite made in the same wall-clock second and
+leaving the old blob in the snapshot. The disk is the source of truth, so
+we re-hash everything fresh. Repos with no commits omit ``-p HEAD``.
+Snapshot commits use a fixed identity so they never depend on the user's
+git config. These refs are not in any default refspec and are never pushed.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -74,29 +76,17 @@ def is_git_repo(cwd: str | Path) -> bool:
     return git_root(cwd) is not None
 
 
-def _copy_real_index(cwd: Path, tmp_index: str) -> bool:
-    """Copy the real index into the temp one (best effort, PRD §10.3)."""
-    rc, out = _git(cwd, "rev-parse", "--git-path", "index", check=False)
-    if rc != 0 or not out:
-        return False
-    src = Path(out)
-    if not src.is_absolute():
-        src = cwd / src  # worktrees report a cwd-relative path
-    if src.is_file():
-        shutil.copyfile(src, tmp_index)
-        return True
-    return False
-
-
 def _snapshot_tree(cwd: Path) -> str:
     """Tree sha of the current worktree via a throwaway index."""
     fd, tmp_index = tempfile.mkstemp(prefix=".cc-index-")
     os.close(fd)
     try:
-        if not _copy_real_index(cwd, tmp_index):
-            # No real index to copy (e.g. repo without commits): a 0-byte
-            # index file is corrupt to git — let git create a fresh one.
-            os.unlink(tmp_index)
+        # Fresh, empty index — never a copy of the real index. A copied
+        # stat cache would let `git add -A` trust stale entries and mask a
+        # same-size rewrite made in the same wall-clock second. A 0-byte
+        # index file is corrupt to git, so unlink it and let git create a
+        # fresh one on the first write.
+        os.unlink(tmp_index)
         env = {"GIT_INDEX_FILE": tmp_index}
         _git(cwd, "add", "-A", env_extra=env)
         _, tree = _git(cwd, "write-tree", env_extra=env)

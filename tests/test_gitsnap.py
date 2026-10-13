@@ -6,6 +6,7 @@ Must never touch the real index, the worktree, or any branch.
 
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -68,6 +69,22 @@ def test_snapshot_captures_modifications_and_untracked(git_repo):
     assert _git(git_repo, "rev-parse", "--abbrev-ref", "HEAD") == \
         _git(git_repo, "rev-parse", "--abbrev-ref", "HEAD")  # sanity
     assert (git_repo / "tracked.txt").read_text() == "v2\n"
+
+
+def test_snapshot_rehashes_same_second_same_size_rewrite(git_repo):
+    # stat-cache masking: if a same-size rewrite lands in the SAME
+    # wall-clock second as the index's cached stat (mtime AND ctime
+    # equal, seconds resolution), `git add -A` trusts the cache and
+    # keeps the old blob. Align to the middle of a second so the
+    # write -> add -> rewrite sequence stays well inside one second.
+    p = git_repo / "tracked.txt"
+    while time.time() % 1.0 < 0.6:
+        time.sleep(0.05)
+    p.write_text("v1\n")
+    _git(git_repo, "add", "-A")
+    p.write_text("v2\n")  # same size as "v1\n", same second
+    snap = gitsnap.make_snapshot(git_repo, "repo", 1)
+    assert _git(git_repo, "show", f"{snap['commit']}:tracked.txt") == "v2"
 
 
 def test_snapshot_in_repo_without_commits(tmp_path):
