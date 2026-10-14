@@ -78,10 +78,10 @@ Keys in `~/.claude-continuity/config.json` (defaults in bold):
 | `watchdog_max_nudges` | **`3`** | unverified nudges before `needs_human` |
 | `watchdog_nudge_text` | **`"Continue."`** | the nudge prompt sent to the pane |
 | `watchdog_nudge_only_most_recent` | **`false`** | when on, at most one session per tick may be nudged — the focus session (see *Nudge focus*, Phase 16); off = legacy nudge-all |
-| `watchdog_network_recovery_cmd` | **`"sudo -n /usr/local/libexec/dgx-network-recovery"`** | local (Mac-side) route recovery run ONLY on a failed health probe; `""` = disabled |
+| `watchdog_network_recovery_cmd` | **`""`** | local (Mac-side) route-recovery command run ONLY on a failed health probe (e.g. a script that flushes + re-adds the default route); `""` (default) = disabled |
 | `watchdog_frozen_nudge_minutes` | **`20`** | a FROZEN pane WITH a turn in flight escalates (ESC + nudge + generation probe) once the freeze outlives this (see *Frozen-turn escalation*, Phase 22) |
 | `watchdog_gen_probe_timeout_s` | **`180`** | the 5-token completion step of the generation probe; a hung generation never answers — the timeout IS the detection |
-| `power_plug_ip` / `power_plug_port` | **`"192.0.2.99"` / `9999`** | the Kasa HS100 on the DGX power path (the plug's own LAN port); empty IP disables auto power-cycle |
+| `power_plug_ip` / `power_plug_port` | **`""` / `9999`** | the smart plug (e.g. a Kasa HS100) on the model server's power path (the plug's own LAN port); empty IP (default) disables auto power-cycle |
 | `power_cycle_off_s` | **`8`** | relay-off duration during a cycle |
 | `power_cycle_after_s` | **`600`** | sustained DOWN before the auto power-cycle fires (10 min covers box boot + model load) |
 | `power_cycle_cooldown_s` | **`1800`** | minimum spacing between successful cycles (30 min — no cycle loops) |

@@ -151,7 +151,7 @@ GEN_PROBE_MODELS_TIMEOUT_S = 10
 
 
 def _gen_base_url(health_url: str) -> str:
-    """``http://127.0.0.1:8000/health`` → ``http://127.0.0.1:8000`` — the
+    """``http://<LLM-HOST>:8000/health`` → ``http://<LLM-HOST>:8000`` — the
     vLLM server root (scheme+netloc) the /v1/* endpoints hang off. A URL
     without a path is its own root; a URL that cannot be parsed is kept
     verbatim (minus a trailing slash) so a typo degrades exactly like

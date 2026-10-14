@@ -170,7 +170,7 @@ def _new_work_since_handoff(cp_dir: Path, key: str,
     the rotation window (handoff finalizing / old session still live):
     they land in the OLD session's live ledger, but the handoff is already
     frozen and can no longer contain them, so they would be lost to the
-    successor ("rotation swallows the new work", 2026-09-28 053→054).
+    successor (the rotation-window bug: new prompts landing after the handoff froze).
 
     Marker: the snapshot's ``created`` (epoch; falls back to the
     checkpoint dir mtime when missing). The snapshot's ``user_prompts``
