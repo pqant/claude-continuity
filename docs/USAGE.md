@@ -1,17 +1,28 @@
 # cc-continuity — Usage
 
-User-facing usage guide for an installed cc-continuity. For the spec, see
-`docs/PRD.md`; for the concept, the notification/privacy model, and the
-unattended-mode warning, see `README.md`; for known boundaries, see
-`LIMITATIONS.md`; for the watchdog daemon, see `docs/WATCHDOG.md`.
+User-facing usage guide for an installed cc-continuity. For the concept,
+the notification/privacy model, and the unattended-mode warning, see
+`README.md`; for known boundaries, see `LIMITATIONS.md`; for the
+watchdog daemon, see `docs/WATCHDOG.md`.
 
 ## 1. Install (one-time)
 
+From Git:
+
 ```bash
-cd <cc-continuity dev tree>
+cd <claude-continuity checkout>
 python3 -m cc_continuity.cli install --window 262144
 exec zsh                                    # reload the shell (claude() wrapper)
 cc-continuity doctor                        # everything should be green
+```
+
+From PyPI:
+
+```bash
+pip install cc-continuity
+cc-continuity install
+exec zsh
+cc-continuity doctor
 ```
 
 Options:
@@ -27,11 +38,13 @@ block in `~/.claude/CLAUDE.md`, the `claude()` wrapper in `~/.zshrc`, the
 six `continuity-*` skills, the `cc-continuity` launcher on `PATH`, and the
 app copy in `~/.claude-continuity/app/`.
 
-> **Updating/reinstalling: always from the dev tree**
-> (`python3 -m cc_continuity.cli install`). The bare `cc-continuity install`
-> run from the already-installed app is refused with a clear error — the
-> installed copy is the install source, so copying it onto itself would
-> delete the live app. Re-run from the dev tree.
+> **Updating:** from PyPI — `pip install --upgrade cc-continuity`, then
+> re-run `cc-continuity install` (the binary on PATH is the install
+> source; a `cc-continuity install` run from the already-installed app
+> copy is refused, because copying it onto itself would delete the live
+> app). From Git — `git pull` in the checkout, then re-run the install
+> command from there. If the watchdog daemon is installed, force-restart
+> it afterwards (Section 4, `kickstart -k`).
 
 ## 2. Daily use
 
@@ -115,7 +128,7 @@ cc-continuity install [--window N] [--ntfy URL|off]
 cc-continuity uninstall [--purge]     # --purge also deletes ~/.claude-continuity
 cc-continuity configure [--ntfy URL|off] [--unattended]
                        [--watchdog-health URL|off] [--watchdog-enabled true|false]
-cc-continuity doctor [--json]         # health checks (PRD §16)
+cc-continuity doctor [--json]         # health checks
 ```
 
 ### Watchdog (details: `docs/WATCHDOG.md`)
@@ -149,8 +162,8 @@ watchdog calls.
 cc-continuity launch [--unattended] [claude_args...]
 ```
 
-Backend of the `claude()` wrapper — decides tmux / direct / pass-through
-(PRD Appendix D). `claude --unattended` (via the wrapper) or
+Backend of the `claude()` wrapper — decides tmux / direct / pass-through.
+`claude --unattended` (via the wrapper) or
 `cc-continuity configure --unattended` (project-wide) spawn sessions with
 `claude --dangerously-skip-permissions` — read the loud warning in
 `README.md` first.
@@ -158,8 +171,8 @@ Backend of the `claude()` wrapper — decides tmux / direct / pass-through
 ### Internals (wired by the installer — do not run by hand)
 
 ```bash
-cc-continuity statusline             # status line entry (PRD §7)
-cc-continuity hook <event>           # hook entry (PRD §9)
+cc-continuity statusline             # status line entry
+cc-continuity hook <event>           # hook entry
 ```
 
 ## 5. Environment variables
@@ -191,8 +204,12 @@ Global config `~/.claude-continuity/config.json` — main keys (defaults):
 | `watchdog_enabled` | false | liveness daemon on/off |
 | `watchdog_health_url` | "" | model-server health probe ("" = liveness-only) |
 | `watchdog_interval_s` / `watchdog_max_nudges` | 300 / 3 | tick period / nudge cap |
+| `watchdog_nudge_text` | "Continue." | first line of the watchdog nudge (your override wins) |
+| `watchdog_network_recovery_cmd` | "" | shell command run on a failed health probe (opt-in, your rights) |
+| `power_plug_ip` / `power_plug_port` | "" / 9999 | smart-plug LAN endpoint for auto power-cycle (opt-in) |
+| `redact_patterns_extra` | [] | extra secret-redaction regexes appended to the generic defaults |
 
-Full key list: PRD §15.
+Full key list: `config.example.json`.
 
 ## 7. On-disk layout
 
@@ -202,7 +219,7 @@ Full key list: PRD §15.
 ├── projects/<key>/
 │   ├── project.json
 │   └── sessions/<nnn>/
-│       ├── state.json        # state machine (PRD §8)
+│       ├── state.json        # state machine
 │       ├── ledger.jsonl      # append-only event log (the durable record)
 │       └── checkpoint/       # handoff.md + git snapshot ref
 ├── app/                      # installed package (launcher code)
@@ -226,7 +243,7 @@ Full key list: PRD §15.
 ## 9. Out of scope
 
 - Not supported: `-p`/print mode, the Agent SDK, `--bg`, the desktop app,
-  web sessions (PRD §24).
+  web sessions.
 - Known limitations (launch name-prediction race, native auto-compact
   deliberately off, local inference-box stalls, degraded checkpoints,
   best-effort pushes): `LIMITATIONS.md`.
