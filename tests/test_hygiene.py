@@ -59,8 +59,15 @@ def test_no_personal_data_in_public_files():
                 if users and not all(u in GENERIC_FIXTURE_USERS
                                      for u in users):
                     hits.append(f"{rel}:{i}: {line.strip()}")
-    # the documented non-personal Unicode case is the single exemption
+    # documented exemptions (non-personal test fixtures, dev tree only):
+    # 1. test_settings_merge.py: the non-personal Unicode case
+    # 2. test_build_public_repo.py: unit tests for the class-E build
+    #    tool; they exercise the scanner with its own fixtures (Turkish
+    #    nudge phrases, a private-LAN IP). The file is excluded from the
+    #    public tree (EXCLUDE_PREFIXES), so this exemption is a no-op in
+    #    the public repo (the file does not exist there).
     hits = [h for h in hits
             if not (h.startswith("tests/test_settings_merge.py")
-                    and "ñ" in h)]
+                    and "ñ" in h)
+            and not h.startswith("tests/test_build_public_repo.py")]
     assert not hits, "\n".join(hits)
