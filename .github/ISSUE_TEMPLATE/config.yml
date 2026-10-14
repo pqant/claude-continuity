@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pqant/claude-continuity/security/policy
+    about: Do not file security issues publicly — see SECURITY.md

@@ -1,0 +1,51 @@
+# gitleaks configuration (scans the working tree / git history).
+#
+# Two allowlist sections:
+#   1. Test fixtures — fake secrets that must NOT look like real
+#      credentials (tests/test_redact.py, and the deterministic fake
+#      project id proj-1a2b3c4d shared by four test modules). These
+#      files are part of the public repo, so CI needs the allowlist.
+#   2. Private dev-tree class-E files — these never exist in the public
+#      repo (the build script's EXCLUDE_PREFIXES removes them from every
+#      milestone). The entries are inert in the public repo; they keep
+#      this config valid for a local rehearsal run against the dev tree
+#      (gitleaks 8.x has no --exclude-dir/--exclude-files CLI flags).
+
+[allowlist]
+  description = "Fake test fixtures + private dev-tree class-E files"
+  paths = [
+    # --- section 1: deliberate fake-secret fixture file ---
+    '''tests/test_redact\.py$''',
+    # --- section 2: class-E private dev-tree files (inert in the public
+    # repo) + local state that is gitignored ---
+    '''^\.git/''',
+    '''^\.spikes/''',
+    '''^\.sandbox/''',
+    '''^\.claude/''',
+    
+    '''^\.pytest_cache/''',
+    '''^__pycache__/''',
+    '''^HANDOFF\.md$''',
+    '''^PROGRESS\.md$''',
+    '''^CONTINUE\.md$''',
+    '''^setup_dgx_network_recovery\.sh$''',
+    '''^ultrathink\.sh$''',
+    '''^tools/''',
+    '''^docs/PRD\.md$''',
+    '''^docs/TRIAL\.md$''',
+    '''^docs/UNATTENDED-TRIAL\.md$''',
+    '''^docs/VERIFICATION\.md$''',
+    '''^docs/phase10-architecture\.txt$''',
+    
+    '''^docs/claude-continuity-public-open-source-audit\.md$''',
+    '''^docs/public-release-audit-report\.md$''',
+    '''^docs/watchdog-acceptance-record\.md$''',
+    '''^\.DS_Store$''',
+  ]
+  # Content-level: the exact fake project id used as a test fixture in
+  # tests/test_checkpoint.py, test_paths.py, test_state.py,
+  # test_statusline.py. Only this exact value is allowed, not the
+  # whole files.
+  regexes = [
+    '''^proj-1a2b3c4d$''',
+  ]
