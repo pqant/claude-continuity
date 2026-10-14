@@ -27,7 +27,9 @@ LAN = [
     re.compile(r"10\.0\.1\."),
     re.compile(r"172\.(1[6-9]|2[0-9]|3[01])\."),
 ]
-# Turkish characters: the public tree is 100% English.
+# Turkish characters: the public tree is 100% English. Code points are
+# built via chr() so this file does not contain the characters it scans
+# for (the public build's Turkish battery would flag this file).
 _TR_K = (0x130, 0x131, 0x11E, 0x11F, 0x15E, 0x15F,
          0xDC, 0xFC, 0xD6, 0xF6, 0xC7, 0xE7)
 TURKISH = [re.compile("[" + "".join(chr(c) for c in _TR_K) + "]")]
