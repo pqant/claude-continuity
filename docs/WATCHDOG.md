@@ -2,7 +2,7 @@
 
 A watchdog daemon that keeps a watch over the local model server and the
 live Claude Code sessions running on it. It nudges, it never restarts a
-session, and — since Phase 13 — it powers the DGX back on after a
+session, and — since Phase 13 — it powers the LLM box back on after a
 sustained outage (the one sanctioned box-side action; see **Auto
 power-cycle**).
 
@@ -28,8 +28,8 @@ P10-D1 rule ("no box-side action of any kind") is **superseded by Phase
 13**: when the model server itself is unreachable the daemon may run a
 user-configured *local* network-recovery command on the Mac (see below),
 and — when the outage outlasts `power_cycle_after_s` and a Kasa power
-plug is configured — it power-cycles the DGX through the plug
-(see **Auto power-cycle**, design 7899).
+plug is configured — it power-cycles the LLM box through the plug
+(see **Auto power-cycle**).
 
 ## Install
 
@@ -37,7 +37,7 @@ plug is configured — it power-cycles the DGX through the plug
 # 1. opt in + point it at the model server (health URL is user-supplied;
 #    the docs always show the placeholder, P10-D13):
 cc-continuity configure --watchdog-enabled true \
-    --watchdog-health http://<DGX-IP>:8000/health
+    --watchdog-health http://<LLM-HOST>:8000/health
 
 # 2. install the LaunchAgent (refuses while disabled):
 cc-continuity watchdog install
@@ -150,7 +150,7 @@ NUDGE_ELIGIBLE session (max `last_ledger_ts`), which is exactly the session
 the digest relay talks to (the restriction mirrors
 `watchdog_digest._best_candidate` so only the session the digest talks to
 may be revived). Every other eligible session stays dormant and does not
-burn its `max_nudges` budget. The sessions share ONE DGX model: a tick that
+burn its `max_nudges` budget. The sessions share ONE model server: a tick that
 nudged every stalled session at once put concurrent load on that shared
 model, slowing — or destabilizing — exactly the session that matters (the
 active one). The focus gates BOTH nudge sites: the per-session
@@ -210,7 +210,7 @@ Before the text lands, the first physical nudge of an episode sends a
 stale duplicate line left in the input box. RESEND and SEND_ENTER must
 NOT escape — they submit the nudge already sitting in the box.
 
-**Multi-line pending** (the 11:30 case, generalized): an unsubmitted
+**Multi-line pending**: an unsubmitted
 enriched nudge is MULTI-LINE — the `❯` glyph is on the FIRST input
 line only, so `classify()` sees a non-idle pane (WAIT/FROZEN) and the
 old single-line pending check never matched; the nudge would rot in
@@ -223,8 +223,8 @@ Enter** (no new attempt; SEND_ENTER never counts against
 also starts at SEND_ENTER, never at a re-paste.
 
 `ESCAPE_SETTLE_S` (and the popup geometry/duration in the digest
-relay) are v1 **module constants**, not config keys — "ayarlanabilir"
-was the directive; they become config when a second value is needed.
+relay) are v1 **module constants**, not config keys — they become
+config when a second value is needed.
 
 ### Exit-hang killer (Phase 21)
 
@@ -298,7 +298,7 @@ indefinitely, because a FROZEN pane is normally report-only.
 
 Detection is a separate **generation probe** (`probe_generation`), run
 **ONLY on suspicion** — never on a healthy tick, because a real 5-token
-completion costs the shared DGX model:
+completion costs the shared model:
 
 1. `GET {base}/v1/models` (10 s) — the model **NAME** is asked from the
    server, never read from config, so a box restart / model swap adapts
@@ -400,16 +400,16 @@ on the freeze, never to silently ignoring a real one.
 
 ### Network recovery (P10)
 
-A failed health probe may be a **stale route** (after a DGX or Mac
+A failed health probe may be a **stale route** (after a model server or Mac
 restart), not a real outage. Only on a failed probe the daemon runs
 `watchdog_network_recovery_cmd` (the macOS root wrapper that re-establishes
 the route — it briefly tears down the Mac's Ethernet, ~15 s), re-probes for
 a **second chance**, and only then counts the tick as a failure. The
-script's full `[DGX] ...` output is logged timestamped to
+command's full output is logged timestamped to
 `runtime/watchdog-recovery.log` so it is inspectable inside Claude Code.
 A healthy probe never triggers recovery; an empty command disables it.
 
-### Auto power-cycle (Phase 13, design 7899)
+### Auto power-cycle (Phase 13)
 
 A prolonged outage (a failed recovery means the box itself is dead, not
 just the route) is healed by cutting its power:
@@ -474,7 +474,7 @@ Display filtering: `capture_failed:*` / `unresolvable:*` events (the
 chronic dead-session noise, repeated every tick) are dropped from the
 digest display so they cannot drown the outage signal.
 
-## Verification (the 11:30 lesson)
+## Verification
 
 A nudge counts as **recovered** only when the session's **ledger records a
 `user_prompt` with a ts after the nudge ts** — the landing prompt is the
@@ -518,112 +518,7 @@ line is submitted with a bare Enter on the next unchanged tick.
 - The daemon is a separate process and can **NEVER** break the continuity
   loop: worst case is a missed recovery until the next tick; launchd
   `KeepAlive` restarts crashes.
-- During a real DGX outage the network recovery runs once per failed-probe
-  tick (default: every 5 min) and briefly drops the Mac's network each
-  time. Bounded, and that is the point (a stale route is the most common
-  outage cause) — set the command to `""` to disable.
-
-## Acceptance record
-
-- 2026-09-24: acceptance passed — scratch project + local fake server;
-  evidence: pane capture (`you said: continue`), 3-push inbox
-  (DOWN → back → turn died, exact order), watchdog.log
-  (dgx_down / dgx_up / turn_dead, single daemon process), ledger
-  (`watchdog_nudge` n=1). DGX untouched (P10-D1 — superseded below).
-- 2026-09-26: Phase 13 live — during the 07:58–08:41 DGX outage the
-  daemon ran 5 network recoveries (08:09/08:14/08:19/08:30/08:35, all
-  exit=0) and the health machine tracked the flap
-  (DOWN 08:14 → false UP 08:25 → DOWN 08:35 → UP 08:40); auto
-  power-cycle + digest relay deployed and verified live (forced digest
-  pass injected the outage timeline into a live session, `pushed: true`;
-  the tmux 3.7b `load-buffer` stdin rejection was caught by that live
-  run and fixed with the file-argument form).
-- 2026-09-27: **Phase 15 live re-test PASSED** — the first live proof
-  of the dgx_up recovery path (its regression, the 2026-09-26 22:14
-  outage, had left session 044 dead). The user unplugged the DGX ~19:20
-  while a daemon-injected digest prompt (19:19:59) had just started a
-  turn in session 051 — the turn died with the model and stayed
-  `turn_active`, classifying **ALIVE on every DOWN tick** (19:29–19:39,
-  fresh-ledger mask — exactly the 044 case the normal nudge path never
-  sees). All daemon-side, zero human input: `dgx_down` 19:23:44 → auto
-  `power_cycle` 19:34:15 (≈10 min sustained DOWN) → `dgx_up` 19:45:01 →
-  Phase 15 pass sent `continue` to the focus session
-  (`dgx_up_recovery:claude-continuity-5da1c3ab:051`, ledger
-  `watchdog_nudge` n=1 + `user_prompt` at the nudge ts) → the session
-  resumed on its own → `watchdog_verified` n=1, tick outcome
-  **VERIFIED** 19:50:01. Cut → recovered ≈ 25 min. The stale-route
-  network recoveries on the 19:18–19:39 failed-probe ticks (all
-  exit=0, 15 s) are expected bounded behavior.
-- 2026-09-28: **Phase 19 deployed** — enriched nudges (outage/plain
-  context in the prompt), ESC force-cancel (0.75 s settle) before the
-  physical nudge, multi-line pending → bare Enter, digest shown via
-  `display-popup` (visible, never a prompt). 963 tests pass. Post
-  kickstart the daemon's tick lines are normal (cold-start
-  `health=UNKNOWN` baseline, then UP); the first notable digest after
-  deploy hit `skipped_busy` (target mid-turn) — correct hold-back;
-  the popup display itself is covered by the 52-test digest suite and
-  will appear at the next notable digest on an idle target. No DGX
-  staging (outage-test protocol: no staging).
-- 2026-09-29: **Phase 21 live — first real kill.** The first fast
-  pass after the kickstart found a connector-pane CC hung **20.8 h**
-  after its `/exit` (pid 25652, mode `term` — SIGTERM sufficed); the
-  `exit_hang` push went out and the pane closed. The GATE fired: no
-  new CC pane within 1 min — the session survived on the orphaned
-  progress-pane (a zombie, no restart: launch is one-shot). The
-  approved GATE addendum (post-kill `tmux kill-session` cleanup,
-  best-effort, dead-race exempt) was implemented TDD (1044 tests),
-  deployed, kickstarted, and the leftover zombie session was cleaned
-  up. Commit 83135a9 (killer) + the cleanup follow-up.
-- 2026-09-30: **Phase 22 deployed** — frozen-turn escalation went live
-  (commits 7d3fba1 A+B + a2eee4c C). The first kickstart after copying
-  the three C files (config/notify/watchdogd) **crashed the daemon on
-  startup**: `watchdogd.py` imports `frozen_nudge_due` from `watchdog.py`
-  (an A+B file) but the app dir still had the pre-Phase-22 `watchdog.py`
-  — the handoff's deploy list had missed it → ImportError, launchd
-  respawn loop (last exit 1, `state = spawn scheduled`). Fixed by also
-  deploying `watchdog.py`; the daemon came back clean (fresh tick,
-  cold-start `health=UNKNOWN` baseline then UP). **1067 tests pass.**
-  **Live verification PENDING**: the gen-DOWN → power-cycle chain (180 s
-  probe + 600 s after_s + shared relay) has not been exercised against a
-  real DGX yet — first real freeze. No staging (outage-test protocol: no
-  staging).
-- 2026-09-30: **Phase 21.1 — start-time guard (stale-marker
-  false-positive fix).** The 2026-09-30 incident: every FRESH connector
-  `claude` was killed ~5 s after launch (4 kills 09:56–09:58, nnn
-  11–14). Root cause: `read_transcript_entries` picks the project dir's
-  NEWEST transcript by mtime; the connector dir's newest file was a
-  2-day-old transcript whose tail is an OLD `/exit` marker (09-28
-  20:44). A fresh process (and `--continue`/`--resume` replays) matched
-  that stale marker → `exit_hang_due` True → false-positive kill. The
-  guard (this process's OWN marker only) was implemented TDD: 9 new
-  tests, **1076 pass**. `watchdog.py` + `watchdogd.py` deployed via the
-  `diff -q` loop (zero diff after), daemon restarted (PID 52997, clean,
-  no errors.log). **Live outcome (reality, 2026-09-30):** the guard's
-  target direction (a fresh process matched against a 2-day-old marker)
-  did NOT recur — the 13:47 connector "hang" was a *different* failure
-  mode (a clean `/exit` whose CC died, leaving a zombie session on the
-  orphaned progress-pane — no hung `/exit` to kill), so the guard
-  regression was **not** exercised against a real hang. A SEPARATE
-  false-positive did occur at 16:10:59: a FRESH marker (16:10:27, a
-  `--continue` replay's clean `/exit`) was attributed to an OLDER live
-  CC (started 15:53) — the opposite direction, which the start-time
-  guard structurally cannot catch (it only compares marker age to
-  process age, not ownership). Phase 21.2 closes that. No staging
-  (outage-test protocol).
-- 2026-09-30: **Phase 21.2 — session attribution (the 16:10
-  false-positive kill).** Root cause of the 16:10:59 kill (event
-  `nnn 64, pane cc-connector-7470, pid 86934, age_s 32.49`):
-  `read_transcript_entries` reads the project dir's **newest** transcript
-  by mtime. A `--continue`/`--resume` of an old conversation (a7c36f64)
-  wrote a fresh `/exit` marker to its OWN (old) file at 16:10:27; that
-  file became the dir's newest, so the marker was attributed to a
-  DIFFERENT live session's CC (7470, started 15:53, before the marker).
-  The Phase 21.1 start-time guard (marker must be newer than the
-  process start) PASSED — the marker WAS newer — so the kill fired. The
-  fix: `read_transcript_entries(cwd, session_id=None)` reads the
-  session's **own** `<sid>.jsonl` when `session_id` is known (no own
-  file → `None` → no marker → no kill); `check_exit_hangs` now passes
-  `rec["session_id"]`. Records without `session_id` keep the legacy
-  dir-newest read. 8 new tests (3 unit + 3 daemon + 1 legacy-fallback
-  guard), **1084 pass**. `watchdogd.py` + `test_watchdogd.py` deployed
-  via the `diff -q` loop, daemon kickstarted.
+- During a real model server outage the network recovery runs once per
+  failed-probe tick (default: every 5 min) and briefly drops the Mac's
+  network each time. Bounded, and that is the point (a stale route is
+  the most common outage cause) — set the command to `""` to disable.
