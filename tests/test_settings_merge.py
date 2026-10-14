@@ -157,6 +157,7 @@ def test_detect_format_user_real_style():
 def test_detect_format_variants():
     # non-ASCII content so ensure_ascii is observable (for pure-ASCII input
     # both settings dump identically and the flag is not detectable)
+    # non-personal Unicode case (UTF-8 handling)
     obj = {"a": "ñ", "b": [1, 2]}
     for indent in (2, 4):
         for ea in (False, True):

@@ -499,25 +499,25 @@ def test_probe_generation_empty_url_is_liveness_only():
 
 
 def test_gen_base_url_strips_path():
-    assert watchdogd._gen_base_url("http://127.0.0.1:8000/health") \
-        == "http://127.0.0.1:8000"
-    assert watchdogd._gen_base_url("http://127.0.0.1:8000") \
-        == "http://127.0.0.1:8000"
-    assert watchdogd._gen_base_url("http://127.0.0.1:8000/health/") \
-        == "http://127.0.0.1:8000"
+    assert watchdogd._gen_base_url("http://192.0.2.20:8000/health") \
+        == "http://192.0.2.20:8000"
+    assert watchdogd._gen_base_url("http://192.0.2.20:8000") \
+        == "http://192.0.2.20:8000"
+    assert watchdogd._gen_base_url("http://192.0.2.20:8000/health/") \
+        == "http://192.0.2.20:8000"
 
 
 def test_probe_generation_success():
     r = _FakeGenRunner([(GEN_MODELS_JSON, 0), (b"200", 0)])
     ok = watchdogd.probe_generation(
-        {"watchdog_health_url": "http://127.0.0.1:8000/health"}, runner=r)
+        {"watchdog_health_url": "http://192.0.2.20:8000/health"}, runner=r)
     assert ok is True
     # step 1: GET {base}/v1/models (the model name is asked from the
     # server, never config); step 2: POST {base}/v1/chat/completions
-    assert r.calls[0][0][-1] == "http://127.0.0.1:8000/v1/models"
+    assert r.calls[0][0][-1] == "http://192.0.2.20:8000/v1/models"
     post = r.calls[1][0]
     assert post[post.index("POST") + 1] \
-        == "http://127.0.0.1:8000/v1/chat/completions"
+        == "http://192.0.2.20:8000/v1/chat/completions"
     assert "-X" in post and "POST" in post
     assert "-w" in post and "%{http_code}" in post
     payload = json.loads(post[post.index("-d") + 1])
@@ -528,7 +528,7 @@ def test_probe_generation_success():
 def test_probe_generation_non_200_is_down():
     r = _FakeGenRunner([(GEN_MODELS_JSON, 0), (b"503", 0)])
     assert watchdogd.probe_generation(
-        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        {"watchdog_health_url": "http://192.0.2.20:8000/health"},
         runner=r) is False
 
 
@@ -537,7 +537,7 @@ def test_probe_generation_models_failure_is_down():
     # exactly what is in question) — the POST is never attempted
     r = _FakeGenRunner([(b"", 7)])  # rc 7 = connection refused
     assert watchdogd.probe_generation(
-        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        {"watchdog_health_url": "http://192.0.2.20:8000/health"},
         runner=r) is False
     assert len(r.calls) == 1
 
@@ -545,7 +545,7 @@ def test_probe_generation_models_failure_is_down():
 def test_probe_generation_malformed_models_is_down():
     r = _FakeGenRunner([(b"not json", 0), (b"200", 0)])
     assert watchdogd.probe_generation(
-        {"watchdog_health_url": "http://127.0.0.1:8000/health"},
+        {"watchdog_health_url": "http://192.0.2.20:8000/health"},
         runner=r) is False
 
 
@@ -554,7 +554,7 @@ def test_probe_generation_post_timeout_is_down():
                         (subprocess.TimeoutExpired(cmd="curl",
                                                    timeout=180))])
     assert watchdogd.probe_generation(
-        {"watchdog_health_url": "http://127.0.0.1:8000/health",
+        {"watchdog_health_url": "http://192.0.2.20:8000/health",
          "watchdog_gen_probe_timeout_s": 180},
         runner=r) is False
 
@@ -591,13 +591,13 @@ def test_recover_network_runs_and_captures_stdout():
     r = _FakeRecoverRunner(stdout=b"[DGX] Network recovery completed.\n")
     rec = watchdogd.recover_network(
         {"watchdog_network_recovery_cmd":
-         "sudo -n /usr/local/libexec/dgx-network-recovery"}, runner=r)
+         "sudo -n /usr/local/libexec/network-recovery"}, runner=r)
     assert rec["ran"] is True
     assert rec["exit"] == 0
     assert rec["out"] == "[DGX] Network recovery completed."
     assert len(r.calls) == 1
     assert r.calls[0][0] == \
-        "sudo -n /usr/local/libexec/dgx-network-recovery"
+        "sudo -n /usr/local/libexec/network-recovery"
     assert r.calls[0][1].get("shell") is True
 
 
@@ -650,7 +650,7 @@ def test_tick_failed_probe_recovers_then_up(cc_home):
     io.recover_result = {"ran": True, "exit": 0, "elapsed_s": 14.8,
                          "out": "[DGX] Network recovery completed."}
     ctx = _ctx(io, cfg_over={"watchdog_network_recovery_cmd":
-                             "sudo -n /usr/local/libexec/dgx-network-recovery"})
+                             "sudo -n /usr/local/libexec/network-recovery"})
     line = watchdogd.tick(ctx)
     assert io.probe_calls == 2        # probe + re-probe
     assert io.recover_calls == 1
