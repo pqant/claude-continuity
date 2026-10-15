@@ -440,16 +440,40 @@ def test_animator_follows_terminal_resize(cc_home):
     # the terminal (and thus the pane) can be resized while the animator
     # runs: the frame width must be re-read every frame, or a frame wider
     # than the pane wraps and the visible line becomes the padding tail
-    # ("··" — the bug the user saw after a 118 -> 116 resize)
-    cols = iter([80, 80, 40])
+    # ("··" — the bug the user saw after a 118 -> 116 resize). The width
+    # JUMP frame itself is skipped by the width-jump guard; the settled
+    # width is painted on its first stable frame.
+    cols = iter([80, 80, 40, 40])
     out = []
-    progress_pane.run_animator("12", _frames=3, _write=out.append,
+    progress_pane.run_animator("12", _frames=4, _write=out.append,
                                _now=lambda: 0.0,
                                _size=lambda: _size_obj(next(cols)),
                                _text=lambda: "◆ 61% ok",
                                _mtime=lambda: 1, _sleep=lambda s: None)
     widths = [len(_cells(w.decode("utf-8"))) for w in out]
     assert widths == [80, 80, 40]
+
+
+def test_animator_skips_degenerate_width_jumps(cc_home):
+    # flashing-dot hotfix: mid-resize the pty reports transient degenerate
+    # widths (live-captured 50 cols on a 90-col terminal, down to 1 -> the
+    # single "·" frame the user saw). A frame narrower than
+    # _WIDTH_GUARD, or a read that teleports more than _WIDTH_JUMP cols
+    # from the previous READ width, must never be painted: the last good
+    # frame stays on screen and the settled width is painted on its first
+    # stable frame.
+    cols = iter([90, 90, 1, 90, 90])
+    out = []
+    progress_pane.run_animator("12", _frames=5, _write=out.append,
+                               _now=lambda: 0.0,
+                               _size=lambda: _size_obj(next(cols)),
+                               _text=lambda: "◆ 61% ok",
+                               _mtime=lambda: 1, _sleep=lambda s: None)
+    widths = [len(_cells(w.decode("utf-8"))) for w in out]
+    # the 1-col read — and the 90 jump back from it — are never painted;
+    # the settled 90 is
+    assert widths == [90, 90, 90]
+    assert all(w >= progress_pane._WIDTH_GUARD for w in widths)
 
 
 def test_animator_reloads_text_on_mtime_change(cc_home):
@@ -465,7 +489,9 @@ def test_animator_reloads_text_on_mtime_change(cc_home):
 
     progress_pane.run_animator(
         _frames=4, _write=written.append, _now=lambda: 0.0,
-        _size=lambda: _size_obj(5), _text=lambda: state["text"],
+        # width 12: above the width-jump guard floor (5 < _WIDTH_GUARD
+        # would be skipped and nothing painted)
+        _size=lambda: _size_obj(12), _text=lambda: state["text"],
         _mtime=lambda: state["mtime"], _sleep=sleep)
     v = [ _visible(w.decode("utf-8")) for w in written]
     # frames 1-2 show the old text, 3-4 the reloaded text
@@ -500,7 +526,7 @@ def test_animator_keeps_last_text_when_file_disappears(cc_home):
 
     progress_pane.run_animator(
         _frames=6, _write=written.append, _now=lambda: 0.0,
-        _size=lambda: _size_obj(5), _text=text,
+        _size=lambda: _size_obj(12), _text=text,
         _mtime=lambda: state["mtime"], _sleep=sleep)
     v = [_visible(w.decode("utf-8")) for w in written]
     # while the file is gone: keep the last real text (no "◆ …")
@@ -540,7 +566,7 @@ def test_animator_drift_compensates_sleep(cc_home):
 
     progress_pane.run_animator(
         _frames=2, _write=write, _now=now,
-        _size=lambda: _size_obj(5), _text=lambda: "x",
+        _size=lambda: _size_obj(12), _text=lambda: "x",
         _mtime=lambda: 1, _sleep=sleeps.append)
     assert len(sleeps) == 1  # no sleep after the final frame
     assert sleeps[0] == pytest.approx(0.03, abs=1e-6)

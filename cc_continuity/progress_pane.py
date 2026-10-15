@@ -50,6 +50,15 @@ _VALID_WINDOW_ID = re.compile(r"[\w@-]+")
 #: slow, so the pane is faster — ~4 s for a full-width sweep at 80 cols.
 PANE_CELLS_PER_S = 24.0
 
+# Width-jump guard (flashing-dot hotfix): a terminal resize leaves
+# transient degenerate width reads (live-captured 50 cols on a 90-col
+# terminal, down to 1 -> the single "·" frame the user saw). Never paint
+# a frame narrower than _WIDTH_GUARD, and skip a frame whose read width
+# teleports more than _WIDTH_JUMP cols from the previous READ width
+# (mid-resize wobble); the last good frame stays on screen.
+_WIDTH_GUARD = 10
+_WIDTH_JUMP = 3
+
 _PROGRESS_DATA_PREFIX = "progress-data-"
 _PANE_RECORD_NAME = "progress-pane.json"
 
@@ -407,7 +416,12 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     resolving ``$TMUX_PANE`` and, failing that, animates the placeholder.
     The sleep is drift-compensated (0.05 s target minus the frame's own
     cost). ANY I/O failure ends the loop (returns) — the pane dies and the
-    status line self-heal recreates it. ``_frames`` bounds the loop (tests).
+    status line self-heal recreates it. Frames with degenerate resize
+    widths are skipped (width-jump guard: narrower than ``_WIDTH_GUARD``,
+    or a read that teleports more than ``_WIDTH_JUMP`` cols from the
+    previous read width) — a resize never paints a single-character
+    fragment; the last good frame stays on screen. ``_frames`` bounds the
+    loop (tests).
     """
     write = _write if _write is not None else (lambda b: os.write(1, b))
     now = _now if _now is not None else time.time
@@ -424,12 +438,22 @@ def run_animator(window_id: str | None = None, *, _frames=None,
         cur_text = text_fn()
         cur_mtime = mtime_fn()
         i = 0
+        last_width = None  # previous frame's READ width (jump guard)
         while True:
             # per-frame: the terminal can be resized while the animator
             # runs — a one-shot width makes frames wider than the pane,
             # which wrap and leave the padding tail ("··") visible. One
             # TIOCGWINSZ ioctl/frame is negligible at 20 fps.
             width = size().columns
+            # width-jump guard: never paint a degenerate resize read —
+            # below the floor, or a teleport from the previous READ
+            # width. last_width tracks reads (not paints), so a real
+            # resize that settles (80 -> 40, 40) is painted on its first
+            # stable frame; only the jump frame itself is skipped.
+            skipped = (width < _WIDTH_GUARD
+                       or (last_width is not None
+                           and abs(width - last_width) > _WIDTH_JUMP))
+            last_width = width
             mt = mtime_fn()
             if mt != cur_mtime:
                 # A file that DISAPPEARED (mtime None) is not a new text:
@@ -442,12 +466,15 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cur_text = text_fn()
                 cur_mtime = mt
             t = now()
-            # \x1b[H homes to row 1 col 1 every frame: \r alone can't
-            # recover a pty cursor that a resize-race wrap dropped to a
-            # lower row (Bug Z — every such race froze one more rainbow
-            # line). \x1b[J then erases any wrapped tail/stale rows.
-            write(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
-                   + "\x1b[0m\x1b[J").encode("utf-8"))
+            if not skipped:
+                # \x1b[H homes to row 1 col 1 every frame: \r alone can't
+                # recover a pty cursor that a resize-race wrap dropped to
+                # a lower row (Bug Z — every such race froze one more
+                # rainbow line). \x1b[J then erases any wrapped tail/stale
+                # rows. A skipped frame writes nothing: the last good
+                # frame simply stays on screen.
+                write(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
+                       + "\x1b[0m\x1b[J").encode("utf-8"))
             i += 1
             if _frames is not None and i >= _frames:
                 return
