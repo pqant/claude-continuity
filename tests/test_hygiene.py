@@ -3,8 +3,8 @@
 Generic patterns only — no maintainer-specific strings (personal additions
 belong in the maintainer's redact_patterns_extra, not in the public test).
 Internal dev logs (HANDOFF.md, PROGRESS.md, docs/PRD.md, docs/TRIAL.md,
-dev-only planning/spec docs) are class E: they never enter the public tree
-(build-time exclusion) and are therefore not scanned here.
+and other dev-only planning/spec docs) are class E: they never enter the
+public tree (build-time exclusion) and are therefore not scanned here.
 """
 
 import re

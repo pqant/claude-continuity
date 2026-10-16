@@ -22,7 +22,6 @@
     '''^\.spikes/''',
     '''^\.sandbox/''',
     '''^\.claude/''',
-    
     '''^\.pytest_cache/''',
     '''^__pycache__/''',
     '''^HANDOFF\.md$''',
@@ -36,7 +35,6 @@
     '''^docs/UNATTENDED-TRIAL\.md$''',
     '''^docs/VERIFICATION\.md$''',
     '''^docs/phase10-architecture\.txt$''',
-    
     '''^docs/claude-continuity-public-open-source-audit\.md$''',
     '''^docs/public-release-audit-report\.md$''',
     '''^docs/watchdog-acceptance-record\.md$''',
