@@ -26,6 +26,25 @@ def fake_home(tmp_path, monkeypatch, cc_home):
     return home
 
 
+@pytest.fixture(autouse=True)
+def _cli_prereq_stubs(tmp_path, monkeypatch):
+    """Stub tmux/claude on PATH for the real-CLI subprocesses.
+
+    CI runners have neither, and a subprocess probes PATH for real —
+    the in-process which-fake in conftest.py does not reach it. The
+    stub claude answers `--version` so the prerequisite version gate
+    passes; the stub tmux is never executed (probes only).
+    """
+    stubs = tmp_path / "prereq-stubs"
+    stubs.mkdir()
+    (stubs / "tmux").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (stubs / "claude").write_text(
+        '#!/bin/sh\necho "2.1.209 (Claude Code)"\n', encoding="utf-8")
+    for f in stubs.iterdir():
+        f.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{os.environ['PATH']}")
+
+
 def _cli(env, *args, cwd=None):
     e = dict(env)
     e["PYTHONPATH"] = str(REPO)

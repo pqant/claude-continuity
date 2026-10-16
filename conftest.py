@@ -4,6 +4,7 @@ Keeping the repo root on sys.path lets tests `import cc_continuity` without
 an editable install (Phase 1 runs from the working tree).
 """
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -34,3 +35,24 @@ _LEAKY_ENV = ("TMUX", "TMUX_PANE", "CC_CONTINUITY_NAME",
 def _hermetic_env(monkeypatch):
     for var in _LEAKY_ENV:
         monkeypatch.delenv(var, raising=False)
+
+
+#: Prerequisite binaries probed via shutil.which at call time (install,
+#: doctor, launch). CI runners lack tmux and claude, which made every
+#: install/doctor/uninstall test fail off the developer machine (the
+#: PATH probe bypassed the injected runner). Pinning the four names
+#: keeps the suite hermetic; all other names fall through to the real
+#: shutil.which. Tests that need a binary to be MISSING patch
+#: shutil.which inside the test body (runs after this fixture) and win.
+_FIXED_PREREQ_BINS = {"tmux": "/usr/bin/tmux", "zsh": "/usr/bin/zsh",
+                      "curl": "/usr/bin/curl", "claude": "/usr/bin/claude"}
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_prereq_bins(monkeypatch):
+    real = shutil.which
+
+    def fake(name):
+        return _FIXED_PREREQ_BINS.get(name, real(name))
+
+    monkeypatch.setattr(shutil, "which", fake)
