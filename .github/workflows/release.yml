@@ -7,7 +7,9 @@ permissions:
   id-token: write
 jobs:
   publish:
-    runs-on: macos-latest
+    # pypa/gh-action-pypi-publish is a Docker container action: it only
+    # runs on a GNU/Linux runner
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
