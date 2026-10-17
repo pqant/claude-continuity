@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cc-continuity"
-version = "0.1.0"
+version = "0.1.1"
 description = "Zero-touch session rotation for Claude Code (local large-context model)"
 requires-python = ">=3.11"
 dependencies = []  # stdlib only at runtime (PRD §0.5)
