@@ -1,0 +1,60 @@
+flowchart TD
+    %% ================= A · SESSION =================
+    subgraph SESSION["A · Session loop — automatic, no human needed"]
+        direction TB
+        A1["claude starts in a project<br/>zsh wrapper, auto-tmux<br/>session named project-NNN"]
+        A2["Agent turns run<br/>context ratio climbs<br/>statusline + 1-line progress pane"]
+        A3["Stop hook measures the ratio<br/>after every turn"]
+        A4["ratio 55% — state WARNED"]
+        A5["ratio 62% — state ROTATION_PENDING<br/>no interruption: rotates at turn end"]
+        A6["Agent writes handoff cp-NNN<br/>sha256 verified by the hook"]
+        A7["git snapshot under refs/continuity/*<br/>non-invasive: your branch is untouched"]
+        A8["/clear + session rename<br/>bootstrap injected:<br/>Continuing from cp-NNN (name)"]
+        A9["Successor session resumes<br/>reads the handoff, continues at the<br/>next atomic action"]
+        A1 --> A2
+        A2 --> A3
+        A3 -->|"ratio 55%"| A4
+        A4 -->|"ratio 62%"| A5
+        A5 --> A6
+        A6 --> A7
+        A7 --> A8
+        A8 --> A9
+        A3 -.->|"below 55%: keep working"| A2
+        A9 -.->|"fresh context: work continues"| A2
+    end
+
+    %% ================= B · WATCHDOG =================
+    subgraph WATCHDOG["B · Watchdog — opt-in, launchd daemon watchdogd"]
+        direction TB
+        B0["watchdogd runs in the background"]
+        B1["health probe to the model server"]
+        B2["2 fails in a row = DOWN<br/>(debounce: a single flake is ignored)"]
+        B3["network recovery (optional)<br/>+ auto power-cycle via HS100 smart plug<br/>~15-20 min until the models load"]
+        B4["back online<br/>outage digest relayed into the session"]
+        B5["frozen-turn detection<br/>ESC + nudge state machine"]
+        B6["/exit hang — killed"]
+        B7["zombie session cleanup"]
+        B0 --> B1
+        B1 -.->|"OK: probe again"| B1
+        B1 -->|"2 fails in a row"| B2
+        B2 --> B3
+        B3 --> B4
+        B0 --> B5
+        B0 --> B6
+        B0 --> B7
+    end
+
+    %% ================= C · HUMAN =================
+    subgraph HUMAN["C · You — every notification is opt-in"]
+        direction TB
+        C1["🛑 cc-continuity: BLOCKED — waiting for you (urgent)<br/>agent runs: cc-continuity signal needs-human (reason)"]
+        C2["you remote in<br/>reply in the session — work continues"]
+        C3["✅ cc-continuity: task complete<br/>agent runs: cc-continuity signal done (summary)"]
+        C4["unattended mode (opt-in)<br/>the loop keeps rotating without you"]
+        C1 --> C2
+    end
+
+    %% ================= inter-lane push edges (subgraph level) =================
+    SESSION -->|"⚠ cc-continuity: context warning<br/>◆ cc-continuity: rotation pending<br/>✓ cc-continuity: handoff written & verified<br/>🔄 cc-continuity: rotation complete"| HUMAN
+    WATCHDOG -->|"🔌 cc-continuity: model server DOWN (urgent)<br/>🔌 cc-continuity: model server back<br/>⟲ cc-continuity: turn died — recovering<br/>🧊 cc-continuity: frozen turn — escalated"| HUMAN
+
