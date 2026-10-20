@@ -36,11 +36,11 @@ _NAME_PREFIXES = ("--name=", "--resume=", "--continue=")
 
 @dataclasses.dataclass(frozen=True)
 class LaunchPlan:
-    mode: str               # "passthrough" | "tmux" | "direct"
+    mode: str               # "passthrough" | "tmux" | "direct" | "detached"
     claude_args: tuple      # original argv (+ ("-n", name) when computed)
     name: str | None        # computed logical name (None in passthrough/
     #                        # user-supplied-name cases)
-    tmux_session: str | None  # only mode == "tmux": "cc-<slug>-<rand4>"
+    tmux_session: str | None  # modes "tmux"/"detached": "cc-<slug>-<rand4>"
     reason: str
 
 
@@ -74,27 +74,33 @@ def plan_launch(argv, *, cwd, in_tmux, interactive,
     if no_tmux:
         return LaunchPlan("passthrough", argv, None, None,
                           "CC_CONTINUITY_NO_TMUX set")
-    if not interactive:
-        return LaunchPlan("passthrough", argv, None, None, "not interactive")
     if any(a in PASS_FLAGS for a in argv):
         return LaunchPlan("passthrough", argv, None, None, "pass-through flag")
     pos = _first_positional(argv)
     if pos in PASS_SUBCOMMANDS:
         return LaunchPlan("passthrough", argv, None, None,
                           f"subcommand {pos}")
-    mode = "direct" if in_tmux else "tmux"
+    if not interactive:
+        # Non-TTY launch (background job, script, IDE): the session must
+        # still land in a tmux PANE, or $TMUX_PANE is unset and auto-
+        # rotation + the animated progress pane are dead for its whole
+        # lifetime. "detached" creates the session without attaching;
+        # inside tmux already there is nothing to do (direct).
+        mode = "direct" if in_tmux else "detached"
+    else:
+        mode = "direct" if in_tmux else "tmux"
     slug = naming.slug_for_dir(cwd)
     has_name = (any(a in NAME_FLAGS for a in argv)
                 or any(a.startswith(_NAME_PREFIXES) for a in argv))
     if has_name:
         return LaunchPlan(
             mode, argv, None,
-            f"cc-{slug}-{rand()}" if mode == "tmux" else None,
+            f"cc-{slug}-{rand()}" if mode in ("tmux", "detached") else None,
             "user-supplied name/resume flag")
     name = naming.logical_name(slug, next_counter_for(Path(cwd)))
     return LaunchPlan(
         mode, argv + ("-n", name), name,
-        f"cc-{slug}-{rand()}" if mode == "tmux" else None,
+        f"cc-{slug}-{rand()}" if mode in ("tmux", "detached") else None,
         f"auto name {name}")
 
 
@@ -150,9 +156,14 @@ def run_launch(argv: list[str], *, cwd: str | Path | None = None,
     ``unattended`` (P9-D6): from ``launch --unattended``. Effective =
     flag OR ``config.json["unattended"]`` (P9-P7 — a rotation is a
     /clear in the same process, so the project setting carries the whole
-    chain). When effective, spawned (tmux/direct) sessions run claude
-    with ``--dangerously-skip-permissions``; passthrough is never
+    chain). When effective, spawned (tmux/direct/detached) sessions run
+    claude with ``--dangerously-skip-permissions``; passthrough is never
     modified (it is the user's own explicit claude invocation).
+
+    Non-TTY launches (no TTY on stdin/stdout) resolve to mode
+    ``"detached"``: a tmux session is created and claude runs in its pane,
+    but nothing is attached — so EVERY launch path (interactive terminal,
+    background job, script) ends with the session inside a tmux pane.
     """
     cwd = Path(cwd) if cwd is not None else Path.cwd()
     cfg = config.load_config(cwd=cwd)
@@ -165,14 +176,14 @@ def run_launch(argv: list[str], *, cwd: str | Path | None = None,
         no_tmux=bool(os.environ.get("CC_CONTINUITY_NO_TMUX")),
     )
     claude_args = plan.claude_args
-    if plan.mode in ("tmux", "direct") and (
+    if plan.mode in ("tmux", "direct", "detached") and (
             unattended or bool(cfg.get("unattended", False))):
         claude_args = claude_args + ("--dangerously-skip-permissions",)
     tmux_bin = _tmux_bin()
     claude_bin = _claude_bin()
     if plan.mode in ("passthrough", "direct"):
         return _exec_claude(claude_bin, claude_args, plan.name)
-    # tmux mode
+    # tmux / detached mode
     if shutil.which(tmux_bin) is None:
         print("cc-continuity: tmux not found — falling back to direct launch",
               file=sys.stderr)
@@ -189,6 +200,14 @@ def run_launch(argv: list[str], *, cwd: str | Path | None = None,
         print(f"cc-continuity: tmux new-session failed: "
               f"{r.stderr.strip() or r.stdout.strip()}", file=sys.stderr)
         return 1
+    if plan.mode == "detached":
+        # No TTY to attach to (background job/script): the session lives in
+        # the detached tmux session; the pane (and thus $TMUX_PANE,
+        # auto-rotation and the animated progress pane) exists either way.
+        print(f"cc-continuity: running in detached tmux session "
+              f"{plan.tmux_session} (attach with: "
+              f"tmux attach -t {plan.tmux_session})", file=sys.stderr)
+        return 0
     a = subprocess.run([tmux_bin, "attach-session", "-t", plan.tmux_session])
     if a.returncode != 0:
         print(f"cc-continuity: session started; attach with: "
