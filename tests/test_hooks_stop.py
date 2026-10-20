@@ -10,12 +10,23 @@ Finalize failure is swallowed (errors.log, state kept).
 
 import json
 
+import pytest
+
 from cc_continuity import checkpoint, ledger, paths, state
 from cc_continuity.hooks import stop
 from hookutil import (SID, make_repo, payload, register_session, run_hook,
                       stdout_json, walk_to)
 
 AMCL = "Checkpoint ready. Type /clear to continue automatically."
+
+
+@pytest.fixture(autouse=True)
+def _paneless_spawn_fails(monkeypatch):
+    # The paneless self-heal spawns a REAL claude in a REAL tmux session
+    # — a test must never do that. Default outcome "failed" exercises the
+    # assisted AMCL fallback; the paneless-branch tests below override it.
+    monkeypatch.setattr(stop.rotator, "spawn_successor_detached",
+                        lambda *a, **kw: ("failed", None))
 
 
 def _setup(cc_home, tmp_path, s=None):
@@ -90,9 +101,14 @@ def test_third_failed_stop_degrades_checkpoint(cc_home, capsys, tmp_path):
     assert snap["degraded"] is True
     walk = [(e["from"], e["to"]) for e in ledger.read(paths.session_dir(key, nnn))
             if e["type"] == "state"]
-    assert walk[-4:] == [("HANDOFF_REQUESTED", "HANDOFF_FAILED"),
+    # No pane here: the Stop takes the paneless self-heal branch — the
+    # (fake) spawn fails, the state rolls back CV and takes the assisted
+    # AMCL path (the two extra steps vs. the old direct CV->AMCL).
+    assert walk[-6:] == [("HANDOFF_REQUESTED", "HANDOFF_FAILED"),
                          ("HANDOFF_FAILED", "CHECKPOINT_WRITING"),
                          ("CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED"),
+                         ("CHECKPOINT_VERIFIED", "ROTATING"),
+                         ("ROTATING", "CHECKPOINT_VERIFIED"),
                          ("CHECKPOINT_VERIFIED", "AWAITING_MANUAL_CLEAR")]
 
 
@@ -315,6 +331,84 @@ def test_stop_finalize_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
     assert prio == "urgent"
     assert (f"proj=spike-repo {nnn:03d} "
             "detail=verify: checksum mismatch") in body
+
+
+# --- paneless self-heal (no $TMUX_PANE, PRD §9 Stop) --------------------------
+
+
+def _paneless_fake(monkeypatch, outcome, info):
+    calls = []
+
+    def fake(key, nnn, sid, cfg, rid, **kw):
+        calls.append((sid, rid))
+        return outcome, info
+
+    monkeypatch.setattr(stop.rotator, "spawn_successor_detached", fake)
+    return calls
+
+
+def test_paneless_stop_self_heal_completed(cc_home, capsys, tmp_path,
+                                           monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path)  # CV + real checkpoint
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    calls = _paneless_fake(monkeypatch, "completed",
+                           {"name": "spike-repo-002",
+                            "tmux_session": "cc-spike-repo-ab12"})
+    run_hook("Stop", payload("Stop", d["repo"]))
+    out = stdout_json(capsys)
+    assert out["systemMessage"].startswith("Rotated to spike-repo-002")
+    assert "tmux attach -t cc-spike-repo-ab12" in out["systemMessage"]
+    rec = state.load_state(d["key"], d["nnn"])
+    assert rec["state"] == "ROTATING"
+    assert rec["rotation_id"] == calls[0][1]  # the fresh id the hook made
+
+
+def test_paneless_stop_failed_falls_back_to_amcl(cc_home, capsys, tmp_path,
+                                                  monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    _paneless_fake(monkeypatch, "failed", None)
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) == {"systemMessage": AMCL}
+    assert state.load_state(d["key"], d["nnn"])["state"] == \
+        "AWAITING_MANUAL_CLEAR"
+
+
+def test_paneless_stop_deferred_is_silent(cc_home, capsys, tmp_path,
+                                          monkeypatch):
+    # The real spawn rolls the state back to CV itself; with the fake it
+    # stays ROTATING and the next Stop retries.
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    _paneless_fake(monkeypatch, "deferred",
+                   {"name": "spike-repo-002", "tmux_session": "cc-x"})
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) is None
+    assert state.load_state(d["key"], d["nnn"])["state"] == "ROTATING"
+
+
+def test_paneless_stop_exited_is_silent(cc_home, capsys, tmp_path, monkeypatch):
+    # Another rotator owns the rotation (or the state moved on): nothing
+    # to say, nothing to do.
+    d = _verified_stop_setup(cc_home, tmp_path)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    _paneless_fake(monkeypatch, "exited", None)
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) is None
+    assert state.load_state(d["key"], d["nnn"])["state"] == "ROTATING"
+
+
+def test_paneless_full_auto_disabled_keeps_amcl(cc_home, capsys, tmp_path,
+                                                 monkeypatch):
+    d = _verified_stop_setup(cc_home, tmp_path)
+    (d["repo"] / ".claude").mkdir(exist_ok=True)
+    (d["repo"] / ".claude" / "continuity.json").write_text(
+        json.dumps({"full_auto": False}))
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    run_hook("Stop", payload("Stop", d["repo"]))
+    assert stdout_json(capsys) == {"systemMessage": AMCL}
+    assert state.load_state(d["key"], d["nnn"])["state"] == \
+        "AWAITING_MANUAL_CLEAR"
 
 
 def test_stop_spawn_failure_pushes_row8(cc_home, tmp_path, monkeypatch):

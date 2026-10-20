@@ -4,6 +4,7 @@ finalized checkpoint -> AMCL. Locks the cross-hook sequence; a failure
 here is an integration regression (all parts land in Tasks 4-9)."""
 
 from cc_continuity import config, ledger, paths, state, validate
+from cc_continuity.hooks import stop
 from hookutil import (make_repo, payload, register_session, run_hook,
                       set_metric, stdout_json)
 
@@ -24,7 +25,13 @@ def _draft_text():
     return "\n".join(f"## {h}\n{b}\n" for h, b in bodies)
 
 
-def test_full_threshold_to_checkpoint_chain(cc_home, capsys, tmp_path):
+def test_full_threshold_to_checkpoint_chain(cc_home, capsys, tmp_path,
+                                             monkeypatch):
+    # No $TMUX_PANE here, so the Stop reaches the paneless self-heal
+    # branch: make the spawn fail (tests must never launch a real claude
+    # in a real tmux session) -> assisted AMCL fallback.
+    monkeypatch.setattr(stop.rotator, "spawn_successor_detached",
+                        lambda *a, **kw: ("failed", None))
     repo = make_repo(tmp_path)
     key, nnn = register_session(repo)
     assert state.load_state(key, nnn)["state"] == "ACTIVE"  # Task 9 (D3)
@@ -93,4 +100,5 @@ def test_full_threshold_to_checkpoint_chain(cc_home, capsys, tmp_path):
             if e["type"] == "state"]
     assert walk == ["WARNED", "ROTATION_PENDING", "HANDOFF_REQUESTED",
                     "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED",
+                    "ROTATING", "CHECKPOINT_VERIFIED",
                     "AWAITING_MANUAL_CLEAR"]
