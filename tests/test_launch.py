@@ -44,8 +44,36 @@ def test_no_tmux_env_passthrough():
     assert p.mode == "passthrough"
 
 
-def test_non_interactive_passthrough():
-    assert _plan([], interactive=False).mode == "passthrough"
+def test_non_interactive_outside_tmux_detached_mode():
+    # Non-TTY launch (background job/script): the session still gets a tmux
+    # PANE so $TMUX_PANE-based rotation + the animated progress pane work —
+    # a detached session, never a pane-less process.
+    p = _plan([], interactive=False, rand=lambda: "a1b2")
+    assert p.mode == "detached"
+    assert p.name == "myproj-001"
+    assert p.claude_args == ("-n", "myproj-001")
+    assert p.tmux_session == "cc-myproj-a1b2"
+
+
+def test_non_interactive_inside_tmux_direct_mode():
+    p = _plan([], interactive=False, in_tmux=True)
+    assert p.mode == "direct"
+    assert p.name == "myproj-001"
+    assert p.tmux_session is None
+
+
+@pytest.mark.parametrize("argv", (["-p", "hi"], ["--version"], ["mcp", "list"]))
+def test_non_interactive_pass_stays_passthrough(argv):
+    # Flags/subcommands never get a tmux session, TTY or not.
+    assert _plan(argv, interactive=False).mode == "passthrough"
+
+
+def test_non_interactive_resume_flag_detached_no_n():
+    p = _plan(["-c"], interactive=False, rand=lambda: "a1b2")
+    assert p.mode == "detached"
+    assert p.name is None
+    assert p.claude_args == ("-c",)
+    assert p.tmux_session == "cc-myproj-a1b2"
 
 
 @pytest.mark.parametrize("flag", ["-p", "--print", "--version", "-v",
@@ -215,6 +243,39 @@ def test_exec_tmux_mode_creates_and_attaches(work_env):
     assert cmd.rstrip().endswith("-n myproj-001")
     assert calls[1][:2] == ["attach-session", "-t"]
     assert calls[1][2] == calls[0][3]
+
+
+def test_exec_detached_mode_creates_without_attach(work_env):
+    e = dict(work_env.env)
+    e.pop("CC_CONTINUITY_FORCE_INTERACTIVE", None)  # child is non-TTY
+    env2 = types.SimpleNamespace(**{**vars(work_env), "env": e})
+    r = _run_launch(env2)
+    assert r.returncode == 0
+    calls = []
+    for line in work_env.log.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            calls.append([])
+        elif calls:
+            calls[-1].append(line)
+    assert calls[0][0:3] == ["new-session", "-d", "-s"]
+    assert calls[0][3].startswith("cc-myproj-") and len(calls[0][3]) == len("cc-myproj-") + 4
+    assert calls[0][4:6] == ["-c", str(work_env.repo)]
+    cmd = calls[0][6]
+    assert f"command {work_env.claude}" in cmd
+    assert cmd.rstrip().endswith("-n myproj-001")
+    assert len(calls) == 1          # NO attach-session call
+    assert work_env.out.exists() is False  # claude not exec'd by launcher
+    assert "tmux attach" in r.stderr      # attach hint for the user
+
+
+def test_exec_detached_unattended_flag_in_pane_cmd(work_env):
+    e = dict(work_env.env)
+    e.pop("CC_CONTINUITY_FORCE_INTERACTIVE", None)
+    env2 = types.SimpleNamespace(**{**vars(work_env), "env": e})
+    r = _run_launch(env2, "--unattended")
+    assert r.returncode == 0
+    assert "--dangerously-skip-permissions" in \
+        work_env.log.read_text(encoding="utf-8")
 
 
 def test_exec_direct_mode_inside_tmux(work_env):

@@ -64,13 +64,16 @@ ZSHRC_BEGIN = "# >>> cc-continuity >>>"
 ZSHRC_END = "# <<< cc-continuity <<<"
 ZSHRC_CONTENT = """\
 claude() {
-  # pass-through cases: disabled, already in tmux, non-interactive, print mode, subcommands, info flags
-  if [[ "${CC_CONTINUITY:-1}" == 0 || -n "$CC_CONTINUITY_NO_TMUX" || ! -t 0 || ! -t 1 ]]; then
+  # bypass only for explicit opt-out; everything else goes through
+  # cc-continuity launch, which decides: pass-through (-p/--print/--version/
+  # --help/known subcommands), tmux session (TTY), or DETACHED tmux session
+  # (non-TTY/background job — the session still gets a tmux pane, so
+  # auto-rotation and the animated progress pane always work)
+  if [[ "${CC_CONTINUITY:-1}" == 0 || -n "$CC_CONTINUITY_NO_TMUX" ]]; then
     command claude "$@"; return
   fi
-  cc-continuity launch -- "$@"   # decides: pass-through (-p/--print/--version/--help/known subcommands
-                                 # recorded in Phase 0 from `claude --help`) or new tmux session
-                                 # "cc-<slug>-<rand4>" in $PWD running `command claude -n <slug>-NNN "$@"`
+  cc-continuity launch -- "$@"   # in $PWD: `command claude -n <slug>-NNN "$@"`
+                                 # in a new tmux session "cc-<slug>-<rand4>"
                                  # (no -n added if user passed -n/--name/-r/--resume/-c/--continue)
 }
 """
