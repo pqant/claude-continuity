@@ -175,6 +175,43 @@ def test_wrapper_name_with_numeric_suffix_wins(cc_home, monkeypatch, tmp_path):
     assert state.load_state(key, 18)["name"] == "spike-repo-018"
 
 
+def test_stale_wrapper_name_ignored(cc_home, monkeypatch, tmp_path):
+    # Long-lived pane: the env name is frozen at a value the project
+    # counter has already passed (regression 2026-10-20: sessions
+    # 113/114/120 registered as "…-101" with nnn 113/114/120).
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo))
+    run_hook("SessionStart",
+             fixture_payload("SessionStart", repo,
+                             session_id="22222222-2222-2222-2222-222222222222"))
+    key = project_key_for(repo)
+    assert _project_record(repo)["counter"] == 2
+    monkeypatch.setenv("CC_CONTINUITY_NAME", "spike-repo-001")
+    run_hook("SessionStart",
+             fixture_payload("SessionStart", repo,
+                             session_id="55555555-5555-5555-5555-555555555555"))
+    pref = _project_record(repo)
+    assert pref["counter"] == 3
+    assert pref["sessions"][-1]["name"] == "spike-repo-003"
+    assert state.load_state(key, 3)["name"] == "spike-repo-003"
+
+
+def test_wrapper_name_at_current_counter_ignored(cc_home, monkeypatch, tmp_path):
+    # Boundary: seq == counter means that name is already taken (a
+    # concurrent launch predicted the same NNN) — counter name wins.
+    repo = make_repo(tmp_path)
+    run_hook("SessionStart", fixture_payload("SessionStart", repo))
+    key = project_key_for(repo)
+    monkeypatch.setenv("CC_CONTINUITY_NAME", "spike-repo-001")
+    run_hook("SessionStart",
+             fixture_payload("SessionStart", repo,
+                             session_id="66666666-6666-6666-6666-666666666666"))
+    pref = _project_record(repo)
+    assert pref["counter"] == 2
+    assert pref["sessions"][-1]["name"] == "spike-repo-002"
+    assert state.load_state(key, 2)["name"] == "spike-repo-002"
+
+
 def test_wrapper_name_without_suffix_falls_back_to_counter(cc_home, monkeypatch, tmp_path):
     repo = make_repo(tmp_path)
     monkeypatch.setenv("CC_CONTINUITY_NAME", "auth-work")
