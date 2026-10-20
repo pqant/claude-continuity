@@ -55,8 +55,17 @@ def _finalize(ctx: HookContext, key: str, nnn: int) -> bool:
 
 def _rotate_or_amcl(ctx: HookContext, key: str, nnn: int,
                     current: str) -> dict | None:
-    """PRD §9 Stop: full-auto ($TMUX_PANE + full_auto) -> detached rotator +
-    ROTATING (P6-D8); else the assisted AWAITING_MANUAL_CLEAR path."""
+    """PRD §9 Stop, three branches:
+
+    1. pane + full_auto ($TMUX_PANE) -> detached rotator + ROTATING
+       (P6-D8) — the pane rotates itself; no systemMessage.
+    2. paneless + full_auto (no $TMUX_PANE: the session was launched
+       outside tmux) -> paneless self-heal: spawn the successor in a
+       DETACHED tmux pane (rotation must work in every situation);
+       completed -> systemMessage naming the successor + attach
+       command; deferred/exited -> silent (state handles the retry);
+       failed -> assisted fallback below.
+    3. assisted -> AWAITING_MANUAL_CLEAR + the AMCL systemMessage."""
     pane = os.environ.get("TMUX_PANE", "").strip()
     if pane and ctx.cfg.get("full_auto", True):
         rotation_id = str(uuid.uuid4())
@@ -82,6 +91,48 @@ def _rotate_or_amcl(ctx: HookContext, key: str, nnn: int,
                     # (PRD §11.2).
                     log_error(f"Stop: ROTATING transition raced: {e}")
             return None  # no systemMessage — the pane rotates itself
+    if not pane and ctx.cfg.get("full_auto", True):
+        # Paneless self-heal: no pane to drive, so the successor is a
+        # fresh claude in a DETACHED tmux pane (rotation must work in
+        # every situation). The successor's SessionStart(startup) claims
+        # the ROTATING project; the old session is terminal ROTATED when
+        # it completes.
+        rotation_id = str(uuid.uuid4())
+        if current == "ROTATING":
+            state.update_fields(key, nnn, rotation_id=rotation_id)
+        else:
+            try:
+                state.transition(key, nnn, "ROTATING",
+                                 rotation_id=rotation_id)
+            except state.InvalidTransitionError as e:
+                log_error(f"Stop: paneless ROTATING transition raced: {e}")
+                return None
+        try:
+            outcome, info = rotator.spawn_successor_detached(
+                key, nnn, ctx.session["session_id"], ctx.cfg, rotation_id)
+        except rotator.RotatorSpawnError as e:
+            log_error(f"Stop: paneless spawn failed, assisted fallback: {e}")
+            notify.safe_send(ctx.cfg, "error",
+                             slug=notify.project_slug(key), nnn=nnn,
+                             dedup_key=f"paneless_spawn:{rotation_id}",
+                             what="paneless successor spawn", detail=str(e)[:60])
+            outcome, info = "failed", None
+        if outcome == "completed":
+            return {"systemMessage": (
+                f"Rotated to {info['name']} — it runs in tmux session "
+                f"{info['tmux_session']} (attach with: tmux attach -t "
+                f"{info['tmux_session']}). This session is superseded; "
+                "continue there.")}
+        if outcome in ("deferred", "exited"):
+            return None
+        if current == "CHECKPOINT_VERIFIED":
+            # The state is ROTATING now (moved above): roll it back to CV
+            # first (the legal defer transition — ROTATING -> AMCL does
+            # not exist), then take the assisted path.
+            state.transition(key, nnn, "CHECKPOINT_VERIFIED")
+            state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
+            return {"systemMessage": AMCL_MESSAGE}
+        return None
     if current == "CHECKPOINT_VERIFIED":
         state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
         return {"systemMessage": AMCL_MESSAGE}

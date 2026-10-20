@@ -567,3 +567,55 @@ def test_clear_claim_records_tmux_session(cc_home, tmp_path, fake_tmux_name):
     rec2 = state.load_state(key, 2)
     assert rec2["state"] == "BOOTSTRAPPING"
     assert rec2["tmux_session"] == "cc-spike-repo-0a9b"
+
+
+# --- startup claim for ROTATING (orphan recovery + paneless self-heal) -------
+
+
+def test_startup_claims_rotating_session_and_injects_c4(cc_home, capsys,
+                                                        tmp_path):
+    # A plain startup on a project whose latest session is ROTATING (an
+    # in-flight rotation whose successor is exactly this process) claims it
+    # — orphan recovery + paneless self-heal spawn, the "rotation always
+    # works" guarantee.
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-new-2",
+                                            source="startup")) == 0
+    data = _stdout_json(capsys)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("CONTINUITY BOOTSTRAP: you are spike-repo-002, "
+                          "continuing spike-repo-001. VALIDATION: OK")
+    assert "# Handoff cp-001" in ctx
+    assert (paths.runtime_dir() / "sid-new-2.started").is_file()
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"
+    assert rec2["session_id"] == "sid-new-2"
+    assert state.load_state(key, 1)["state"] == "ROTATED"
+    entries = ledger.read(paths.session_dir(key, 2))
+    assert entries[-1]["source"] == "startup"  # the claim's ledger entry
+    assert _project_record(repo)["latest_checkpoint"][
+        "pending_consumption"] is False
+
+
+def test_startup_does_not_claim_amcl_session(cc_home, capsys, tmp_path):
+    # AMCL (like CV) is still live in the user's terminal: a plain startup
+    # must NOT steal its checkpoint — plain register + C.5 notice only (the
+    # user /clears when ready).
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)  # 001 CV + pending checkpoint
+    state.transition(key, nnn, "AWAITING_MANUAL_CLEAR")
+    run_hook("SessionStart", payload("SessionStart", repo,
+                                     session_id="sid-new-3",
+                                     source="startup"))
+    out = _stdout_json(capsys)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("CONTINUITY: an unconsumed checkpoint")  # C.5
+    assert state.load_state(key, 1)["state"] == "AWAITING_MANUAL_CLEAR"
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"  # pending cp -> BOOTSTRAPPING
+    assert rec2["session_id"] == "sid-new-3"
+    assert rec2["predecessor"] == "spike-repo-001"
+    assert not (paths.runtime_dir() / "sid-new-3.started").exists()

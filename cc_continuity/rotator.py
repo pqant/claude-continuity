@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -48,6 +49,11 @@ TMUX_BUFFER = "ccc"      # §11.8 paste-buffer name
 #: after C-u, and how many consecutive empty captures "settled" requires.
 CLEAR_SETTLE_S = 2.0
 SETTLE_POLLS = 2
+
+#: Paneless self-heal: how long to wait for the successor's claim
+#: (SessionStart(startup) on a ROTATING project closes the old session)
+#: before deferring to the next Stop.
+CLAIM_WAIT_S = 20.0
 
 #: Cap for the pending-prompt note appended to the C.8 continuation prompt.
 PENDING_NOTE_CAP = 800
@@ -103,6 +109,123 @@ def spawn(session_id: str, pane: str, rotation_id: str) -> int:
     except OSError as e:
         raise RotatorSpawnError(f"rotator spawn failed: {e}") from e
     return proc.pid
+
+
+def spawn_successor_detached(key: str, nnn: int, session_id: str, cfg: dict,
+                             rotation_id: str, *,
+                             verify=None,
+                             sleep=time.sleep) -> tuple[str, dict | None]:
+    """Paneless self-heal — the Stop-hook fallback when ``$TMUX_PANE`` is
+    missing (the session was launched outside tmux, so the pane-driven
+    rotator cannot work; rotation must still work in every situation).
+
+    Spawns the successor as a fresh claude in a DETACHED tmux session
+    carrying the C.8 continuation prompt. The successor's
+    SessionStart(startup) claims the rotation on a ROTATING project
+    (bootstrap closes the old session), and the C.8 prompt is verified in
+    its ledger. The successor is inside a tmux pane from its first
+    heartbeat: auto-rotation and the animated progress pane work.
+
+    Returns ``(outcome, info)``:
+      ``("completed", {"name", "tmux_session"})`` — claim + RESUME
+          verified; rotation_completed notified.
+      ``("deferred", {"name", "tmux_session"})`` — no claim in time (rolled
+          back to CHECKPOINT_VERIFIED; the next Stop retries) or the RESUME
+          never reached the successor ledger (the old session is already
+          terminal ROTATED; error notified).
+      ``("failed", None)`` — the tmux session could not be created (rolled
+          back to CHECKPOINT_VERIFIED; error notified).
+      ``("exited", None)`` — rotation lock held by another rotator, or
+          state/rotation_id mismatch: nothing was done.
+    """
+    from .launch import _claude_bin, _env_prefix  # local import: light module
+    if verify is None:  # late bind: _verify_resume is defined below
+        verify = _verify_resume
+
+    rlock = lock.ProjectLock(paths.project_dir(key) / "rotation.lock",
+                             timeout=0)
+    if not rlock.acquire(rotation_id=rotation_id):
+        log_event(f"rotator: paneless spawn: rotation lock held key={key} "
+                  "— exiting (another rotator is live)")
+        return "exited", None
+    try:
+        # Same §11.2 re-read as run(): must be ROTATING, same rotation_id.
+        rec = state.load_state(key, nnn)
+        if rec["state"] != "ROTATING" or rec.get("rotation_id") != rotation_id:
+            log_event(f"rotator: paneless spawn: state {rec['state']!r} / "
+                      f"rotation_id {rec.get('rotation_id')!r} != "
+                      f"ROTATING/{rotation_id} — exiting")
+            return "exited", None
+        pref = json.loads((paths.project_dir(key) / "project.json")
+                          .read_text(encoding="utf-8"))
+        root = Path(pref["root"])
+        name_new = _successor_name(key, nnn, rec["name"])
+        c8 = thresholds.c8_text(f"cp-{nnn:03d}", _handoff_path(key, nnn))
+        args = ["-n", name_new]
+        if bool(cfg.get("unattended", False)):
+            args.append("--dangerously-skip-permissions")
+        args.append(c8)
+        cmd = " ".join(["env", *_env_prefix(name_new), "command",
+                        _claude_bin(), *[shlex.quote(a) for a in args]])
+        tmux_session = (f"cc-{naming.slug_for_dir(root)}-"
+                        f"{secrets.token_hex(2)}")
+        rc = _tmux("new-session", "-d", "-s", tmux_session, "-c",
+                   str(root), cmd)
+        info = {"name": name_new, "tmux_session": tmux_session}
+        if rc != 0:
+            _defer_to_checkpoint(key, nnn,
+                                 "paneless spawn: tmux new-session failed")
+            notify.safe_send(cfg, "error", slug=notify.project_slug(key),
+                             nnn=nnn, dedup_key=f"paneless_spawn:{rotation_id}",
+                             what="paneless successor spawn",
+                             detail="tmux new-session failed")
+            return "failed", None
+        # Wait for the claim: SessionStart(startup) on a ROTATING project
+        # claims the rotation and moves the old session to terminal ROTATED.
+        deadline = time.monotonic() + CLAIM_WAIT_S
+        claimed = False
+        while time.monotonic() < deadline:
+            if state.load_state(key, nnn).get("state") == "ROTATED":
+                claimed = True
+                break
+            sleep(POLL_S)
+        if not claimed:
+            _defer_to_checkpoint(key, nnn,
+                                 "paneless spawn: no claim in time — next "
+                                 "Stop retries")
+            return "deferred", info
+        old_name = rec["name"]
+        if verify(key, nnn, f"cp-{nnn:03d}", old_name):
+            succ = _find_successor_rec(key, old_name)
+            r1 = None
+            sid_new = (succ or {}).get("session_id")
+            if sid_new:
+                m_new = statusline.read_metric(sid_new)
+                if not statusline.is_stale(m_new):
+                    r1 = m_new.get("ratio")
+            ledger.append(paths.session_dir(key, nnn),
+                          {"type": "rotation_completed",
+                           "successor": name_new})
+            log_event(f"rotator: PANELESS_ROTATION_COMPLETED key={key} "
+                      f"{nnn:03d} -> {name_new} (tmux {tmux_session})")
+            notify.safe_send(cfg, "rotation_complete",
+                             slug=notify.project_slug(key), nnn=nnn,
+                             nnn_new=int(succ["nnn"]) if succ else nnn + 1,
+                             r0=rec.get("ratio_at_pending"), r1=r1,
+                             naa=notify.naa_snippet(_handoff_path(key, nnn)))
+            return "completed", info
+        # Claim landed but the C.8 prompt never reached the successor
+        # ledger: the successor is alive with the C.4 bootstrap, and the
+        # old session is terminal (ROTATED) — nothing to roll back.
+        log_event(f"rotator: paneless spawn: no RESUME in successor ledger "
+                  f"key={key} {nnn:03d}")
+        notify.safe_send(cfg, "error", slug=notify.project_slug(key),
+                         nnn=nnn, dedup_key=f"paneless_verify:{rotation_id}",
+                         what="paneless rotation verify",
+                         detail="no RESUME in successor ledger")
+        return "deferred", info
+    finally:
+        rlock.release()
 
 
 # --- idle check (PRD §11.3) -----------------------------------------------------

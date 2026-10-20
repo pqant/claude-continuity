@@ -706,3 +706,94 @@ def test_run_final_failure_pushes_row8_once(fake_tmux, cc_home, tmp_path,
     prio, body = rows8[0]
     assert prio == "urgent"
     assert "detail=no RESUME in successor ledger after 2 attempts" in body
+
+
+# --- paneless self-heal: spawn_successor_detached ------------------------------
+
+
+def test_paneless_spawn_happy_path(fake_tmux, cc_home, tmp_path, monkeypatch):
+    # The "successor" is a real claude in a (fake) tmux pane: its
+    # SessionStart(startup) claims the ROTATING project, and the C.8
+    # prompt lands in its ledger via UserPromptSubmit.
+    d = _rotating(cc_home, tmp_path)
+    repo, key, nnn, rid, cfg = d["repo"], d["key"], d["nnn"], d["rid"], d["cfg"]
+    monkeypatch.setattr(rotator, "CLAIM_WAIT_S", 5.0)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 5.0)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    monkeypatch.delenv("CC_CONTINUITY_CLAUDE_BIN", raising=False)
+
+    def world():
+        time.sleep(0.2)
+        run_hook("SessionStart", payload("SessionStart", repo,
+                                         session_id=_NEW_SID,
+                                         source="startup"))
+        time.sleep(0.2)
+        run_hook("UserPromptSubmit", payload(
+            "UserPromptSubmit", repo, session_id=_NEW_SID,
+            prompt=f"CONTINUITY RESUME cp-{nnn:03d}: read /x completely, "
+                   "apply the VALIDATION result, then continue from Next "
+                   "Atomic Action. Do not repeat completed work."))
+
+    t = _world_thread(world)
+    outcome, info = rotator.spawn_successor_detached(key, nnn, d["sid"],
+                                                     cfg, rid)
+    t.join(timeout=10)
+    assert outcome == "completed"
+    assert info["name"] == "spike-repo-002"
+    assert info["tmux_session"].startswith("cc-spike-repo-")
+    assert state.load_state(key, 1)["state"] == "ROTATED"  # the claim did it
+    assert state.load_state(key, 2)["session_id"] == _NEW_SID
+    assert (paths.runtime_dir() / f"{_NEW_SID}.started").is_file()
+    ns = next(c for c in _calls(fake_tmux) if c[0] == "new-session")
+    assert ns[:2] == ["new-session", "-d"]
+    assert ns[2:5] == ["-s", info["tmux_session"], "-c"]
+    assert ns[5] == str(repo)
+    cmd = ns[6]
+    assert "CC_CONTINUITY_NAME=spike-repo-002" in cmd
+    assert "command claude" in cmd
+    assert "-n spike-repo-002" in cmd
+    assert "CONTINUITY RESUME cp-001" in cmd
+
+
+def test_paneless_spawn_defers_when_no_claim(fake_tmux, cc_home, tmp_path,
+                                              monkeypatch):
+    # No SessionStart ever fires (dead pane): the claim wait expires, the
+    # state rolls back to CHECKPOINT_VERIFIED and the next Stop retries.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    monkeypatch.setattr(rotator, "CLAIM_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    outcome, info = rotator.spawn_successor_detached(key, nnn, d["sid"],
+                                                     d["cfg"], d["rid"])
+    assert outcome == "deferred"
+    assert info["name"] == "spike-repo-002"
+    assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
+    assert next(c for c in _calls(fake_tmux) if c[0] == "new-session") \
+        is not None  # the pane WAS created before the deferral
+
+
+def test_paneless_spawn_exits_when_lock_held(cc_home, tmp_path):
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    holder = lock.ProjectLock(paths.project_dir(key) / "rotation.lock",
+                              timeout=0)
+    assert holder.acquire(rotation_id="other-rotator")
+    outcome, info = rotator.spawn_successor_detached(key, nnn, d["sid"],
+                                                     d["cfg"], d["rid"])
+    holder.release()
+    assert (outcome, info) == ("exited", None)
+    assert state.load_state(key, nnn)["state"] == "ROTATING"  # untouched
+
+
+def test_paneless_spawn_unattended_adds_skip_permissions(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    d = _rotating(cc_home, tmp_path)
+    cfg = dict(d["cfg"], unattended=True)
+    monkeypatch.setattr(rotator, "CLAIM_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    monkeypatch.delenv("CC_CONTINUITY_CLAUDE_BIN", raising=False)
+    outcome, _info = rotator.spawn_successor_detached(d["key"], d["nnn"],
+                                                      d["sid"], cfg, d["rid"])
+    assert outcome == "deferred"  # no claim; we only inspect the cmd
+    ns = next(c for c in _calls(fake_tmux) if c[0] == "new-session")
+    assert "--dangerously-skip-permissions" in ns[6]

@@ -34,14 +34,19 @@ CLAIMABLE_STATES = frozenset({
 })
 
 
-def find_claimable(key: str) -> dict | None:
+def find_claimable(key: str,
+                   states: frozenset[str] | None = None) -> dict | None:
     """The latest project session a claim may take over (P6-D2).
 
-    Caller holds the project lock. Returns the state record, or None.
-    A project with no record yet (first /clear before any registration,
-    P6-D3) and sessions whose state file is missing (crash residue) are
-    skipped.
+    ``states`` narrows which claimable states qualify (default
+    ``CLAIMABLE_STATES``; the startup claim passes ``{"ROTATING"}`` — a
+    plain startup must never steal an AMCL/CV session that is still live
+    in the user's terminal). Caller holds the project lock. Returns the
+    state record, or None. A project with no record yet (first /clear
+    before any registration, P6-D3) and sessions whose state file is
+    missing (crash residue) are skipped.
     """
+    states = states or CLAIMABLE_STATES
     pfile = paths.project_dir(key) / "project.json"
     try:
         pref = json.loads(pfile.read_text(encoding="utf-8"))
@@ -53,7 +58,7 @@ def find_claimable(key: str) -> dict | None:
             rec = state.load_state(key, int(s["nnn"]))
         except (state.StateNotFoundError, ValueError, KeyError):
             continue
-        if rec["state"] in CLAIMABLE_STATES and rec.get("successor") is None:
+        if rec["state"] in states and rec.get("successor") is None:
             best = rec
     return best
 
@@ -214,21 +219,26 @@ def _new_work_since_handoff(cp_dir: Path, key: str,
     return out[-5:]
 
 
-def try_claim(key: str, *, new_session_id: str, cfg: dict) -> dict | None:
+def try_claim(key: str, *, new_session_id: str, cfg: dict,
+              states: frozenset[str] | None = None,
+              source: str = "clear") -> dict | None:
     """Claim the latest claimable session for a fresh session (PRD §9).
 
-    Caller holds the project lock. Returns ``None`` when nothing is
-    claimable (idempotent: a second claim sees ``successor`` set). On
-    success returns ``{"old_name", "old_nnn", "new_name", "new_nnn",
-    "validation", "details", "bootstrap_text"}`` and has: created the
-    successor state (BOOTSTRAPPING, predecessor = old name, nnn = old+1 at
-    least), set the old session's ``successor`` and moved it to ROTATED,
-    cleared ``pending_consumption`` on the matching latest_checkpoint,
-    appended one ``session_start`` ledger entry to the successor, and
-    updated project.json (counter / sessions / checkpoint) in one atomic
-    write.
+    ``states`` narrows which claimable states qualify (default
+    ``CLAIMABLE_STATES``); ``source`` labels the successor's
+    ``session_start`` ledger entry (``"clear"`` for the /clear claim,
+    ``"startup"`` for the ROTATING-only startup claim). Caller holds the
+    project lock. Returns ``None`` when nothing is claimable (idempotent:
+    a second claim sees ``successor`` set). On success returns
+    ``{"old_name", "old_nnn", "new_name", "new_nnn", "validation",
+    "details", "bootstrap_text"}`` and has: created the successor state
+    (BOOTSTRAPPING, predecessor = old name, nnn = old+1 at least), set
+    the old session's ``successor`` and moved it to ROTATED, cleared
+    ``pending_consumption`` on the matching latest_checkpoint, appended
+    one ``session_start`` ledger entry to the successor, and updated
+    project.json (counter / sessions / checkpoint) in one atomic write.
     """
-    old = find_claimable(key)
+    old = find_claimable(key, states)
     if old is None:
         return None
     pfile = paths.project_dir(key) / "project.json"
@@ -266,7 +276,7 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict) -> dict | None:
         inline_max=int(cfg.get("inline_handoff_max_chars", 12000)),
         new_work=_new_work_since_handoff(cp_dir, key, old_nnn))
     ledger.append(paths.session_dir(key, nnn_new),
-                  {"type": "session_start", "source": "clear",
+                  {"type": "session_start", "source": source,
                    "claimed": old["name"], "validation": status})
     return {"old_name": old["name"], "old_nnn": old_nnn,
             "new_name": name_new, "new_nnn": nnn_new,

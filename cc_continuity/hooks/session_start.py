@@ -6,7 +6,11 @@ Register the project + session (name from the ``CC_CONTINUITY_NAME`` env
 var set by the Phase 7 wrapper, else the project counter). Plain
 startups register in ACTIVE; with a pending checkpoint (Phase 4
 ``pending_consumption``) the session starts in BOOTSTRAPPING and gets
-the C.5 notice. ``compact`` injects a short post-compaction state block
+the C.5 notice. A plain startup on a project whose latest session is
+ROTATING claims it instead (ROTATING only — the in-flight rotation's
+successor is exactly this process: orphan recovery or a paneless
+self-heal spawn); AMCL/CV + startup stays the C.5-notice + user-/clear
+path. ``compact`` injects a short post-compaction state block
 (spec §6.7). ``resume``/``fork`` re-attach (spec D1) when the conversation has a record —
 re-recording the ``tmux_session`` field (a resume may land in a NEW tmux
 session — regression 2026-09-27 046) — and register a NEW record when it does
@@ -77,6 +81,21 @@ def handle(ctx: HookContext) -> dict | None:
         root = project.resolve_root(cwd)
         key = project.project_key_for_root(root)
         if ctx.session is None:
+            # ROTATING-only startup claim: this process is the successor
+            # of an in-flight rotation (orphan recovery or a paneless
+            # self-heal spawn) — claiming it is the "rotation always
+            # works" guarantee. AMCL/CV sessions are still live in the
+            # user's terminal and keep the C.5-notice + user-/clear path.
+            with lock.held(key):
+                res = bootstrap.try_claim(key, new_session_id=session_id,
+                                          cfg=ctx.cfg,
+                                          states=frozenset({"ROTATING"}),
+                                          source="startup")
+            if res is not None:
+                bootstrap.write_started(session_id)
+                notify_claimed(ctx.cfg, key, res)
+                bootstrap.record_tmux_session(key, res["new_nnn"])
+                return session_start_output(res["bootstrap_text"])
             _register(ctx, session_id)
         return _pending_notice(ctx, key)
     except Exception:
