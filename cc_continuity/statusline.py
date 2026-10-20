@@ -588,10 +588,23 @@ def chain(command: str | None, stdin_bytes: bytes,
 
 
 def compose_line(chained: str, segment: str) -> str:
-    """Join the chained user output and our segment (space-separated)."""
-    if chained:
-        return f"{chained} {segment}"
-    return segment
+    """Join the chained user output and our segment.
+
+    The user's previous status line is forwarded verbatim; our segment is
+    appended to it. A one-line base keeps the legacy space-join. A
+    multi-line base (a HUD: model / context / files / tools) must NOT get
+    the segment glued to its last line — that reads as breakage — so the
+    segment goes on its own trailing line. An empty segment (mode 1: the
+    progress pane owns the display) leaves the base output alone, with no
+    stray trailing space.
+    """
+    if not segment:
+        return chained
+    if not chained:
+        return segment
+    if "\n" in chained:
+        return f"{chained}\n{segment}"
+    return f"{chained} {segment}"
 
 
 # ------------------------------------------------------------------- entry

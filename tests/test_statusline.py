@@ -322,6 +322,22 @@ def test_compose_line_appends_segment_after_chained(cc_home):
     assert statusline.compose_line("", "◆ 61% Active Usage") == "◆ 61% Active Usage"
 
 
+def test_compose_line_multiline_base_puts_segment_on_own_line(cc_home):
+    # A multi-line base statusline (a HUD: model / context / files / tools)
+    # must NOT get the segment glued to its last line — that reads as
+    # breakage (the 2026-10-19 "✓ Bash ×1 ◆ NN% Active Usage" screenshot).
+    # The segment goes on its own trailing line.
+    base = "model | repo\ndim context\ntools"
+    assert statusline.compose_line(base, "◆ 61% Active Usage") == \
+        "model | repo\ndim context\ntools\n◆ 61% Active Usage"
+    # single-line base keeps the legacy space-join (one-liner HUDs)
+    assert statusline.compose_line("prev", "◆ 61% Active Usage") == \
+        "prev ◆ 61% Active Usage"
+    # empty segment (mode 1: the pane owns the display) → base alone,
+    # with no stray trailing space
+    assert statusline.compose_line("a\nb", "") == "a\nb"
+
+
 def test_run_writes_metric_and_renders_segment(cc_home, tmp_path, monkeypatch):
     payload = _payload()
     line = statusline.run(json.dumps(payload).encode(),
