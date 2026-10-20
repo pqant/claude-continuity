@@ -90,12 +90,23 @@ def _decide_name(key: str, slug: str,
     ``allow_env=False`` (Phase 27 resume/fork, Phase 28 CLI late attach):
     the env name belongs to the ABANDONED startup process — the counter
     name wins, or the dead startup's name would be reused.
+
+    The env name must also be FRESH: its sequence strictly above the
+    project counter (checked atomically with the increment,
+    ``project.fresh_counter``). A long-lived pane/shell carries the env
+    value frozen at LAUNCH time; once the counter passes it, a plain
+    startup would register a duplicate/stale name while the counter
+    advances (regression 2026-10-20: sessions 113/114/120 all named
+    "…-101"). Stale → the counter's own name wins.
     """
     if allow_env:
         env_name = os.environ.get("CC_CONTINUITY_NAME", "").strip()
         _base, seq = naming.split_name(env_name)
         if seq is not None:
-            return env_name, project.next_counter(key, requested=seq)
+            nnn, fresh = project.fresh_counter(key, requested=seq)
+            if fresh:
+                return env_name, nnn
+            return naming.logical_name(slug, nnn), nnn
     nnn = project.next_counter(key)
     return naming.logical_name(slug, nnn), nnn
 

@@ -98,6 +98,31 @@ def next_counter(key: str, requested: int | None = None) -> int:
         return new
 
 
+def fresh_counter(key: str, requested: int | None = None) -> tuple[int, bool]:
+    """Advance the counter, reporting whether ``requested`` is still fresh.
+
+    ``fresh`` is True only when the pre-increment counter was strictly
+    BELOW ``requested`` — i.e. no session has taken that NNN yet and the
+    wrapper-predicted name may be used. When the counter already reached
+    or passed ``requested`` (a long-lived pane's frozen
+    ``CC_CONTINUITY_NAME``, or a concurrent launch that predicted the same
+    NNN), the name is stale and the caller must use the counter's own
+    name. The decision and the increment are one locked step, so a
+    concurrent registration cannot slip in between (regression 2026-10-20
+    sessions 113/114/120: stale env name, advanced counter).
+    """
+    with lock.held(key):
+        pfile = _project_file(key=key)
+        record = json.loads(pfile.read_text(encoding="utf-8"))
+        cur = record["counter"]
+        new = cur + 1
+        if requested is not None:
+            new = max(new, requested)
+        record["counter"] = new
+        atomic.atomic_write_json(pfile, record)
+        return new, requested is not None and requested > cur
+
+
 def record_session(key: str, name: str, session_id: str, nnn: int) -> dict:
     """Append a session to the project history (mapping per PRD §13)."""
     with lock.held(key):
