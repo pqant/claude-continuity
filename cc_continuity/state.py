@@ -189,3 +189,31 @@ def transition(project_key: str, nnn: int, new_state: str,
     """Validate and apply one transition (takes the project lock)."""
     with lock.held(project_key):
         return _transition_unlocked(project_key, nnn, new_state, **fields)
+
+
+def close_dead(project_key: str, nnn: int, reason: str) -> dict:
+    """Manually close a session whose process is gone but whose state is
+    non-terminal (killed/crashed without SessionEnd, abandoned startup).
+
+    Sanctioned out-of-band exit: no VALID_TRANSITIONS path reaches
+    ROTATED from ACTIVE/BOOTSTRAPPING, so this bypasses validation and
+    closes the session AS-IS — no successor (``successor`` stays None),
+    one ledger event recording the manual close. Idempotent: a
+    terminal (ROTATED) record is returned unchanged, nothing written.
+    The caller must have verified the process is dead (e.g.
+    ``claude agents --json --all``) — this is an admin operation, not
+    part of the live lifecycle (cleanup 2026-10-20: sessions 112, 113,
+    116-120, 121).
+    """
+    with lock.held(project_key):
+        record = load_state(project_key, nnn)
+        if record["state"] == "ROTATED":
+            return record
+        cur = record["state"]
+        record["state"] = "ROTATED"
+        record["updated"] = _now()
+        atomic.atomic_write_json(_state_path(project_key, nnn), record)
+        ledger.append(paths.session_dir(project_key, nnn),
+                      {"type": "state", "from": cur, "to": "ROTATED",
+                       "fields": {"manual_close": reason}})
+        return record

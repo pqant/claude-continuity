@@ -276,3 +276,38 @@ def test_update_fields_unlocked_under_held_lock(cc_home):
 def test_update_fields_unlocked_missing_session_raises(cc_home):
     with pytest.raises(state.StateNotFoundError):
         state.update_fields_unlocked(KEY, 99, turn_active=True)
+
+
+def test_close_dead_closes_active_without_successor(cc_home):
+    _create()
+    state.transition(KEY, 1, "ACTIVE")
+    record = state.close_dead(KEY, 1, "process verified dead 2026-10-20")
+    assert record["state"] == "ROTATED"
+    on_disk = state.load_state(KEY, 1)
+    assert on_disk["state"] == "ROTATED"
+    assert on_disk["successor"] is None
+    events = [e for e in _events() if e.get("type") == "state"]
+    assert events[-1]["from"] == "ACTIVE"
+    assert events[-1]["to"] == "ROTATED"
+    assert events[-1]["fields"]["manual_close"] == \
+        "process verified dead 2026-10-20"
+
+
+def test_close_dead_from_bootstrapping(cc_home):
+    _create()  # initial state is BOOTSTRAPPING
+    record = state.close_dead(KEY, 1, "abandoned startup")
+    assert record["state"] == "ROTATED"
+    events = [e for e in _events() if e.get("type") == "state"]
+    assert events[-1]["from"] == "BOOTSTRAPPING"
+
+
+def test_close_dead_idempotent_on_rotated(cc_home):
+    _create()
+    for t in ("ACTIVE", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+              "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED",
+              "AWAITING_MANUAL_CLEAR", "ROTATED"):
+        state.transition(KEY, 1, t)
+    before = _events()
+    record = state.close_dead(KEY, 1, "already terminal")
+    assert record["state"] == "ROTATED"
+    assert _events() == before  # nothing written
