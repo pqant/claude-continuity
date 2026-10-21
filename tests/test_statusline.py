@@ -1155,6 +1155,34 @@ def test_run_mode1_idle_render_keeps_pane_real_text(cc_home, monkeypatch):
     assert json.loads(data_file.read_text(encoding="utf-8"))["text"] == real
 
 
+def test_run_mode1_fresh_window_seeds_zero_baseline(cc_home, monkeypatch):
+    # A fresh window has NO metric until the first turn ends (CC exposes
+    # context usage only at turn end / Stop) — without a seed the pane
+    # sits on its "◆ …" placeholder for the whole first turn (the run-3
+    # demo bug). Seed the plain 0% form ONCE, while the data file is
+    # still missing: a second no-metric render must not rewrite it —
+    # an every-render 0% write would flash 0% over the last real text,
+    # the same downgrade the idle test above forbids. 0% is a display
+    # baseline for a fresh session, not a measurement.
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure([]))
+    data_file = paths.runtime_dir() / "progress-data-@7.json"
+    idle = _payload()
+    idle["context_window"]["current_usage"] = None
+    idle["context_window"]["total_input_tokens"] = None
+    # 1. a no-metric render on a fresh window seeds the 0% baseline
+    line = statusline.run(json.dumps(idle).encode(),
+                          _cfg(progress_type=1))
+    assert line == ""  # the pane owns the display
+    assert data_file.exists()
+    assert json.loads(data_file.read_text(encoding="utf-8"))[
+        "text"] == "◆ 0% Active Usage"
+    mtime = data_file.stat().st_mtime
+    # 2. a second no-metric render leaves the file untouched
+    statusline.run(json.dumps(idle).encode(), _cfg(progress_type=1))
+    assert data_file.stat().st_mtime == mtime
+
+
 def test_run_mode0_never_calls_ensure_and_keeps_sweep(cc_home, monkeypatch):
     calls = []
     monkeypatch.setattr(progress_pane, "ensure_progress_pane",

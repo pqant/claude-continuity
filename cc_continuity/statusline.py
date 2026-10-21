@@ -690,10 +690,19 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             # 30-min-placeholder symptom resurfacing on the WRITER side
             # (Bug B only covered the pane reading a vanished file).
             # Skipping the write leaves the file's mtime unchanged, so the
-            # animator keeps its last real text.
+            # animator keeps its last real text. Exception: a FRESH window
+            # (file missing) gets a one-shot 0% baseline seed — CC exposes
+            # context usage only at turn end / Stop, so without the seed
+            # the pane sits on its "◆ …" placeholder for the whole first
+            # turn (the run-3 demo bug). 0% is a display baseline for a
+            # fresh session, not a measurement; an existing file is never
+            # rewritten by a no-metric render (no downgrade, no re-flash).
             if ratio is not None:
                 progress_pane.write_progress_data(win, render_segment(
                     ratio, record, enabled, blocked=blocked, ansi=False))
+            elif enabled and not progress_pane.has_progress_data(win):
+                progress_pane.write_progress_data(win, render_segment(
+                    0.0, record, enabled, blocked=blocked, ansi=False))
             segment = ""
         elif (isinstance(result, dict)
               and result.get("reason") in ("no-window", "error")):

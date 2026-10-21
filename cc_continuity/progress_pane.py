@@ -170,6 +170,22 @@ def write_progress_data(window_id: str | None, text: str) -> None:
         pass
 
 
+def has_progress_data(window_id: str | None) -> bool:
+    """Whether this window's data file already exists (never raises).
+
+    The mode-1 status line uses this as the 0% seed guard: seed the
+    fresh-window baseline only while the file is MISSING — an existing
+    file (real text, even one this writer seeded) must never be
+    rewritten by a no-metric render.
+    """
+    if not _valid_window_id(window_id):
+        return False
+    try:
+        return _progress_data_path(window_id).exists()
+    except OSError:
+        return False
+
+
 def drop_progress_data(window_id: str | None) -> None:
     """Remove this window's data file (SessionEnd cleanup). Never raises."""
     if not _valid_window_id(window_id):
