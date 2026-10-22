@@ -408,12 +408,32 @@ def _ensure(cfg, runner, tmux) -> dict:
     return {"created": True, "pane_id": new_pid, "window_id": win}
 
 
+def _window_pane_count(window_id: str | None) -> int | None:
+    """Panes in ``window_id``, or None when tmux doesn't answer.
+
+    The animator's orphan guard (see ``run_animator``): claude is the main
+    pane's own process, so claude exiting kills the main pane and leaves
+    the animator as the window's sole pane. A FAILED query is reported as
+    None, not 0 — a tmux stall must never read as "main pane gone"
+    (never act on an incomplete picture, the resize-stall case).
+    """
+    if not window_id:
+        return None
+    bin_ = os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
+    out = _tmux_call(subprocess.run, bin_,
+                     ["list-panes", "-t", window_id, "-F", "#{pane_id}"])
+    if out is None:
+        return None
+    return len(out.splitlines())
+
+
 # --------------------------------------------------------------- run_animator
 
 
 def run_animator(window_id: str | None = None, *, _frames=None,
                  _write=None, _now=None, _size=None, _text=None,
-                 _mtime=None, _sleep=None) -> None:
+                 _mtime=None, _sleep=None, _live_check=None,
+                 _check_every=40) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -450,6 +470,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                else (lambda: _read_progress_text(window_id)))
     mtime_fn = (_mtime if _mtime is not None
                 else (lambda: _progress_data_mtime(window_id)))
+    live_check = (_live_check if _live_check is not None
+                  else (lambda: _window_pane_count(window_id)))
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -492,6 +514,18 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 write(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
                        + "\x1b[0m\x1b[J").encode("utf-8"))
             i += 1
+            # Orphan guard: when the main pane dies (claude is the pane's
+            # own process — both the launch layer and the demo run it that
+            # way) this pane becomes the window's sole survivor and would
+            # otherwise animate the stale last value forever (the zombie
+            # cc-demo session). ≤1 panes = no sibling left → exit; tmux
+            # closes the window (and the session) with us. A failed query
+            # (None) is NOT a signal: tmux stalls happen and we never act
+            # on an incomplete picture.
+            if window_id and i % _check_every == 0:
+                n = live_check()
+                if n is not None and n <= 1:
+                    return
             if _frames is not None and i >= _frames:
                 return
             t2 = now()

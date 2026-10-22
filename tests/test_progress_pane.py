@@ -572,6 +572,66 @@ def test_animator_drift_compensates_sleep(cc_home):
     assert sleeps[0] == pytest.approx(0.03, abs=1e-6)
 
 
+def test_animator_exits_when_main_pane_gone(cc_home):
+    # Orphan guard: the launch layer and the demo run claude as the main
+    # pane's OWN process — when claude exits the main pane dies and the
+    # progress pane becomes the window's sole pane. As-is the animator
+    # keeps animating the stale last value forever (the zombie cc-demo
+    # session the user had to kill by hand). Once the window's pane count
+    # drops to 1 (self only) the animator must exit so tmux closes the
+    # window — and with it the session.
+    counts = iter([2, 2, 1, 1])  # the main pane dies on the 3rd check
+    out = []
+    progress_pane.run_animator(
+        "12", _frames=50, _write=out.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(20), _text=lambda: "◆ 60% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None,
+        _live_check=lambda: next(counts, 1), _check_every=1)
+    # frames 1-2 paint while a sibling lives; the 3rd frame's check sees
+    # 1 pane (self only) and the loop ends — long before the _frames=50
+    # bound
+    assert len(out) == 3
+
+
+def test_animator_keeps_running_while_siblings_alive(cc_home):
+    # the guard must not over-exit: with a sibling pane present the
+    # animator runs to the _frames bound
+    out = []
+    progress_pane.run_animator(
+        "12", _frames=5, _write=out.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(20), _text=lambda: "◆ 60% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None,
+        _live_check=lambda: 2, _check_every=1)
+    assert len(out) == 5
+
+
+def test_animator_ignores_failed_live_check(cc_home):
+    # a failed query (None — tmux stalled) must NOT read as "main pane
+    # gone": the animator keeps running (never act on an incomplete
+    # picture)
+    out = []
+    progress_pane.run_animator(
+        "12", _frames=5, _write=out.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(20), _text=lambda: "◆ 60% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None,
+        _live_check=lambda: None, _check_every=1)
+    assert len(out) == 5
+
+
+def test_window_pane_count_counts_panes(cc_home, monkeypatch):
+    def fake(runner, bin_, argv, timeout=2.0):
+        assert argv == ["list-panes", "-t", "@7", "-F", "#{pane_id}"]
+        return "%3\n%4"
+    monkeypatch.setattr(progress_pane, "_tmux_call", fake)
+    assert progress_pane._window_pane_count("@7") == 2
+    # a failed query is None, NOT 0 — a tmux stall must never read as
+    # "main pane gone" (never act on an incomplete picture)
+    monkeypatch.setattr(progress_pane, "_tmux_call",
+                        lambda *a, **k: None)
+    assert progress_pane._window_pane_count("@7") is None
+    assert progress_pane._window_pane_count(None) is None
+
+
 def test_read_progress_text_defaults_to_unknown(cc_home):
     # no data file yet -> the placeholder, never a crash
     assert progress_pane._read_progress_text("12") == "◆ …"
