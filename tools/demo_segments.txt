@@ -1,0 +1,18 @@
+# cc-continuity demo GIF — 14-segment cut list (user-approved 2026-10-23)
+# video: a recorded demo run (2491.9s, 896x1920, 60fps) — see demo_gif.sh
+# format: IN OUT SPEED   (seconds; SPEED = playback multiplier, 1 = realtime)
+# every window verified against extracted frames
+8      14      1      # 1  opening: boot + task text + 74% HANDOFF bar (001 mid-think, "almost done thinking")
+296    302     1      # 2  hard limit: red "Error: CONTINUITY: context at 72% (hard limit). Tool blocked. Write the handoff now" x2
+713    726     1      # 3  HERO 1x: 96% ROTATING -> /clear -> /rename demo-app-002 -> RESUME cp-001 -> 0% boot
+738    743     1      # 4  002 anchor: "Continuing from cp-001 (demo-app-002). Let me read the handoff fully first."
+770    800     6      # 5  002 work (fast): state check -> writes both files -> tests 9/9 passing
+1012   1015    1      # 6  anchor: "64% PENDING->demo-app-003"
+1308   1313    1      # 7  wipe2: /clear + /rename demo-app-003 + RESUME cp-002 + 0% + task list Parts 1-3 checked
+1522   1542    5      # 8  003 work (fast): Part 4 --limit green diff
+1547   1550    1      # 9  anchor: "63% PENDING->demo-app-004"
+1843   1855    1      # 10 wipe3: /clear + /rename demo-app-004 + RESUME cp-003 + 0% (wipe itself ~1842-1844)
+2106   2144    5      # 11 004 (fast): 9 --limit tests -> 24/24 green -> git add -> commit [main 00a4628]
+2148   2151    1      # 12 anchor: "64% PENDING->demo-app-005" (commit result on screen)
+2433   2439    1      # 13 wipe4: /clear + /rename demo-app-005 + RESUME cp-004 + "Continuing from cp-004 (demo-app-005)"
+2474   2486    1      # 14 ending: "The four-part task is now complete... commit 00a4628... Nothing else is outstanding." + 52%
