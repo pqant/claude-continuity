@@ -147,6 +147,24 @@ def build_parser() -> argparse.ArgumentParser:
     dig_sub.add_parser("stop", help="bootout the LaunchAgent")
     dig_sub.add_parser("status", help="show the LaunchAgent status")
 
+    p_d = sub.add_parser(
+        "daemon",
+        help="tmux-hosted daemons (WSL/Linux; macOS uses launchd)")
+    d_sub = p_d.add_subparsers(dest="daemon_command", metavar="<action>")
+    d_run = d_sub.add_parser(
+        "run", help="supervise the daemon in the foreground — the tmux "
+                    "session command (no install required)")
+    d_run.add_argument("name", help="watchdog | watchdog-digest")
+    d_ensure = d_sub.add_parser(
+        "ensure", help="ensure the daemon's tmux session is alive")
+    d_ensure.add_argument("name", nargs="?", default=None,
+                          help="daemon or session name (cc-d-<name>)")
+    d_stop = d_sub.add_parser("stop", help="kill the daemon's tmux session")
+    d_stop.add_argument("name", help="daemon or session name")
+    d_status = d_sub.add_parser("status", help="show the daemon's status")
+    d_status.add_argument("name", nargs="?", default=None,
+                          help="daemon or session name")
+
     p_pane = sub.add_parser(
         "progress-pane",
         help="run the mode-1 20 fps progress line (Phase 12)")
@@ -713,6 +731,68 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
     return 2
 
 
+def _daemon_name(name: str) -> str:
+    # the rc self-heal line (spec §7.4) passes the SESSION name
+    return name[len("cc-d-"):] if name.startswith("cc-d-") else name
+
+
+def cmd_daemon(args: argparse.Namespace, home: Path | None = None,
+               runner=subprocess.run) -> int:
+    """Spec §7: the tmux-hosted daemons (WSL/Linux).
+
+    ``run`` is the tmux session command and never needs an install;
+    ensure/stop/status route through the selected host (select_host is
+    a Task-5 stub until then — the T4 tests exercise TmuxHost directly,
+    not this CLI).
+    """
+    from . import daemon_supervisor, hosting  # local import keeps cli light
+    home = Path(home) if home is not None else Path.home()
+    action = args.daemon_command
+    if action == "run":
+        name = _daemon_name(args.name)
+        if name not in daemon_supervisor.DAEMON_ARGV:
+            print(f"cc-continuity daemon run: unknown daemon {name!r}",
+                  file=sys.stderr)
+            return 2
+        return daemon_supervisor.run_supervisor(name, home)
+    if action == "ensure":
+        if args.name is None:
+            names = [n for n in daemon_supervisor.DAEMON_ARGV
+                     if daemon_supervisor.state_path(n, home).is_file()]
+            if not names:
+                if hosting.kind() == "macos":
+                    print("launchd hosts the daemons (macOS)")
+                    return 0
+                print("no daemons installed")
+                return 1
+            host = hosting.select_host()
+            for n in names:
+                host.ensure(n, home)
+            return 0
+        name = _daemon_name(args.name)
+        if not daemon_supervisor.state_path(name, home).is_file():
+            print(f"daemon {args.name}: not installed here", file=sys.stderr)
+            return 1
+        hosting.select_host().ensure(name, home)
+        return 0
+    host = hosting.select_host()
+    if action == "stop":
+        ok = host.stop(_daemon_name(args.name), home)
+        print("daemon stopped" if ok
+              else "daemon stop failed (was it running?)",
+              file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if action == "status":
+        if args.name is None:
+            for n in daemon_supervisor.DAEMON_ARGV:
+                if daemon_supervisor.state_path(n, home).is_file():
+                    print(f"{n}: {host.status(n, home)}")
+            return 0
+        print(host.status(_daemon_name(args.name), home))
+        return 0
+    return 2
+
+
 def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
                         runner=subprocess.run) -> int:
     """Phase 13: the digest relay CLI — one foreground pass + the
@@ -899,6 +979,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watchdog(args)
     if args.command == "power-plug":
         return cmd_power_plug(args)
+    if args.command == "daemon":
+        return cmd_daemon(args)
     return 2
 
 
