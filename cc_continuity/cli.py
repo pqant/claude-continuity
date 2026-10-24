@@ -685,14 +685,20 @@ def cmd_configure(args: argparse.Namespace) -> int:
 
 def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
                  runner=subprocess.run) -> int:
-    """P10-D2: the watchdog CLI — plist lifecycle + foreground run."""
-    from . import watchdogd  # local import keeps cli import light (P10-P1)
+    """P10-D2: the watchdog CLI — host lifecycle + foreground run.
+
+    The five lifecycle actions route through the selected host
+    (select_host): macOS → LaunchdHost → the exact existing plist trio
+    (behavior unchanged); WSL/Linux → systemd / tmux (Task 5).
+    """
+    from . import hosting, watchdogd  # local import keeps cli light (P10-P1)
     home = Path(home) if home is not None else Path.home()
     action = args.watchdog_command
     if action == "digest":
         return cmd_watchdog_digest(args, home=home, runner=runner)
     if action == "run":
         return watchdogd.run_forever(config.load_config())
+    host = hosting.select_host(runner=runner)
     if action == "install":
         if not config.load_config().get("watchdog_enabled"):
             print("cc-continuity watchdog: watchdog_enabled is false — "
@@ -702,30 +708,32 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
                   file=sys.stderr)
             return 1
         try:
-            p = watchdogd.install_plist(home, runner=runner)
+            p = host.install("watchdog", home)
         except watchdogd.WatchdogError as e:
             print(f"cc-continuity watchdog install: {e}", file=sys.stderr)
             return 1
-        print(f"watchdog installed: {p} (launchd RunAtLoad + KeepAlive)")
+        print(f"watchdog installed: {p} "
+              f"({_host_note(host, 'launchd RunAtLoad + KeepAlive')})")
         return 0
     if action == "uninstall":
-        watchdogd.uninstall_plist(home, runner=runner)
-        print("watchdog uninstalled (launchd bootout + plist removed)")
+        host.uninstall("watchdog", home)
+        print("watchdog uninstalled ("
+              + _host_note(host, "launchd bootout + plist removed") + ")")
         return 0
     if action == "start":
-        ok = watchdogd.start_plist(home, runner=runner)
+        ok = host.start("watchdog", home)
         msg = "watchdog started" if ok \
             else "watchdog start failed (is it installed?)"
         print(msg, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
     if action == "stop":
-        ok = watchdogd.stop_plist(home, runner=runner)
+        ok = host.stop("watchdog", home)
         msg = "watchdog stopped" if ok \
             else "watchdog stop failed (was it loaded?)"
         print(msg, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
     if action == "status":
-        out = watchdogd.status_plist(home, runner=runner)
+        out = host.status("watchdog", home)
         print("watchdog: not loaded" if out is None else out.rstrip())
         return 0
     return 2
@@ -734,6 +742,13 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
 def _daemon_name(name: str) -> str:
     # the rc self-heal line (spec §7.4) passes the SESSION name
     return name[len("cc-d-"):] if name.startswith("cc-d-") else name
+
+
+def _host_note(host, macos: str) -> str:
+    """Lifecycle print suffix: macOS keeps the historical launchd wording
+    byte-identical; other hosts name their mechanism (tmux / systemd)."""
+    kind = host.kind()
+    return macos if kind == "launchd" else kind
 
 
 def cmd_daemon(args: argparse.Namespace, home: Path | None = None,
@@ -795,9 +810,9 @@ def cmd_daemon(args: argparse.Namespace, home: Path | None = None,
 
 def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
                         runner=subprocess.run) -> int:
-    """Phase 13: the digest relay CLI — one foreground pass + the
-    launchd periodic agent's plist lifecycle."""
-    from . import watchdog_digest  # local import keeps cli light
+    """Phase 13: the digest relay CLI — foreground passes + the periodic
+    agent's host lifecycle (routed like cmd_watchdog; macOS unchanged)."""
+    from . import hosting, watchdogd, watchdog_digest  # local: keep cli light
     home = Path(home) if home is not None else Path.home()
     action = args.digest_command
     if action == "run-loop":
@@ -806,34 +821,36 @@ def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
         res = watchdog_digest.run_once()
         print(json.dumps(res))
         return 0
+    host = hosting.select_host(runner=runner)
     if action == "install":
         try:
-            p = watchdog_digest.install_plist(home, runner=runner)
-        except watchdog_digest.DigestError as e:
+            p = host.install("watchdog-digest", home)
+        except (watchdog_digest.DigestError, watchdogd.WatchdogError) as e:
             print(f"cc-continuity watchdog digest install: {e}",
                   file=sys.stderr)
             return 1
         print(f"digest agent installed: {p} "
-              "(launchd RunAtLoad + StartInterval 120 s)")
+              f"({_host_note(host, 'launchd RunAtLoad + StartInterval 120 s')})")
         return 0
     if action == "uninstall":
-        watchdog_digest.uninstall_plist(home, runner=runner)
-        print("digest agent uninstalled (launchd bootout + plist removed)")
+        host.uninstall("watchdog-digest", home)
+        print("digest agent uninstalled ("
+              + _host_note(host, "launchd bootout + plist removed") + ")")
         return 0
     if action == "start":
-        ok = watchdog_digest.start_plist(home, runner=runner)
+        ok = host.start("watchdog-digest", home)
         msg = "digest agent kickstarted (one pass now)" if ok \
             else "digest agent start failed (is it installed?)"
         print(msg, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
     if action == "stop":
-        ok = watchdog_digest.stop_plist(home, runner=runner)
+        ok = host.stop("watchdog-digest", home)
         msg = "digest agent stopped" if ok \
             else "digest agent stop failed (was it loaded?)"
         print(msg, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
     if action == "status":
-        out = watchdog_digest.status_plist(home, runner=runner)
+        out = host.status("watchdog-digest", home)
         print("digest agent: not loaded" if out is None else out.rstrip())
         return 0
     return 2
@@ -842,7 +859,15 @@ def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
 def cmd_power_plug(args: argparse.Namespace, home: Path | None = None,
                    runner=subprocess.run) -> int:
     """Phase 13: the power-plug CLI — one-shot relay actions (also the
-    manual test tools) + the resident endpoint's plist lifecycle."""
+    manual test tools) + the resident endpoint's plist lifecycle.
+
+    macOS-only (Kasa + launchd): the guard runs first, before any plist
+    work — and before reading the subcommand attribute (spec §7.2).
+    """
+    from . import hosting  # local import keeps cli import light
+    if hosting.kind() != "macos":
+        print("power-plug is a macOS-only feature (Kasa)", file=sys.stderr)
+        return 1
     from . import power_plug  # local import keeps cli import light
     action = args.power_plug_command
     if action in ("state", "on", "off", "cycle"):
@@ -895,9 +920,17 @@ def cmd_power_plug(args: argparse.Namespace, home: Path | None = None,
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    from . import install
+    from . import daemon_supervisor, hosting, install
+    home = Path.home()
+    if hosting.kind() != "macos":
+        # host-managed daemons (a state file ⇔ installed): stop + clean
+        # before the file cleanup (macOS: no state files → no-op)
+        host = hosting.select_host()
+        for name in daemon_supervisor.DAEMON_ARGV:
+            if daemon_supervisor.state_path(name, home).is_file():
+                host.uninstall(name, home)
     try:
-        install.uninstall(Path.home(), purge=args.purge)
+        install.uninstall(home, purge=args.purge)
     except install.UninstallError as e:
         print(f"cc-continuity uninstall: {e}", file=sys.stderr)
         return 1

@@ -1,5 +1,8 @@
 """Platform seam (hosting.py): kind detection + LaunchdHost delegation."""
 
+import argparse
+import json
+
 import pytest
 from cc_continuity import hosting
 
@@ -60,3 +63,77 @@ def test_systemd_install_sequence(tmp_path, monkeypatch):
     assert any("daemon-reload" in c for c in joined)
     assert any("enable --now" in c and "cc-continuity-watchdog.service" in c for c in joined)
     assert all("--user" in c for c in calls)  # never sudo, never system scope
+
+
+# --- Task 5: select_host matrix + lifecycle routing ------------------------
+
+
+@pytest.mark.parametrize("platform,systemd,expected", [
+    ("darwin", False, hosting.LaunchdHost),
+    ("linux", False, hosting.TmuxHost),      # WSL1 / bare Linux
+    ("linux", True, hosting.SystemdHost),    # WSL2 with systemd
+])
+def test_select_host_matrix(monkeypatch, platform, systemd, expected):
+    monkeypatch.setattr(hosting.sys, "platform", platform)
+    monkeypatch.setattr(hosting, "systemd_running", lambda: systemd)
+    assert type(hosting.select_host()) is expected
+
+
+def test_power_plug_refused_off_macos(monkeypatch, capsys):
+    monkeypatch.setattr(hosting.sys, "platform", "linux")
+    import cc_continuity.cli as cli
+    rc = cli.cmd_power_plug(type("A", (), {"power_command": "install",
+                                           "home": None})())
+    assert rc == 1
+    assert "macOS-only" in capsys.readouterr().err
+
+
+def _off_macos(monkeypatch):
+    """Route selection away from launchd: WSL1, no systemd, bash rc."""
+    monkeypatch.setattr(hosting, "kind", lambda *a, **k: "wsl1")
+    monkeypatch.setattr(hosting, "systemd_running", lambda: False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+
+
+def _refusing_runner(calls):
+    def runner(cmd, **kw):
+        calls.append(cmd)
+
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+    return runner
+
+
+def test_watchdog_cli_routes_to_selected_host(cc_home, tmp_path, monkeypatch):
+    """Off-macOS the CLI drives the selected host (TmuxHost), not the
+    plist trio; the caller's runner is passed through."""
+    import cc_continuity.cli as cli
+    (cc_home / "config.json").write_text(
+        json.dumps({"watchdog_enabled": True}), encoding="utf-8")
+    _off_macos(monkeypatch)
+    calls = []
+    rc = cli.cmd_watchdog(argparse.Namespace(command="watchdog",
+                                             watchdog_command="install"),
+                          home=tmp_path, runner=_refusing_runner(calls))
+    assert rc == 0
+    assert (cc_home / "runtime" / "daemon-watchdog.json").is_file()
+    assert any("new-session" in " ".join(c) and "cc-d-watchdog" in " ".join(c)
+               for c in calls)
+    rc_text = (tmp_path / ".bashrc").read_text(encoding="utf-8")
+    assert "cc-d-watchdog" in rc_text  # self-heal line landed
+
+
+def test_digest_cli_routes_to_selected_host(cc_home, tmp_path, monkeypatch):
+    """The digest routes under the daemon name "watchdog-digest"."""
+    import cc_continuity.cli as cli
+    (cc_home / "config.json").write_text("{}", encoding="utf-8")
+    _off_macos(monkeypatch)
+    rc = cli.cmd_watchdog_digest(argparse.Namespace(command="watchdog",
+                                                   digest_command="install"),
+                                 home=tmp_path,
+                                 runner=_refusing_runner([]))
+    assert rc == 0
+    assert (cc_home / "runtime" / "daemon-watchdog-digest.json").is_file()

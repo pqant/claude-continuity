@@ -364,5 +364,16 @@ class TmuxHost(Host):
                                      rc_block_content(lines)))
 
 
-def select_host() -> Host:
-    raise NotImplementedError("select_host is implemented in Task 5")
+def select_host(runner=subprocess.run) -> Host:
+    """Pick the daemon host (spec §7): macOS → launchd; a running systemd
+    → user units; otherwise tmux (WSL1 / bare Linux without systemd).
+
+    ``runner`` is passed to the host's constructor: the CLI forwards its
+    own (so macOS stays byte-identical and tests inject a fake), the
+    zero-arg form (cmd_daemon) uses the real subprocess.run.
+    """
+    if kind() == "macos":
+        return LaunchdHost(runner=runner)
+    if systemd_running():
+        return SystemdHost(runner=runner)
+    return TmuxHost(runner=runner)
