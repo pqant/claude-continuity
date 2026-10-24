@@ -53,6 +53,25 @@ def _safe_json(path: Path):
         return None
 
 
+def _daemon_running(host, runner, home: Path, name: str) -> bool:
+    """Task 7 daemon-check liveness per host kind: TmuxHost →
+    ``tmux has-session`` (the supervisor session ends with the child, so
+    this is a complete liveness test); SystemdHost → the unit file
+    exists (a stopped unit is recovered by the rc self-heal /
+    ``daemon ensure`` — hence warning, not failure, in the check)."""
+    hkind = host.kind()
+    if hkind == "tmux":
+        try:
+            r = runner(["tmux", "has-session", "-t", host.session(name)],
+                       capture_output=True, timeout=15)
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    if hkind == "systemd":
+        return host.unit_path(home, name).is_file()
+    return False
+
+
 def run_doctor(home: Path, runner=subprocess.run,
                which=shutil.which) -> list[Check]:
     home = Path(home)
@@ -62,10 +81,21 @@ def run_doctor(home: Path, runner=subprocess.run,
     def add(name, ok, detail, warning=False):
         out.append(Check(name, ok, detail, warning))
 
+    from . import hosting  # local: doctor stays import-light
+    macos = hosting.kind() == "macos"
+
     # 1-3: prerequisites
     add("python", sys.version_info >= (3, 11), sys.version.split()[0])
     add("tmux", which("tmux") is not None, which("tmux") or "not on PATH")
-    add("zsh", which("zsh") is not None, which("zsh") or "not on PATH")
+    if macos:
+        add("zsh", which("zsh") is not None, which("zsh") or "not on PATH")
+    else:
+        # Task 7: zsh check replaced by shell (zsh OR bash; the detail
+        # names the login shell)
+        login = (os.environ.get("SHELL") or "/bin/bash").rsplit("/", 1)[-1]
+        found = which("zsh") or which("bash")
+        add("shell", found is not None,
+            f"{login} ({found})" if found else f"{login} (not on PATH)")
     claude = which("claude")
     if claude is None:
         add("claude", False, "claude CLI not on PATH")
@@ -149,12 +179,26 @@ def run_doctor(home: Path, runner=subprocess.run,
         managed.block_present(md_text, CLAUDE_MD_BEGIN, CLAUDE_MD_END),
         str(claude_md))
 
-    # 11: zshrc block (symlink-aware)
-    zshrc = home / ".zshrc"
-    target = zshrc.resolve() if zshrc.is_symlink() else zshrc
-    ztext = target.read_text(encoding="utf-8") if target.is_file() else ""
-    add("zshrc", managed.block_present(ztext, ZSHRC_BEGIN, ZSHRC_END),
-        str(target))
+    # 11: shell rc block — macOS: .zshrc (symlink-aware); non-macOS:
+    # the manifest-recorded rc file (Task 6), symlink-aware too
+    if macos:
+        zshrc = home / ".zshrc"
+        target = zshrc.resolve() if zshrc.is_symlink() else zshrc
+        ztext = target.read_text(encoding="utf-8") if target.is_file() \
+            else ""
+        add("zshrc", managed.block_present(ztext, ZSHRC_BEGIN, ZSHRC_END),
+            str(target))
+    else:
+        # Task 7: zshrc check replaced by rc-block (Review Focus 2 —
+        # the detail says exactly how to repair it)
+        rc = hosting.rc_file_for(home)
+        target = rc.resolve() if rc.is_symlink() else rc
+        rtext = target.read_text(encoding="utf-8") if target.is_file() \
+            else ""
+        rc_ok = managed.block_present(rtext, ZSHRC_BEGIN, ZSHRC_END)
+        add("rc-block", rc_ok,
+            str(target) if rc_ok
+            else f"{target} — block missing — re-run: cc-continuity install")
 
     # 12: skills
     sdir = home / ".claude" / "skills"
@@ -230,38 +274,93 @@ def run_doctor(home: Path, runner=subprocess.run,
         mode = os.stat(store).st_mode & 0o777
         add("store-perms", True, oct(mode), warning=mode != 0o700)
 
-    # 18: watchdog (P10-D2): disabled → informational ok; enabled →
-    #     plist present + launchd-loaded + baked binary still exists
-    #     (P10-P8 R5). Never raises (half-installed machine rule).
-    if not (cfg or {}).get("watchdog_enabled", False):
-        add("watchdog", True, "disabled (watchdog_enabled: false)")
-    else:
-        from . import watchdogd  # local: doctor stays import-light
-        plist = watchdogd.plist_path(home)
-        plist_ok = plist.is_file()
-        binary_ok = True
-        if plist_ok:
-            try:
-                pl = plistlib.loads(plist.read_bytes())
-                binary = str(pl["ProgramArguments"][0])
-                binary_ok = os.path.isfile(binary)
-            except (OSError, ValueError, KeyError, IndexError,
-                    plistlib.InvalidFileException):
-                binary_ok = False
-        loaded = watchdogd.status_plist(home, runner=runner) is not None
-        if plist_ok and loaded and binary_ok:
-            add("watchdog", True, "loaded (launchd KeepAlive)")
-        elif not plist_ok:
-            add("watchdog", False,
-                "enabled but not installed — cc-continuity watchdog "
-                "install")
-        elif not binary_ok:
-            add("watchdog", False,
-                "plist binary missing — cc-continuity watchdog install")
+    # 18: daemon hosting — macOS (P10-D2): plist present + launchd-
+    #     loaded + baked binary still exists (P10-P8 R5); non-macOS
+    #     (Task 7): wsl info + daemon state + Windows autostart. Never
+    #     raises (half-installed machine rule).
+    if macos:
+        if not (cfg or {}).get("watchdog_enabled", False):
+            add("watchdog", True, "disabled (watchdog_enabled: false)")
         else:
-            add("watchdog", False,
-                "plist present but not loaded — cc-continuity watchdog "
-                "start")
+            from . import watchdogd  # local: doctor stays import-light
+            plist = watchdogd.plist_path(home)
+            plist_ok = plist.is_file()
+            binary_ok = True
+            if plist_ok:
+                try:
+                    pl = plistlib.loads(plist.read_bytes())
+                    binary = str(pl["ProgramArguments"][0])
+                    binary_ok = os.path.isfile(binary)
+                except (OSError, ValueError, KeyError, IndexError,
+                        plistlib.InvalidFileException):
+                    binary_ok = False
+            loaded = watchdogd.status_plist(home, runner=runner) is not None
+            if plist_ok and loaded and binary_ok:
+                add("watchdog", True, "loaded (launchd KeepAlive)")
+            elif not plist_ok:
+                add("watchdog", False,
+                    "enabled but not installed — cc-continuity watchdog "
+                    "install")
+            elif not binary_ok:
+                add("watchdog", False,
+                    "plist binary missing — cc-continuity watchdog install")
+            else:
+                add("watchdog", False,
+                    "plist present but not loaded — cc-continuity watchdog "
+                    "start")
+    else:
+        # Task 7 (non-macOS): wsl info + daemon state + Windows autostart
+        install_info = (cfg or {}).get("install") or {}
+        platform = install_info.get("platform") or hosting.kind()
+        if platform in ("wsl1", "wsl2"):
+            add("wsl", True,
+                "wsl1 — systemd host unavailable, using tmux host"
+                if platform == "wsl1" else "wsl2 (+systemd)")
+        host = hosting.select_host(runner=runner)
+        rt = store / "runtime"
+        names = sorted(
+            f.name[len("daemon-"):-len(".json")]
+            for f in rt.glob("daemon-*.json") if f.is_file())
+        if not names:
+            add("daemon", True, "none installed")
+        else:
+            parts, down = [], []
+            for n in names:
+                running = _daemon_running(host, runner, home, n)
+                parts.append(f"{n}: {host.kind()} "
+                             f"{'running' if running else 'not running'}")
+                if not running:
+                    down.append(n)
+            detail = "; ".join(parts)
+            if down:
+                detail += (" — rc self-heal on next shell or "
+                           "cc-continuity daemon ensure "
+                           + ", ".join(down))
+            add("daemon", True, detail, warning=bool(down))
+        if platform in ("wsl1", "wsl2"):
+            exe = which("schtasks.exe")
+            if exe is None:
+                add("autostart", True,
+                    "not verifiable (Windows interop off)")
+            else:
+                try:
+                    r = runner(["schtasks.exe", "/query", "/tn",
+                                "cc-continuity-ensure"],
+                               capture_output=True, timeout=15)
+                    task_ok = r.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    task_ok = False
+                if task_ok:
+                    add("autostart", True,
+                        "cc-continuity-ensure task present")
+                else:
+                    distro = os.environ.get("WSL_DISTRO_NAME") \
+                        or "<distro>"
+                    add("autostart", True,
+                        "task missing — schtasks /Create /TN "
+                        "cc-continuity-ensure /SC ONLOGON /TR "
+                        f'"wsl.exe -d {distro} cc-continuity daemon ensure"',
+                        warning=True)
 
     return out
 
