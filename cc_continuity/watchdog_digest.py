@@ -25,7 +25,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -327,6 +329,39 @@ def show_popup(target: str, text: str, *,
 
 
 # --- the one-shot run (launchd StartInterval / CLI) -------------------------------------
+
+
+def run_loop(*, interval_s: float = DEFAULT_START_INTERVAL_S, once=None,
+             sleep=None, stop_event=None) -> int:
+    """The periodic digest loop — the TmuxHost child shape (spec §7.3).
+
+    The digest LaunchAgent is StartInterval (one-shot pass every
+    interval), NOT KeepAlive — so the tmux child must loop: ``run_once``
+    immediately, then every ``interval_s`` with an interruptible sleep.
+    Returns 0. SIGTERM/SIGINT set the stop event (handlers installed
+    only when ``stop_event`` is not injected — the caller then manages
+    stop itself, e.g. tests).
+    """
+    if once is None:
+        once = run_once
+    if stop_event is None:
+        stop_event = threading.Event()
+
+        def _on_signal(signum, frame):
+            stop_event.set()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass  # not the main thread — the caller manages stop
+    if sleep is None:
+        sleep = stop_event.wait
+    stop_event.clear()
+    while True:
+        once()
+        if stop_event.is_set():
+            return 0
+        sleep(interval_s)
 
 
 def run_once(*, now: float | None = None,

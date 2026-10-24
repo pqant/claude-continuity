@@ -138,6 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
     dig_sub.add_parser(
         "run", help="run one digest pass (foreground)")
     dig_sub.add_parser(
+        "run-loop",
+        help="run the periodic digest loop in the foreground (tmux host)")
+    dig_sub.add_parser(
         "install", help="install the launchd periodic agent")
     dig_sub.add_parser("uninstall", help="remove the LaunchAgent")
     dig_sub.add_parser("start", help="kickstart (run one pass now)")
@@ -717,6 +720,8 @@ def cmd_watchdog_digest(args: argparse.Namespace, home: Path | None = None,
     from . import watchdog_digest  # local import keeps cli light
     home = Path(home) if home is not None else Path.home()
     action = args.digest_command
+    if action == "run-loop":
+        return watchdog_digest.run_loop()
     if action == "run":
         res = watchdog_digest.run_once()
         print(json.dumps(res))
