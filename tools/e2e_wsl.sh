@@ -123,6 +123,16 @@ doctor_green() {  # exit 0 iff doctor reports no failing check
   (( rc == 0 ))
 }
 
+read_child_pid() {  # -> the watchdog state file's child_pid ("" if missing)
+  python3 -c '
+import json
+try:
+    v = json.load(open("'$STORE'/runtime/daemon-watchdog.json")).get("child_pid")
+    print("" if v is None else v)
+except Exception:
+    pass' 2>/dev/null || true
+}
+
 # --- phases ------------------------------------------------------------------
 
 preflight() {
@@ -192,9 +202,12 @@ watchdog_install() {
     [[ -f "$STORE/runtime/daemon-$n.json" ]] || fail "state file missing for $n"
     tmux has-session -t "cc-d-$n" 2>/dev/null || fail "session cc-d-$n not running"
   done
-  grep -q "daemon ensure cc-d-watchdog " "$HOME/.bashrc" \
+  # Full-line patterns (rc_daemon_line writes each line verbatim, ending
+  # at the session name — the digest line's longer name keeps the two
+  # patterns unambiguous without a trailing-space trick).
+  grep -q "tmux has-session -t cc-d-watchdog 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog" "$HOME/.bashrc" \
     || fail "rc self-heal line for watchdog missing from ~/.bashrc"
-  grep -q "daemon ensure cc-d-watchdog-digest" "$HOME/.bashrc" \
+  grep -q "tmux has-session -t cc-d-watchdog-digest 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog-digest" "$HOME/.bashrc" \
     || fail "rc self-heal line for watchdog-digest missing from ~/.bashrc"
   pass "both daemons: state files + tmux sessions + rc self-heal lines"
 }
@@ -263,7 +276,7 @@ EOF
   python3 - "$HOME/.claude.json" "$ver" "$E2E_PROJ" <<'EOF'
 import json, os, sys
 p, ver, proj = sys.argv[1], sys.argv[2], os.path.realpath(sys.argv[3])
-d = json.load(open(p))
+d = json.load(open(p)) if os.path.exists(p) else {}  # never-launched HOME
 d["hasCompletedOnboarding"] = True
 d["lastOnboardingVersion"] = ver
 d["numStartups"] = d.get("numStartups", 0) + 1
@@ -273,19 +286,24 @@ with open(p, "w") as f:
 print("onboarding + folder trust pre-seeded")
 EOF
   python3 - "$HOME/.claude/settings.json" <<'EOF'
-import json, sys
+import json, os, sys
 p = sys.argv[1]
-d = json.load(open(p))
+os.makedirs(os.path.dirname(p), exist_ok=True)
+d = json.load(open(p)) if os.path.exists(p) else {}  # never-launched HOME
 d["skipDangerousModePermissionPrompt"] = True
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
 print("settings: skipDangerousModePermissionPrompt=true")
 EOF
-  local cmd
+  # Absolute claude path: the pane's shell is a bare non-interactive sh
+  # (no rc, no claude() wrapper), and the `command` builtin wrapper works
+  # only where /usr/bin/command exists (macOS) — not on the distro.
+  local cmd claude_bin
+  claude_bin="$(command -v claude)"
   cmd="env PATH=$HOME/.local/bin:\$PATH LANG=C LC_ALL=C CC_CONTINUITY_NAME=$PROJ-001"
   cmd="$cmd ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}' ANTHROPIC_BASE_URL='${ANTHROPIC_BASE_URL}'"
   [[ -n "${ANTHROPIC_MODEL:-}" ]] && cmd="$cmd ANTHROPIC_MODEL='${ANTHROPIC_MODEL}'"
-  cmd="$cmd command claude --dangerously-skip-permissions -n $PROJ-001"
+  cmd="$cmd $claude_bin --dangerously-skip-permissions -n $PROJ-001"
   tmux kill-session -t "$TMUX_S" 2>/dev/null || true
   tmux new-session -d -s "$TMUX_S" -c "$E2E_PROJ" "$cmd"
   # Headless send: wait for the idle input box, paste the task, submit.
@@ -317,7 +335,8 @@ EOF
       fail "chain did not reach a settled 5th session in ${CHAIN_TIMEOUT}s"
     }
     latest="$(latest_session)"
-    if (( latest >= 5 )) && { proj_state "$latest" | grep -q ROTATED || turn_settled "$latest"; }; then
+    # session dirs are zero-padded (paths.session_dir: {nnn:03d})
+    if (( latest >= 5 )) && { proj_state "$(printf '%03d' "$latest")" | grep -q ROTATED || turn_settled "$(printf '%03d' "$latest")"; }; then
       # no newer session may appear while we check (settled == stable)
       sleep 30
       [[ "$(latest_session)" == "$latest" ]] && break
@@ -335,27 +354,40 @@ EOF
 
 resilience() {
   phase "6 resilience (ensure + supervisor respawn)"
-  # 6a: kill the daemon session -> `daemon ensure` recreates it.
-  tmux kill-session -t cc-d-watchdog
+  # 6a: kill the daemon session -> `daemon ensure` recreates it, and the
+  # fresh supervisor records a new child in the state file.
+  local pre new newer i
+  pre="$(read_child_pid)"
+  tmux kill-session -t cc-d-watchdog 2>/dev/null || true
   tmux has-session -t cc-d-watchdog 2>/dev/null && fail "session still alive after kill"
   cc-continuity daemon ensure watchdog || fail "daemon ensure failed"
   tmux has-session -t cc-d-watchdog 2>/dev/null \
     || fail "session cc-d-watchdog not recreated by daemon ensure"
+  # The state file keeps the pre-kill pid until the fresh supervisor
+  # records its child — wait for the change (a dead pid here would make
+  # the 6b kill below exit under set -e).
+  new=""
+  for i in $(seq 1 15); do
+    sleep 1
+    new="$(read_child_pid)"
+    [[ -n "$new" && "$new" != "$pre" ]] && break
+  done
+  [[ -n "$new" && "$new" != "$pre" ]] \
+    || fail "fresh supervisor did not record a new child_pid (pre: $pre, now: ${new:-none})"
   # 6b: kill the supervised CHILD -> the supervisor respawns it (a new
   # child_pid lands in the state file; the session name is unchanged).
-  local old new i
-  old="$(python3 -c 'import json; print(json.load(open("'$STORE'/runtime/daemon-watchdog.json"))["child_pid"])')"
-  [[ -n "$old" ]] || fail "no child_pid in the watchdog state file"
-  kill -TERM "$old"
+  kill -TERM "$new" 2>/dev/null \
+    || fail "child $new already dead before the kill test (daemon unstable)"
+  newer=""
   for i in $(seq 1 30); do
     sleep 2
-    new="$(python3 -c 'import json; print(json.load(open("'$STORE'/runtime/daemon-watchdog.json")).get("child_pid"))' 2>/dev/null || true)"
-    [[ -n "${new:-}" && "$new" != "$old" ]] && break
+    newer="$(read_child_pid)"
+    [[ -n "${newer:-}" && "$newer" != "$new" ]] && break
   done
-  [[ -n "${new:-}" && "$new" != "$old" ]] \
-    || fail "supervisor did not respawn the child within 60s (old pid $old)"
+  [[ -n "${newer:-}" && "$newer" != "$new" ]] \
+    || fail "supervisor did not respawn the child within 60s (pid $new)"
   tmux has-session -t cc-d-watchdog 2>/dev/null || fail "session gone after respawn"
-  pass "ensure recreated the session; supervisor respawned the child (pid $old -> $new)"
+  pass "ensure recreated the session; supervisor respawned the child (pid $new -> $newer)"
 }
 
 windows_side() {
