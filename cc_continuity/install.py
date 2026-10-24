@@ -150,16 +150,49 @@ def resolve_ntfy(explicit: str | None, *, is_tty: bool,
     return "" if not answer else validate_endpoint(answer)
 
 
+def rc_target(home: Path, shell: str | None = None) -> Path:
+    """The login-shell rc file for the non-macOS install (spec §7.4).
+
+    ``shell`` defaults to ``$SHELL`` (unset → bash, the rc_file_for
+    fallback convention). bash → ``~/.bashrc``, zsh → ``~/.zshrc``;
+    any other login shell is refused with the exact fix.
+    """
+    shell = shell if shell is not None else os.environ.get("SHELL")
+    name = (shell or "/bin/bash").rsplit("/", 1)[-1]
+    if name == "zsh":
+        return Path(home) / ".zshrc"
+    if name == "bash":
+        return Path(home) / ".bashrc"
+    raise InstallError(
+        f"login shell {name} is not supported — install zsh "
+        "(sudo apt install zsh && sudo chsh -s /bin/zsh) or switch to "
+        "bash (sudo chsh -s /bin/bash)")
+
+
 def check_prerequisites(home: Path,
                         runner=subprocess.run) -> list[str]:
-    """Return human-readable missing items; [] means all prerequisites OK."""
+    """Return human-readable missing items; [] means all prerequisites OK.
+
+    Platform-gated (Task 6): macOS keeps the exact existing checks
+    (zsh required); non-macOS accepts zsh OR bash, and the python
+    message carries the Ubuntu fix hint.
+    """
+    from . import hosting  # lazy: hosting imports this module (T4 note)
     missing = []
     if sys.version_info < (3, 11):
-        missing.append(f"python >= 3.11 (found {sys.version.split()[0]})")
+        msg = f"python >= 3.11 (found {sys.version.split()[0]})"
+        if hosting.kind() != "macos":
+            msg += (" — on Ubuntu 22.04 install python3.11+ (deadsnakes) "
+                    "or use Ubuntu 24.04, then run: "
+                    "python3.11 -m cc_continuity.cli install")
+        missing.append(msg)
     if shutil.which("tmux") is None:
         missing.append("tmux on PATH")
-    if shutil.which("zsh") is None:
-        missing.append("zsh on PATH")
+    if hosting.kind() == "macos":
+        if shutil.which("zsh") is None:
+            missing.append("zsh on PATH")
+    elif shutil.which("zsh") is None and shutil.which("bash") is None:
+        missing.append("zsh or bash on PATH")
     if shutil.which("curl") is None:
         missing.append("curl on PATH")
     claude = shutil.which("claude")
@@ -332,18 +365,35 @@ def install(home: Path, *, window: int | None = None,
     # 3) user skills (PRD §17.5)
     skills.install_skills(claude_dir / "skills")
 
-    # 4) ~/.zshrc managed block (PRD §17.6, Appendix D) — symlink-aware
-    zshrc = home / ".zshrc"
-    is_link = zshrc.is_symlink()
-    target = zshrc.resolve() if is_link else zshrc
-    created_z = not zshrc.exists() and not is_link
-    ztext = target.read_text(encoding="utf-8") if target.is_file() else ""
-    atomic.atomic_write_text(
-        target,
-        managed.upsert_block(ztext, ZSHRC_BEGIN, ZSHRC_END,
-                             ZSHRC_CONTENT.rstrip("\n")))
-    manifest["zshrc"] = {"symlink": is_link, "resolved": str(target),
-                         "created": created_z}
+    # 4) login-shell rc managed block (PRD §17.6, Appendix D) —
+    #    symlink-aware; macOS: .zshrc (existing logic, unchanged);
+    #    non-macOS: rc_target (bash/zsh) + rc_file manifest key
+    from . import hosting  # lazy: hosting imports this module (T4 note)
+    if hosting.kind() == "macos":
+        zshrc = home / ".zshrc"
+        is_link = zshrc.is_symlink()
+        target = zshrc.resolve() if is_link else zshrc
+        created_z = not zshrc.exists() and not is_link
+        ztext = target.read_text(encoding="utf-8") if target.is_file() else ""
+        atomic.atomic_write_text(
+            target,
+            managed.upsert_block(ztext, ZSHRC_BEGIN, ZSHRC_END,
+                                 ZSHRC_CONTENT.rstrip("\n")))
+        manifest["zshrc"] = {"symlink": is_link, "resolved": str(target),
+                             "created": created_z}
+    else:
+        rc_link = rc_target(home)
+        is_link = rc_link.is_symlink()
+        target = rc_link.resolve() if is_link else rc_link
+        created_rc = not rc_link.exists() and not is_link
+        rtext = target.read_text(encoding="utf-8") if target.is_file() else ""
+        atomic.atomic_write_text(
+            target,
+            managed.upsert_block(rtext, ZSHRC_BEGIN, ZSHRC_END,
+                                 ZSHRC_CONTENT.rstrip("\n")))
+        manifest["rc_file"] = str(target)
+        manifest["platform"] = hosting.kind()
+        manifest["rc_created"] = created_rc
 
     # 5) config.json (PRD §17.2/§15 + P7-D8/D12)
     cfg_path = store / "config.json"
@@ -432,25 +482,51 @@ def uninstall(home: Path, *, purge: bool = False) -> None:
         else:
             atomic.atomic_write_text(claude_md, new_text)
 
-    # 3) ~/.zshrc (resolved target; a file the installer CREATED is removed
-    #    when the block leaves it empty)
-    zinfo = manifest.get("zshrc") or {}
-    zshrc = home / ".zshrc"
-    if zinfo.get("resolved"):
-        target = Path(zinfo["resolved"])
-    else:
-        target = zshrc.resolve() if zshrc.is_symlink() else zshrc
-    if not target.is_file():  # stale manifest path -> current resolution
-        target = zshrc.resolve() if zshrc.is_symlink() else zshrc
-    if target.is_file():
-        new_text = managed.remove_block(
-            target.read_text(encoding="utf-8"), ZSHRC_BEGIN, ZSHRC_END)
-        if zinfo.get("created") and not new_text.strip():
-            target.unlink()
-            if zshrc.is_symlink():
-                zshrc.unlink()
+    # 3) login-shell rc (resolved target; a file the installer CREATED is
+    #    removed when the block leaves it empty)
+    from . import hosting  # lazy: hosting imports this module (T4 note)
+    if hosting.kind() == "macos":
+        zinfo = manifest.get("zshrc") or {}
+        zshrc = home / ".zshrc"
+        if zinfo.get("resolved"):
+            target = Path(zinfo["resolved"])
         else:
-            atomic.atomic_write_text(target, new_text)
+            target = zshrc.resolve() if zshrc.is_symlink() else zshrc
+        if not target.is_file():  # stale manifest path -> current resolution
+            target = zshrc.resolve() if zshrc.is_symlink() else zshrc
+        if target.is_file():
+            new_text = managed.remove_block(
+                target.read_text(encoding="utf-8"), ZSHRC_BEGIN, ZSHRC_END)
+            if zinfo.get("created") and not new_text.strip():
+                target.unlink()
+                if zshrc.is_symlink():
+                    zshrc.unlink()
+            else:
+                atomic.atomic_write_text(target, new_text)
+    else:
+        # manifest["rc_file"] (the resolved target) wins; rc_target is
+        # only consulted when the manifest has no record (and would
+        # raise for a login shell changed to an unsupported one since)
+        rc_link: Path | None = None
+        rinfo = manifest.get("rc_file")
+        if rinfo:
+            target = Path(rinfo)
+        else:  # no manifest (or pre-rc_file install): current resolution
+            rc_link = rc_target(home)
+            target = rc_link.resolve() if rc_link.is_symlink() else rc_link
+        if not target.is_file():  # stale manifest path -> current resolution
+            if rc_link is None:
+                rc_link = rc_target(home)
+            target = rc_link.resolve() if rc_link.is_symlink() else rc_link
+        if target.is_file():
+            new_text = managed.remove_block(
+                target.read_text(encoding="utf-8"), ZSHRC_BEGIN, ZSHRC_END)
+            if manifest.get("rc_created") and not new_text.strip():
+                target.unlink()
+                if rc_link is not None and rc_link.is_symlink():
+                    rc_link.unlink()
+            else:
+                atomic.atomic_write_text(target, new_text)
 
     # 4) skills
     skills.uninstall_skills(home / ".claude" / "skills")
