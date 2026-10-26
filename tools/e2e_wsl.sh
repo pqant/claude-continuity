@@ -213,13 +213,13 @@ watchdog_install() {
 }
 
 input_box_up() {  # $1=pane text -> 0 when the idle input box is visible
-  # The live input box is an empty col-0 "❯" line — ❯ + NBSP (U+00A0,
-  # NOT a plain space) — with "─" divider lines on both sides (the demo
-  # pattern; scrollback user messages also start with ❯ but carry text).
-  local nbsp
-  nbsp="$(printf '\302\240')"
-  printf '%s\n' "$1" | awk -v nbsp="$nbsp" '
-    /^[─]/ && prev ~ ("^❯[ \t" nbsp "]*$") && above ~ /^[─]/ { found = 1 }
+  # The live input box: a col-0 "❯" line — empty, or carrying a rotating
+  # placeholder hint ('Try "write a test for <filepath>"') — with "─"
+  # divider lines on both sides (box chrome; the header divider carries
+  # the session name). Scrollback user messages also start with ❯, but
+  # the e2e only probes while the pane is fresh, before the first paste.
+  printf '%s\n' "$1" | awk '
+    /^[─]/ && prev ~ /^❯/ && above ~ /^[─]/ { found = 1 }
     { above = prev; prev = $0 }
     END { exit(found ? 0 : 1) }'
 }
