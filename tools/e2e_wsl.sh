@@ -281,9 +281,19 @@ d["hasCompletedOnboarding"] = True
 d["lastOnboardingVersion"] = ver
 d["numStartups"] = d.get("numStartups", 0) + 1
 d.setdefault("projects", {}).setdefault(proj, {})["hasTrustDialogAccepted"] = True
+# 2.1.209 asks "Detected a custom API key… use it?" the first time an
+# env key is used; customApiKeyResponses.approved stores key[-20:].
+key = os.environ.get("ANTHROPIC_API_KEY", "")
+if key:
+    ca = d.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
+    tail = key[-20:]
+    approved = ca.setdefault("approved", [])
+    if tail not in approved:
+        approved.append(tail)
+    ca["rejected"] = [r for r in ca.get("rejected", []) if r != tail]
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
-print("onboarding + folder trust pre-seeded")
+print("onboarding + folder trust + API key pre-seeded")
 EOF
   python3 - "$HOME/.claude/settings.json" <<'EOF'
 import json, os, sys
@@ -298,9 +308,15 @@ EOF
   # Absolute claude path: the pane's shell is a bare non-interactive sh
   # (no rc, no claude() wrapper), and the `command` builtin wrapper works
   # only where /usr/bin/command exists (macOS) — not on the distro.
-  local cmd claude_bin
+  local cmd claude_bin clean_path
   claude_bin="$(command -v claude)"
-  cmd="env PATH=$HOME/.local/bin:\$PATH LANG=C LC_ALL=C CC_CONTINUITY_NAME=$PROJ-001"
+  # WSL interop appends space-bearing Windows entries to PATH
+  # (/mnt/c/Program Files/...): an unquoted $PATH expansion in the
+  # pane's shell word-splits them and `env` dies on the fragment
+  # (rc 127). Strip such entries — the pane only needs
+  # $HOME/.local/bin + the standard Linux dirs.
+  clean_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v ' ' | paste -sd: -)"
+  cmd="env PATH=\"$HOME/.local/bin:$clean_path\" LANG=C LC_ALL=C CC_CONTINUITY_NAME=$PROJ-001"
   cmd="$cmd ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}' ANTHROPIC_BASE_URL='${ANTHROPIC_BASE_URL}'"
   [[ -n "${ANTHROPIC_MODEL:-}" ]] && cmd="$cmd ANTHROPIC_MODEL='${ANTHROPIC_MODEL}'"
   cmd="$cmd $claude_bin --dangerously-skip-permissions -n $PROJ-001"
