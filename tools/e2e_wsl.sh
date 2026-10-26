@@ -280,7 +280,7 @@ d = json.load(open(p)) if os.path.exists(p) else {}  # never-launched HOME
 d["hasCompletedOnboarding"] = True
 d["lastOnboardingVersion"] = ver
 d["numStartups"] = d.get("numStartups", 0) + 1
-d["projects"].setdefault(proj, {})["hasTrustDialogAccepted"] = True
+d.setdefault("projects", {}).setdefault(proj, {})["hasTrustDialogAccepted"] = True
 with open(p, "w") as f:
     json.dump(d, f, indent=2)
 print("onboarding + folder trust pre-seeded")
