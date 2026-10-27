@@ -386,7 +386,21 @@ EOF
   echo "task sent — the chain runs headless (attach: tmux attach -t $TMUX_S)"
   # Wait: 005 exists AND the latest session is settled (ROTATED is
   # terminal per session; the final one settles idle after its turn).
-  local start now latest
+  #
+  # Stall recovery (the scripted operator): the product assumes a human
+  # types at the pane; unattended, a dead turn (API error mid-stream —
+  # CC fires no Stop hook for it, so turn_active sticks and the state
+  # machine waits for a turn that is gone) leaves the pane idle and the
+  # chain burns CHAIN_TIMEOUT. The latest session's state.json mtime is
+  # the activity signal: it is rewritten at every tool-call boundary,
+  # and the longest healthy gap on a slow box (TTFT + one generation,
+  # thinking off) stays well under STALL_SECS. On a stall: BOOTSTRAPPING
+  # means the rotator's Enter was lost (resume prompt), anything else
+  # gets a continue-nudge that restarts the turn so the state machine
+  # (walk, Stop, the 3-attempt degrade) can drive the rotation.
+  local start now latest sd st smt prev p
+  local STALL_SECS=900 MAX_NUDGES=5
+  local nudges=0 last_nudge_t=0 last_stall_t=0
   start="$(date +%s)"
   while :; do
     now="$(date +%s)"
@@ -400,6 +414,55 @@ EOF
       # no newer session may appear while we check (settled == stable)
       sleep 30
       [[ "$(latest_session)" == "$latest" ]] && break
+    fi
+    # --- stall detection -----------------------------------------------------
+    # Covers the final session too: a dead turn on 005 (or its lost
+    # bootstrap) would otherwise wait out the whole CHAIN_TIMEOUT, since
+    # the settled check above never passes while turn_active is stuck.
+    if (( latest >= 1 )); then
+      sd="$(ls -d "$STORE"/projects/*/sessions 2>/dev/null | head -1 || true)"
+      smt="$(stat -c %Y "$sd/$(printf '%03d' "$latest")/state.json" 2>/dev/null || echo "$now")"
+      if (( now - smt > STALL_SECS && now - last_stall_t > STALL_SECS )); then
+        last_stall_t="$now"
+        st="$(proj_state "$(printf '%03d' "$latest")")"
+        case "$st" in
+        BOOTSTRAPPING)
+          if (( latest >= 2 )); then
+            # The rotator's Enter was lost: clear the stuck input box and
+            # submit the successor's resume prompt.
+            prev=$(( latest - 1 ))
+            p="$(printf '%03d' "$prev")"
+            for _ in 1 2 3; do
+              tmux send-keys -t "$TMUX_S" $(printf 'BSpace %.0s' $(seq 1 200))
+            done
+            sleep 2
+            tmux load-buffer -b e2enudge - <<EOF
+CONTINUITY RESUME cp-$p: read $sd/$p/checkpoint/handoff.md completely, apply the VALIDATION result, then continue from Next Atomic Action. Do not repeat completed work.
+EOF
+            tmux paste-buffer -b e2enudge -p -d -t "$TMUX_S"
+            tmux send-keys -t "$TMUX_S" Enter
+            echo "STALL (bootstrap Enter loss) at session $latest — resume prompt for cp-$p submitted"
+          else
+            echo "STALL (bootstrap) at session 001 — the task was sent; waiting for the turn"
+          fi
+          ;;
+        ROTATED)
+          echo "STALL: latest session $latest is ROTATED but no successor appeared (rotator dead?)"
+          ;;
+        *)
+          if (( nudges < MAX_NUDGES && now - last_nudge_t > STALL_SECS )); then
+            tmux load-buffer -b e2enudge - <<EOF
+Continue the wordcount task from where it stopped. The last turn may have died mid-response, so inspect wordcount.py and test_wordcount.py first, run the test suite, then resume the parts in order. Do not ask questions.
+EOF
+            tmux paste-buffer -b e2enudge -p -d -t "$TMUX_S"
+            tmux send-keys -t "$TMUX_S" Enter
+            nudges=$(( nudges + 1 ))
+            last_nudge_t="$now"
+            echo "STALL (state $st, idle $(( now - smt ))s) at session $latest — continue-nudge $nudges/$MAX_NUDGES sent"
+          fi
+          ;;
+        esac
+      fi
     fi
     sleep 20
   done
