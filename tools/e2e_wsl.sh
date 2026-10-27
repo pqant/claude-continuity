@@ -225,14 +225,18 @@ input_box_up() {  # $1=pane text -> 0 when the idle input box is visible
 }
 
 chain_task() {
-  # Sized from the demo's measurements (tools/demo_gif.sh header): at a
-  # 64K window the first crossing lands at ~75% of an 18.5K task; each
-  # successor session starts at ~30.6K and needs ~9K more work to cross.
-  # 8 parts ~= 46K of work -> 4 crossings -> exactly a 5-session chain.
-  # If the model's static baseline differs, tune E2E_WINDOW and/or this
-  # task (assert: 005 exists, 001-004 ROTATED — a 6th session is OK).
+  # Sizing for the thinking-OFF regime (measured live, qwen3.8-27b via the
+  # LAN relay, 64K window): the 8-part task grew one session from a ~30K
+  # baseline to 59% in a single 12.5-min turn (~0.97K context per part) —
+  # too little to cross the 62% auto-rotation threshold at all. Each
+  # rotated successor starts at ~33-35K (baseline + handoff) and needs
+  # ~9K more work to cross. 48 parts ~= 50-60K of work (later parts grow
+  # more: every "run the full suite" prints a bigger suite) -> 4 crossings
+  # -> a 5-6 session chain. If the model's static baseline differs, tune
+  # E2E_WINDOW and/or this task (assert: 005 exists, 001-004 ROTATED —
+  # extra sessions are OK).
   cat <<'EOF'
-Build a small CLI tool in this repo. Work autonomously; do not ask questions; complete all parts in this session. Write all output (chat text, code, comments, commit message) in English only. Do not run git commit before the final part.
+Build a small CLI tool in this repo. Work autonomously; do not ask questions; complete the parts in order, as far as this session gets (if the session rotates before the last part, the next session continues from the handoff). Write all output (chat text, code, comments, commit message) in English only. Do not run git commit before the final part.
 Part 1: create wordcount.py — a Python CLI that takes a file path and prints its line, word and character counts (like wc -lwc). Add test_wordcount.py using only the standard library (unittest) with at least 4 tests. Run the tests until they pass.
 Part 2: add a --json flag that prints the counts as a JSON object. Add at least 2 tests, then run the full suite.
 Part 3: add a --csv flag that prints a header row followed by one data row. Add at least 2 tests, then run the full suite.
@@ -240,7 +244,47 @@ Part 4: add a --limit N option that counts only the first N lines (must work wit
 Part 5: add a --sort flag (alpha order of keys for --json, column order for --csv, stable plain output). Add at least 2 tests, run the full suite.
 Part 6: add a --files f1 f2 … option (multiple inputs, per-file rows plus a TOTAL row; plain and --csv). Add at least 3 tests, run the full suite.
 Part 7: add a --errors file option (writes undecodable lines to the named file as path:line) plus at least 2 tests; run the full suite.
-Part 8: write README.md (usage, all flags, examples) and run git commit on everything with a clear commit message.
+Part 8: add --strip: remove leading and trailing whitespace from each line before counting. Add at least 2 tests, run the full suite.
+Part 9: add --skip-blank: exclude blank or whitespace-only lines from all counts. Add at least 2 tests, run the full suite.
+Part 10: add --min-line-length N: count only lines longer than N characters (applied before --strip). Add at least 2 tests, run the full suite.
+Part 11: add --pattern RE: count only lines matching the regex; an invalid regex is a clear error with exit code 2. Add at least 3 tests, run the full suite.
+Part 12: add --invert: count the lines that do NOT match --pattern; using it without --pattern is an error (exit code 2). Add at least 2 tests, run the full suite.
+Part 13: add --top N: print the N most frequent words (case-insensitive) with their counts, below the main counts in plain mode. Add at least 3 tests, run the full suite.
+Part 14: add --unique: count distinct words (case-sensitive); add a "unique" field to every output mode. Add at least 2 tests, run the full suite.
+Part 15: add --avg: report average line length and average words per line; add avg_chars and avg_words fields to every output mode. Add at least 2 tests, run the full suite.
+Part 16: add --range A:B: count only lines A through B (1-based, inclusive); A > B or A beyond the file end is exit code 2. Add at least 3 tests, run the full suite.
+Part 17: add --tail N: count only the last N lines; combining --tail with --limit is exit code 2. Add at least 2 tests, run the full suite.
+Part 18: add --json-indent N: pretty-print --json output with the given indentation. Add at least 2 tests, run the full suite.
+Part 19: add --csv-delimiter C: use the single character C as the --csv delimiter (default comma). Add at least 2 tests, run the full suite.
+Part 20: add --output FILE: write the result to FILE instead of stdout, creating parent directories as needed. Add at least 2 tests, run the full suite.
+Part 21: add --max-lines N, --max-words N and --max-chars N: exit code 3 when any count exceeds its limit (CI-gate mode); they combine. Add at least 3 tests, run the full suite.
+Part 22: support the path "-" to read from stdin. Add at least 2 tests, run the full suite.
+Part 23: add --version: print "wordcount 1.0.0" and exit 0. Add at least 2 tests, run the full suite.
+Part 24: rebuild the --help text: group the flags under Counting / Output / Gates, one line per flag, plus an Examples section. Add at least 1 test that --help exits 0 and lists all three group headers, then run the full suite.
+Part 25: add --summary: one human line, e.g. "42 lines, 510 words, 3021 chars (avg 71.9 chars/line)". Add at least 2 tests, run the full suite.
+Part 26: add --compare FILE2: count both files and print, per metric, the delta (FILE2 minus FILE1) with an explicit + or - sign; it must work in plain, --json and --csv. Add at least 3 tests, run the full suite.
+Part 27: add --baseline FILE: store this run's counts as a JSON snapshot in FILE; if FILE already exists, print the delta against the stored snapshot and then update the file. Add at least 3 tests, run the full suite.
+Part 28: add --count-matches: with --pattern, count total regex matches instead of matching lines; without --pattern it is exit code 2. Add at least 2 tests, run the full suite.
+Part 29: add --min-word-length N: for --top, ignore words shorter than N characters. Add at least 2 tests, run the full suite.
+Part 30: add --stopwords FILE: for --top, ignore the words listed one per line in FILE. Add at least 2 tests, run the full suite.
+Part 31: add --sort-by count|alpha: for --top, order by frequency (ties alphabetical) or alphabetically. Add at least 2 tests, run the full suite.
+Part 32: add --histogram: print line-length buckets (0-9, 10-19, 20-29, ..., 100+) with counts, below the main counts in plain mode. Add at least 2 tests, run the full suite.
+Part 33: add --lines-only, --words-only and --chars-only: print a single number and nothing else; combining two of them is exit code 2. Add at least 3 tests, run the full suite.
+Part 34: add --no-total: omit the TOTAL row in --files mode. Add at least 2 tests, run the full suite.
+Part 35: add --label L: in --files mode, use L as the row label instead of each file path. Add at least 2 tests, run the full suite.
+Part 36: extend the --errors format to path:line:code, where code names the decode error kind (such as invalid start byte, invalid continuation byte, truncated data, code point out of range). Add at least 2 tests, run the full suite.
+Part 37: add --encoding ENC: open the input with the given encoding (default utf-8). Add at least 2 tests, run the full suite.
+Part 38: add --crlf: treat \r\n as one newline and exclude \r from the character count (the default counts \r). Add at least 2 tests, run the full suite.
+Part 39: add --tab-as N: count each tab as N spaces in the character count only (default 0 = a tab counts as one character). Add at least 2 tests, run the full suite.
+Part 40: add --quiet: print nothing to stdout (the exit code still reflects the --max-* gates). Add at least 2 tests, run the full suite.
+Part 41: make --compare work with --json: emit a JSON object holding both file objects and a diff object. Add at least 2 tests, run the full suite.
+Part 42: make --files work with --top N: a per-file top-word list plus a merged TOTAL top list. Add at least 2 tests, run the full suite.
+Part 43: polish every usage error (bad flag value, conflicting flags, missing file, bad --range, bad --csv-delimiter, unknown flag): print "wordcount: <reason>" to stderr and exit 2. Add at least 3 tests covering different cases, asserting both the message prefix and the exit code, then run the full suite.
+Part 44: add --selftest: run built-in canned strings through the core flags (--json, --csv, --top, --range, --pattern) and print "selftest OK" on success. Add at least 2 tests, run the full suite.
+Part 45: add a performance test: generate a 200,000-line file inside the test, assert that plain mode and --json each finish in under 10 seconds, and delete the file afterwards. Run the full suite.
+Part 46: add pyproject.toml with [project] metadata (name, version, description, requires-python) and a [project.scripts] entry wordcount = "wordcount:main" (add a main() entry point if the script does not have one yet); add a test that tomllib parses the file and the fields exist. Do not pip install it. Run the full suite.
+Part 47: add --list-flags: print every flag one per line as "flag — one-line description". Add at least 2 tests, run the full suite.
+Part 48: rewrite README.md: the complete flag reference grouped like --help, one example per group, the exit-code table, and a CI-gate example. Run the full suite one final time, then git add -A and make a single git commit with a clear message listing the major features.
 EOF
 }
 
