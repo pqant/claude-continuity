@@ -43,6 +43,16 @@ def test_c2_text_lists_draft_and_headings(cc_home):
     assert "Rejected Approaches — Do Not Repeat" in t
 
 
+def test_c2_text_shows_level2_heading_format(cc_home):
+    t = thresholds.c2_text(0.63, DRAFT)
+    assert "## Objective" in t
+    assert "## Runtime Environment Notes" in t
+
+
+def test_c3_text_shows_level2_heading_format(cc_home):
+    assert "## " in thresholds.c3_text(0.75, 0.72, DRAFT)
+
+
 def test_c3_text_falls_back_to_hard_ratio_pct(cc_home):
     assert "context at 72% (hard limit)" in thresholds.c3_text(None, 0.72, DRAFT)
     assert "context at 75% (hard limit)" in thresholds.c3_text(0.75, 0.72, DRAFT)

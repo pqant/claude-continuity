@@ -88,11 +88,14 @@ def _blocked_suffix(blocked: str | None) -> str:
 
 def c2_text(ratio: float, draft_path: str,
             blocked: str | None = None) -> str:
-    headings = ", ".join(checkpoint.TEMPLATE_HEADINGS)
+    # Show the level-2 markdown form verbatim: a weak model that only saw
+    # bare names defaults to H1 and fails validation (2026-10-27 e2e).
+    headings = ", ".join("## " + h for h in checkpoint.TEMPLATE_HEADINGS)
     return (f"CONTINUITY: context at {pct_of(ratio)}%. Rotation pending. "
             f"Finish only the step you are in (at most: complete the current "
             f"edit and run its quick check). Then write the handoff to "
-            f"{draft_path} using exactly these headings: {headings}. Only "
+            f"{draft_path} using exactly these headings, in this order and "
+            f"format (level-2 markdown): {headings}. Only "
             "write what you know that git/logs cannot show. Then end your "
             "turn." + _blocked_suffix(blocked))
 
@@ -102,7 +105,8 @@ def c3_text(ratio: float | None, hard_ratio: float, draft_path: str,
     shown = ratio if ratio is not None else hard_ratio
     return (f"CONTINUITY: context at {pct_of(shown)}% (hard limit). Tool "
             f"blocked. Write the handoff now to {draft_path} with the "
-            "required headings, then end your turn. Allowed now: Write/Edit "
+            "required level-2 headings (format '## Heading'), then end your "
+            "turn. Allowed now: Write/Edit "
             "of that file, Read/Glob/Grep, git status/diff/log/show."
             + _blocked_suffix(blocked))
 

@@ -101,10 +101,21 @@ def validate_draft(text: str, cfg: dict) -> DraftReport:
     """
     redacted_text, warnings = redact.Redactor(config.redact_patterns(cfg)).redact(text)
     problems: list = []
-    h2 = [t for lvl, t in _parse_headings(redacted_text) if lvl == 2]
+    headings = _parse_headings(redacted_text)
+    h2 = [t for lvl, t in headings if lvl == 2]
+    first_level: dict[str, int] = {}
+    for lvl, t in headings:
+        first_level.setdefault(t, lvl)
     for h in TEMPLATE_HEADINGS:
         if h not in h2:
-            problems.append(f"missing heading: {h}")
+            lvl = first_level.get(h)
+            if lvl is not None:
+                # Actionable for weak models: name the exact required form so
+                # the fix is a copy, not a guess (2026-10-27 e2e: H1 draft).
+                problems.append(f"wrong heading level: '{h}' found at level "
+                                f"{lvl}; required level 2 ('## {h}')")
+            else:
+                problems.append(f"missing heading: {h}")
     seen: list = []
     for h in h2:
         if h in TEMPLATE_HEADINGS and h not in seen:

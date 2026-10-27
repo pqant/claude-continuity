@@ -93,6 +93,25 @@ def test_missing_heading_reported():
     assert "missing heading: Remaining Plan" in r.problems
 
 
+def test_heading_at_wrong_level_reported_actionably():
+    # A weak model that writes H1 '# Objective' must get a message naming the
+    # required exact form '## Objective' — not a bare "missing heading".
+    text = _draft().replace("## Objective", "# Objective", 1)
+    r = checkpoint.validate_draft(text, _cfg())
+    assert r.ok is False
+    assert any("Objective" in p and "## Objective" in p for p in r.problems)
+    assert "missing heading: Objective" not in r.problems
+
+
+def test_all_h1_draft_reports_levels_not_missing():
+    text = "\n".join(f"# {t}\n{DRAFT_BODIES[t]}\n" for t in HEADING_ORDER)
+    r = checkpoint.validate_draft(text, _cfg())
+    assert r.ok is False
+    assert len(r.problems) == 9
+    assert all("## " in p for p in r.problems)
+    assert not any(p.startswith("missing heading") for p in r.problems)
+
+
 def test_headings_out_of_order_reported():
     text = _draft().replace(
         "## Current Task and Exact Stopping Point", "## SENTINEL_3", 1
