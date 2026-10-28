@@ -284,6 +284,16 @@ with open(p, "w") as f:
     json.dump(cfg, f, indent=2)
 print(f"e2e tuning: unattended=true, window_tokens={cfg['window_tokens']}")
 EOF
+  # Clean room: the chain must see a FRESH store and a FRESH project
+  # (the fresh-VM contract) so 001 is the first session. A reused box
+  # carries a previous run's sessions; the product's counter (project
+  # .json inside the project dir) would then number the new chain 006+
+  # and the 001-002 assert below would read stale state.
+  local oldproj
+  oldproj="$(ls -d "$STORE"/projects/e2e-app-* 2>/dev/null | head -1 || true)"
+  if [[ -n "$oldproj" ]]; then rm -rf "$oldproj"; fi
+  rm -rf "$E2E_PROJ"
+  mkdir -p "$E2E_PROJ"
   # Keep the pane's scrollback generic (fresh-VM hygiene, demo rules).
   (
     cd "$E2E_PROJ"
