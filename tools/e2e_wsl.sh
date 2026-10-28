@@ -546,19 +546,25 @@ EOF
 
 ntfy_received() {
   phase "8 ntfy pushes received"
-  local events count
-  events="$(curl -sf -m 30 "$E2E_NTFY/$E2E_NTFY_TOPIC?json=events" 2>/dev/null || echo '[]')"
-  count="$(python3 - "$events" <<'EOF'
+  local count
+  # ntfy's documented events API: GET /<topic>/json?poll=1 -> NDJSON (one object per line).
+  # A bare GET of the topic (e.g. with ?json=events, which is not a documented key)
+  # returns the web UI HTML, not events.
+  count="$(curl -sf -m 30 "$E2E_NTFY/$E2E_NTFY_TOPIC/json?poll=1" 2>/dev/null | python3 -c '
 import json, sys
-try:
-    evs = json.loads(sys.argv[1])
-except Exception:
-    evs = []
-n = sum(1 for e in evs
-        if "cc-continuity" in (e.get("message", "") + e.get("title", "")))
+n = 0
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if "cc-continuity" in (e.get("message", "") + e.get("title", "")):
+        n += 1
 print(n)
-EOF
-)"
+')"
   (( count >= 1 )) || fail "no cc-continuity events on topic $E2E_NTFY_TOPIC (got 0)"
   pass "ntfy: $count cc-continuity event(s) on $E2E_NTFY_TOPIC"
 }
