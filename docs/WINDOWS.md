@@ -100,8 +100,12 @@ On the tmux host the daemon lives in a detached session named
 appends one **self-heal line per daemon** to your shell rc:
 
 ```bash
-tmux has-session -t cc-d-watchdog 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog
+tmux has-session -t =cc-d-watchdog 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog
 ```
+
+The leading `=` forces an EXACT tmux target — a bare `cc-d-watchdog`
+prefix-matches the `cc-d-watchdog-digest` session, so a dead watchdog
+would look alive and the self-heal would never run.
 
 So the next shell you open repairs a dead daemon by itself — and if you
 want to repair it now:

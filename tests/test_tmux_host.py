@@ -9,6 +9,19 @@ state-file marker alone cannot see a user-created foreign session).
 from cc_continuity import hosting
 
 
+def _resolve_target(sessions, target):
+    """Model real tmux -t resolution: exact match, else the UNIQUE prefix
+    (a bare ``cc-d-watchdog`` matches the surviving ``cc-d-watchdog-
+    digest`` — the run #3 e2e 6a false-FAIL); ``=name`` is exact only."""
+    if target.startswith("="):
+        name = target[1:]
+        return name if name in sessions else None
+    if target in sessions:
+        return target
+    prefixed = [s for s in sessions if s.startswith(target)]
+    return prefixed[0] if len(prefixed) == 1 else None
+
+
 def TmuxRecorder():
     state = {"sessions": set(), "markers": set(), "commands": []}
 
@@ -16,10 +29,10 @@ def TmuxRecorder():
         c = " ".join(cmd)
         state["commands"].append(c)
         if "has-session" in c:
-            s = c.split()[-1]
+            m = _resolve_target(state["sessions"], c.split()[-1])
 
             class R:
-                returncode = 0 if s in state["sessions"] else 1
+                returncode = 0 if m else 1
                 stdout = ""
                 stderr = ""
 
@@ -30,12 +43,13 @@ def TmuxRecorder():
             if "CC_CONTINUITY_SUPERVISOR=1" in c:
                 state["markers"].add(s)
         elif "kill-session" in c:
-            s = c.split()[-1]
-            state["sessions"].discard(s)
-            state["markers"].discard(s)
+            m = _resolve_target(state["sessions"], c.split()[-1])
+            if m:
+                state["sessions"].discard(m)
+                state["markers"].discard(m)
         elif "show-environment" in c:
-            s = c.split("-t")[-1].split()[0]
-            marked = s in state["markers"]
+            m = _resolve_target(state["sessions"], c.split("-t")[-1].split()[0])
+            marked = m in state["markers"]
 
             class R:
                 returncode = 0 if marked else 1
@@ -105,3 +119,22 @@ def test_uninstall_drops_rc_line(tmp_path, monkeypatch):
          "cc-continuity daemon ensure cc-d-watchdog"]))
     host.uninstall("watchdog", tmp_path)
     assert "daemon ensure" not in bashrc.read_text()
+
+
+def test_install_upgrades_legacy_rc_line(tmp_path, monkeypatch):
+    """The one-time migration: install replaces the pre-fix bare-target
+    line in place (no duplicate, no stale form left behind)."""
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setenv("CC_CONTINUITY_HOME",
+                       str(tmp_path / ".claude-continuity"))
+    run, st = TmuxRecorder()
+    host = hosting.TmuxHost(runner=run)
+    from cc_continuity import hosting as h
+    bashrc = tmp_path / ".bashrc"
+    bashrc.write_text(h.rc_block_content(
+        ["tmux has-session -t cc-d-watchdog 2>/dev/null || "
+         "cc-continuity daemon ensure cc-d-watchdog"]))
+    host.install("watchdog", tmp_path)
+    rc = bashrc.read_text()
+    assert "tmux has-session -t =cc-d-watchdog" in rc
+    assert "tmux has-session -t cc-d-watchdog 2>/dev/null" not in rc

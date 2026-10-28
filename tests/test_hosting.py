@@ -137,3 +137,85 @@ def test_digest_cli_routes_to_selected_host(cc_home, tmp_path, monkeypatch):
                                  runner=_refusing_runner([]))
     assert rc == 0
     assert (cc_home / "runtime" / "daemon-watchdog-digest.json").is_file()
+
+
+# --- exact tmux targets (run #3 e2e 6a false-FAIL) -------------------------
+# Bare "cc-d-watchdog" prefix-matches the surviving "cc-d-watchdog-digest"
+# session; every daemon-session reference must use the exact "=<name>".
+
+
+class _FakeR:
+    def __init__(self, rc, out=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = ""
+
+
+def _with_state_file(tmp_path, monkeypatch):
+    """ensure() no-ops without a state file — point it at one we create."""
+    sp = tmp_path / "daemon-watchdog.json"
+    sp.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(hosting.daemon_supervisor, "state_path",
+                        lambda name, home: sp)
+    return sp
+
+
+def test_tmux_ensure_absent_exact_target(tmp_path, monkeypatch):
+    _with_state_file(tmp_path, monkeypatch)
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        return _FakeR(1)  # session absent
+    host = hosting.TmuxHost(runner=runner)
+    assert host.ensure("watchdog", tmp_path) == "cc-d-watchdog"
+    assert ["tmux", "has-session", "-t", "=cc-d-watchdog"] in calls
+    assert ["tmux", "new-session", "-d", "-s", "cc-d-watchdog",
+            "-e", "CC_CONTINUITY_SUPERVISOR=1", "-c", str(tmp_path),
+            "cc-continuity", "daemon", "run", "watchdog"] in calls
+
+
+def test_tmux_ensure_healthy_exact_target(tmp_path, monkeypatch):
+    _with_state_file(tmp_path, monkeypatch)
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        return _FakeR(0)  # alive AND marked -> healthy
+    host = hosting.TmuxHost(runner=runner)
+    host.ensure("watchdog", tmp_path)
+    assert ["tmux", "has-session", "-t", "=cc-d-watchdog"] in calls
+    assert ["tmux", "show-environment", "-t", "=cc-d-watchdog",
+            "CC_CONTINUITY_SUPERVISOR"] in calls
+    assert not any(c[1] == "new-session" for c in calls)
+
+
+def test_tmux_ensure_collision_exact_kill(tmp_path, monkeypatch):
+    _with_state_file(tmp_path, monkeypatch)
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        # name taken (has-session 0) but no supervisor marker -> kill it
+        return _FakeR(0 if cmd[1] == "has-session" else 1)
+    host = hosting.TmuxHost(runner=runner)
+    host.ensure("watchdog", tmp_path)
+    assert ["tmux", "kill-session", "-t", "=cc-d-watchdog"] in calls
+    assert any(c[1] == "new-session" for c in calls)
+
+
+def test_tmux_stop_exact_target(tmp_path):
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        return _FakeR(0)
+    host = hosting.TmuxHost(runner=runner)
+    assert host.stop("watchdog", tmp_path)
+    assert calls == [["tmux", "kill-session", "-t", "=cc-d-watchdog"]]
+
+
+def test_rc_daemon_line_exact_target():
+    assert hosting.rc_daemon_line("watchdog") == (
+        "tmux has-session -t =cc-d-watchdog 2>/dev/null || "
+        "cc-continuity daemon ensure cc-d-watchdog")

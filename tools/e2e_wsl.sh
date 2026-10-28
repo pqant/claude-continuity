@@ -200,14 +200,14 @@ watchdog_install() {
   cc-continuity watchdog digest install || fail "watchdog digest install failed"
   for n in watchdog watchdog-digest; do
     [[ -f "$STORE/runtime/daemon-$n.json" ]] || fail "state file missing for $n"
-    tmux has-session -t "cc-d-$n" 2>/dev/null || fail "session cc-d-$n not running"
+    tmux has-session -t "=cc-d-$n" 2>/dev/null || fail "session cc-d-$n not running"
   done
   # Full-line patterns (rc_daemon_line writes each line verbatim, ending
   # at the session name — the digest line's longer name keeps the two
   # patterns unambiguous without a trailing-space trick).
-  grep -q "tmux has-session -t cc-d-watchdog 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog" "$HOME/.bashrc" \
+  grep -q "tmux has-session -t =cc-d-watchdog 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog" "$HOME/.bashrc" \
     || fail "rc self-heal line for watchdog missing from ~/.bashrc"
-  grep -q "tmux has-session -t cc-d-watchdog-digest 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog-digest" "$HOME/.bashrc" \
+  grep -q "tmux has-session -t =cc-d-watchdog-digest 2>/dev/null || cc-continuity daemon ensure cc-d-watchdog-digest" "$HOME/.bashrc" \
     || fail "rc self-heal line for watchdog-digest missing from ~/.bashrc"
   pass "both daemons: state files + tmux sessions + rc self-heal lines"
 }
@@ -481,10 +481,13 @@ resilience() {
   # fresh supervisor records a new child in the state file.
   local pre new newer i
   pre="$(read_child_pid)"
-  tmux kill-session -t cc-d-watchdog 2>/dev/null || true
-  tmux has-session -t cc-d-watchdog 2>/dev/null && fail "session still alive after kill"
+  # =name = exact target; a bare name prefix-matches the surviving -digest
+  # session (run #3 false-FAIL). No error swallow: a missing session must
+  # surface as tmux's stderr + our fail.
+  tmux kill-session -t =cc-d-watchdog || fail "kill-session =cc-d-watchdog failed"
+  tmux has-session -t =cc-d-watchdog 2>/dev/null && fail "session still alive after kill"
   cc-continuity daemon ensure watchdog || fail "daemon ensure failed"
-  tmux has-session -t cc-d-watchdog 2>/dev/null \
+  tmux has-session -t =cc-d-watchdog 2>/dev/null \
     || fail "session cc-d-watchdog not recreated by daemon ensure"
   # The state file keeps the pre-kill pid until the fresh supervisor
   # records its child — wait for the change (a dead pid here would make
@@ -509,7 +512,7 @@ resilience() {
   done
   [[ -n "${newer:-}" && "$newer" != "$new" ]] \
     || fail "supervisor did not respawn the child within 60s (pid $new)"
-  tmux has-session -t cc-d-watchdog 2>/dev/null || fail "session gone after respawn"
+  tmux has-session -t =cc-d-watchdog 2>/dev/null || fail "session gone after respawn"
   pass "ensure recreated the session; supervisor respawned the child (pid $new -> $newer)"
 }
 
@@ -538,13 +541,13 @@ EOF
     phase "7b windows: sessions restored after restart"
     local restored=0
     for n in watchdog watchdog-digest; do
-      tmux has-session -t "cc-d-$n" 2>/dev/null && restored=$((restored + 1))
+      tmux has-session -t "=cc-d-$n" 2>/dev/null && restored=$((restored + 1))
     done
     if (( restored < 2 )); then
       echo "not all sessions restored by the rc self-heal/task — running daemon ensure"
       cc-continuity daemon ensure || fail "daemon ensure failed after restart"
       for n in watchdog watchdog-digest; do
-        tmux has-session -t "cc-d-$n" 2>/dev/null || fail "session cc-d-$n missing after ensure"
+        tmux has-session -t "=cc-d-$n" 2>/dev/null || fail "session cc-d-$n missing after ensure"
       done
     fi
     pass "daemon sessions restored after wsl --shutdown ($restored/2 pre-ensure)"

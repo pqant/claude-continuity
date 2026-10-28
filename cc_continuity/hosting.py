@@ -209,10 +209,13 @@ def rc_daemon_line(name: str) -> str:
     """The rc self-heal line for one daemon (spec §7.4).
 
     Both references use the SESSION name; ``daemon ensure`` normalizes
-    the leading ``cc-d-`` back to the daemon name.
+    the leading ``cc-d-`` back to the daemon name. The ``=`` forces an
+    EXACT tmux target — bare ``cc-d-watchdog`` prefix-matches the
+    ``cc-d-watchdog-digest`` session, so a dead watchdog would look alive
+    and the self-heal would never run (run #3 e2e 6a false-FAIL).
     """
     s = f"cc-d-{name}"
-    return (f"tmux has-session -t {s} 2>/dev/null || "
+    return (f"tmux has-session -t ={s} 2>/dev/null || "
             f"cc-continuity daemon ensure {s}")
 
 
@@ -287,12 +290,18 @@ class TmuxHost(Host):
         return self.runner(["tmux", *args], capture_output=True, timeout=15)
 
     def _has_session(self, session: str) -> bool:
-        return self._run("has-session", "-t", session).returncode == 0
+        # `=` = EXACT name. tmux resolves -t by exact match, then unique
+        # PREFIX — bare "cc-d-watchdog" silently matches the surviving
+        # "cc-d-watchdog-digest" (run #3 e2e 6a false-FAIL: a dead
+        # watchdog looked alive for as long as the digest was up).
+        return self._run("has-session", "-t",
+                         f"={session}").returncode == 0
 
     def _marked(self, session: str) -> bool:
         """LIVE marker check: a state-file marker cannot see a
         user-created foreign session that owns the name."""
-        proc = self._run("show-environment", "-t", session, self.MARKER)
+        proc = self._run("show-environment", "-t",
+                         f"={session}", self.MARKER)
         return proc.returncode == 0
 
     def ensure(self, name: str, home: Path) -> str:
@@ -303,7 +312,7 @@ class TmuxHost(Host):
         if self._has_session(session):
             if self._marked(session):
                 return session  # healthy — do nothing
-            self._run("kill-session", "-t", session)  # name collision
+            self._run("kill-session", "-t", f"={session}")  # name collision (exact: see _has_session)
         # -s (not -t: on real tmux new-session, -t is a GROUP name and
         # errors with a command); a racing duplicate creation fails
         # clean ("duplicate session") and never replaces an existing one
@@ -332,8 +341,10 @@ class TmuxHost(Host):
         return self._has_session(self.session(name))
 
     def stop(self, name: str, home: Path) -> bool:
+        # exact target: bare "cc-d-watchdog" would prefix-match (and kill)
+        # "cc-d-watchdog-digest" whenever the watchdog session is absent
         return self._run("kill-session",
-                         "-t", self.session(name)).returncode == 0
+                         "-t", f"={self.session(name)}").returncode == 0
 
     def status(self, name: str, home: Path) -> str:
         session = self.session(name)
@@ -350,14 +361,20 @@ class TmuxHost(Host):
         text = rc.read_text(encoding="utf-8") if rc.is_file() else ""
         lines = _rc_daemon_lines(text)
         line = rc_daemon_line(name)
+        # One-time migration (exact-target fix): rc files written before
+        # the fix carry the bare-target form of the same line — normalize
+        # it so add never duplicates it and remove drops it.
+        legacy = line.replace("=cc-d-", "cc-d-", 1)
+        lines = [line if l == legacy else l for l in lines]
         if add:
             if line not in lines:
                 lines.append(line)
         else:
             lines = [l for l in lines if l != line]
-            # a bare line outside the block (file predating the managed
-            # block) must also leave the rc file
-            text = "\n".join(l for l in text.split("\n") if l != line)
+        # a bare line outside the block (file predating the managed
+        # block) must also leave the rc file
+        text = "\n".join(
+            l for l in text.split("\n") if l not in (line, legacy))
         rc.parent.mkdir(parents=True, exist_ok=True)
         atomic.atomic_write_text(
             rc, managed.upsert_block(text, ZSHRC_BEGIN, ZSHRC_END,
