@@ -11,7 +11,7 @@
 #   2  real `cc-continuity install --window 262144` + doctor green
 #   3  configure: ntfy test topic + watchdog enabled (+ doctor test push)
 #   4  `watchdog install` + `watchdog digest install` (TmuxHost on WSL1)
-#   5  a shortened 5-session rotation chain (headless, unattended)
+#   5  a 3-session rotation chain (headless, unattended)
 #   6  resilience: killed session -> `daemon ensure` recreates it;
 #      killed child -> supervisor respawns (new pid in the state file)
 #   7  Windows side: E2E_WINDOWS=1 creates the ONLOGON task (spec §7.5)
@@ -226,15 +226,18 @@ input_box_up() {  # $1=pane text -> 0 when the idle input box is visible
 
 chain_task() {
   # Sizing for the thinking-OFF regime (measured live, qwen3.8-27b via the
-  # LAN relay, 64K window): the 8-part task grew one session from a ~30K
-  # baseline to 59% in a single 12.5-min turn (~0.97K context per part) —
-  # too little to cross the 62% auto-rotation threshold at all. Each
-  # rotated successor starts at ~33-35K (baseline + handoff) and needs
-  # ~9K more work to cross. 48 parts ~= 50-60K of work (later parts grow
-  # more: every "run the full suite" prints a bigger suite) -> 4 crossings
-  # -> a 5-6 session chain. If the model's static baseline differs, tune
-  # E2E_WINDOW and/or this task (assert: 005 exists, 001-004 ROTATED —
-  # extra sessions are OK).
+  # LAN relay, 64K window): one part costs ~0.97K context (the 8-part
+  # task grew a session from a ~30K baseline to 59% in one 12.5-min turn
+  # — too little to cross the 62% auto-rotation threshold). Each rotated
+  # successor starts at ~33-35K (baseline + handoff) and needs ~9K more
+  # work to cross -> ~9-10 parts per rotation. 24 working parts + the
+  # final README/commit part ~= 25-30K of work (later parts grow: every
+  # "run the full suite" prints a bigger suite) -> 2 crossings -> 001,
+  # 002 ROTATED, 003 settles (~45-60 min on qwen3.8-27b). Demo-simple
+  # by directive: every rotation exercises the same mechanism, so two
+  # rotations are the gate. If the model's static baseline differs, tune
+  # E2E_WINDOW and/or this task (assert: 003 exists, 001-002 ROTATED —
+  # extra sessions are OK, >=3 required).
   cat <<'EOF'
 Build a small CLI tool in this repo. Work autonomously; do not ask questions; complete the parts in order, as far as this session gets (if the session rotates before the last part, the next session continues from the handoff). Write all output (chat text, code, comments, commit message) in English only. Do not run git commit before the final part.
 Part 1: create wordcount.py — a Python CLI that takes a file path and prints its line, word and character counts (like wc -lwc). Add test_wordcount.py using only the standard library (unittest) with at least 4 tests. Run the tests until they pass.
@@ -261,35 +264,12 @@ Part 21: add --max-lines N, --max-words N and --max-chars N: exit code 3 when an
 Part 22: support the path "-" to read from stdin. Add at least 2 tests, run the full suite.
 Part 23: add --version: print "wordcount 1.0.0" and exit 0. Add at least 2 tests, run the full suite.
 Part 24: rebuild the --help text: group the flags under Counting / Output / Gates, one line per flag, plus an Examples section. Add at least 1 test that --help exits 0 and lists all three group headers, then run the full suite.
-Part 25: add --summary: one human line, e.g. "42 lines, 510 words, 3021 chars (avg 71.9 chars/line)". Add at least 2 tests, run the full suite.
-Part 26: add --compare FILE2: count both files and print, per metric, the delta (FILE2 minus FILE1) with an explicit + or - sign; it must work in plain, --json and --csv. Add at least 3 tests, run the full suite.
-Part 27: add --baseline FILE: store this run's counts as a JSON snapshot in FILE; if FILE already exists, print the delta against the stored snapshot and then update the file. Add at least 3 tests, run the full suite.
-Part 28: add --count-matches: with --pattern, count total regex matches instead of matching lines; without --pattern it is exit code 2. Add at least 2 tests, run the full suite.
-Part 29: add --min-word-length N: for --top, ignore words shorter than N characters. Add at least 2 tests, run the full suite.
-Part 30: add --stopwords FILE: for --top, ignore the words listed one per line in FILE. Add at least 2 tests, run the full suite.
-Part 31: add --sort-by count|alpha: for --top, order by frequency (ties alphabetical) or alphabetically. Add at least 2 tests, run the full suite.
-Part 32: add --histogram: print line-length buckets (0-9, 10-19, 20-29, ..., 100+) with counts, below the main counts in plain mode. Add at least 2 tests, run the full suite.
-Part 33: add --lines-only, --words-only and --chars-only: print a single number and nothing else; combining two of them is exit code 2. Add at least 3 tests, run the full suite.
-Part 34: add --no-total: omit the TOTAL row in --files mode. Add at least 2 tests, run the full suite.
-Part 35: add --label L: in --files mode, use L as the row label instead of each file path. Add at least 2 tests, run the full suite.
-Part 36: extend the --errors format to path:line:code, where code names the decode error kind (such as invalid start byte, invalid continuation byte, truncated data, code point out of range). Add at least 2 tests, run the full suite.
-Part 37: add --encoding ENC: open the input with the given encoding (default utf-8). Add at least 2 tests, run the full suite.
-Part 38: add --crlf: treat \r\n as one newline and exclude \r from the character count (the default counts \r). Add at least 2 tests, run the full suite.
-Part 39: add --tab-as N: count each tab as N spaces in the character count only (default 0 = a tab counts as one character). Add at least 2 tests, run the full suite.
-Part 40: add --quiet: print nothing to stdout (the exit code still reflects the --max-* gates). Add at least 2 tests, run the full suite.
-Part 41: make --compare work with --json: emit a JSON object holding both file objects and a diff object. Add at least 2 tests, run the full suite.
-Part 42: make --files work with --top N: a per-file top-word list plus a merged TOTAL top list. Add at least 2 tests, run the full suite.
-Part 43: polish every usage error (bad flag value, conflicting flags, missing file, bad --range, bad --csv-delimiter, unknown flag): print "wordcount: <reason>" to stderr and exit 2. Add at least 3 tests covering different cases, asserting both the message prefix and the exit code, then run the full suite.
-Part 44: add --selftest: run built-in canned strings through the core flags (--json, --csv, --top, --range, --pattern) and print "selftest OK" on success. Add at least 2 tests, run the full suite.
-Part 45: add a performance test: generate a 200,000-line file inside the test, assert that plain mode and --json each finish in under 10 seconds, and delete the file afterwards. Run the full suite.
-Part 46: add pyproject.toml with [project] metadata (name, version, description, requires-python) and a [project.scripts] entry wordcount = "wordcount:main" (add a main() entry point if the script does not have one yet); add a test that tomllib parses the file and the fields exist. Do not pip install it. Run the full suite.
-Part 47: add --list-flags: print every flag one per line as "flag — one-line description". Add at least 2 tests, run the full suite.
-Part 48: rewrite README.md: the complete flag reference grouped like --help, one example per group, the exit-code table, and a CI-gate example. Run the full suite one final time, then git add -A and make a single git commit with a clear message listing the major features.
+Part 25: rewrite README.md: the complete flag reference grouped like --help, one example per group, the exit-code table, and a CI-gate example. Run the full suite one final time, then git add -A and make a single git commit with a clear message listing the major features.
 EOF
 }
 
 rotation_chain() {
-  phase "5 rotation chain (5 sessions, headless)"
+  phase "5 rotation chain (3 sessions, headless)"
   # E2E tuning of the REAL config (a disposable VM): a small window so
   # AUTO rotation fires on the real model in bounded time, unattended so
   # the headless pane never waits on approval (the product's real
@@ -384,7 +364,7 @@ EOF
   tmux paste-buffer -b e2etask -p -d -t "$TMUX_S"
   tmux send-keys -t "$TMUX_S" Enter
   echo "task sent — the chain runs headless (attach: tmux attach -t $TMUX_S)"
-  # Wait: 005 exists AND the latest session is settled (ROTATED is
+  # Wait: 003 exists AND the latest session is settled (ROTATED is
   # terminal per session; the final one settles idle after its turn).
   #
   # Stall recovery (the scripted operator): the product assumes a human
@@ -406,17 +386,17 @@ EOF
     now="$(date +%s)"
     (( now - start > CHAIN_TIMEOUT )) && {
       tmux capture-pane -t "$TMUX_S" -p 2>/dev/null | tail -25 || true
-      fail "chain did not reach a settled 5th session in ${CHAIN_TIMEOUT}s"
+      fail "chain did not reach a settled 3rd session in ${CHAIN_TIMEOUT}s"
     }
     latest="$(latest_session)"
     # session dirs are zero-padded (paths.session_dir: {nnn:03d})
-    if (( latest >= 5 )) && { proj_state "$(printf '%03d' "$latest")" | grep -q ROTATED || turn_settled "$(printf '%03d' "$latest")"; }; then
+    if (( latest >= 3 )) && { proj_state "$(printf '%03d' "$latest")" | grep -q ROTATED || turn_settled "$(printf '%03d' "$latest")"; }; then
       # no newer session may appear while we check (settled == stable)
       sleep 30
       [[ "$(latest_session)" == "$latest" ]] && break
     fi
     # --- stall detection -----------------------------------------------------
-    # Covers the final session too: a dead turn on 005 (or its lost
+    # Covers the final session too: a dead turn on 003 (or its lost
     # bootstrap) would otherwise wait out the whole CHAIN_TIMEOUT, since
     # the settled check above never passes while turn_active is stuck.
     if (( latest >= 1 )); then
@@ -467,12 +447,12 @@ EOF
     sleep 20
   done
   local n
-  for n in 1 2 3 4; do
+  for n in 1 2; do
     [[ "$(proj_state "$(printf '%03d' "$n")")" == "ROTATED" ]] \
       || fail "session 00$n is not ROTATED (state: $(proj_state "$(printf '%03d' "$n")"))"
   done
   echo "chain settled at session $(printf '%03d' "$latest") (attach: tmux attach -t $TMUX_S)"
-  pass "rotation chain: 001-004 ROTATED, 00$latest settled"
+  pass "rotation chain: 001-002 ROTATED, 00$latest settled"
 }
 
 resilience() {
