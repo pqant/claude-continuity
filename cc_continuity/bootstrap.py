@@ -18,8 +18,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import (atomic, checkpoint, ledger, naming, notify, paths,
-               project, state, thresholds, validate)
+from . import (atomic, checkpoint, ledger, naming, notify, paths, project,
+               state, statusline, thresholds, validate)
 
 
 def _now() -> str:
@@ -293,3 +293,86 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
             "new_name": name_new, "new_nnn": nnn_new,
             "validation": status, "details": details,
             "bootstrap_text": text}
+
+
+#: Index stability (user directive 2026-11-03): a BOOTSTRAPPING successor
+#: younger than this may still be mid-rotation (the rotator drives it on a
+#: RETRY_POLL_S cadence) — never re-attached, so a legit in-flight successor
+#: is never stolen. Restart storms arrive minutes later (human/pane relaunch),
+#: far past this window.
+REUSE_MIN_AGE_S = 60.0
+
+
+def try_reuse_stalled(key: str, *, new_session_id: str, cfg: dict,
+                      source: str = "startup") -> dict | None:
+    """Re-attach a fresh startup to a STALLED successor — same index.
+
+    The 2026-11-03 connector incident: the rotator's RESUME Enter was
+    swallowed by a busy CC, the successor sat BOOTSTRAPPING with a dead sid,
+    and every pane restart minted a new empty record (152/153/154 behind a
+    stuck 151). User directive: that index creep must never happen again.
+
+    A startup therefore first tries this (caller holds the project lock)
+    before registering a new record: the LATEST record must be BOOTSTRAPPING,
+    ``successor`` unset, older than ``REUSE_MIN_AGE_S``, and its sid must be
+    dead (statusline metric absent/stale — never reported / long silent). A
+    live successor (fresh metric) is left alone; a plain register follows.
+
+    On success the record keeps its nnn/name; only the sid changes (state +
+    project.json), one ``session_start`` ledger entry is appended, and the
+    predecessor's C.4 bootstrap text is rebuilt (idempotent re-delivery of
+    the handoff). Returns a claim-shaped dict with ``reused=True``, or None.
+    """
+    pfile = paths.project_dir(key) / "project.json"
+    try:
+        pref = json.loads(pfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    sessions = pref.get("sessions") or []
+    if not sessions:
+        return None
+    last = sessions[-1]
+    nnn = int(last["nnn"])
+    rec = state.load_state(key, nnn)
+    if (rec is None or rec["state"] != "BOOTSTRAPPING"
+            or rec.get("successor")
+            or rec.get("session_id") == new_session_id):
+        return None
+    try:
+        created = datetime.fromisoformat(rec["created"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (datetime.now(timezone.utc) - created).total_seconds() < REUSE_MIN_AGE_S:
+        return None
+    if not statusline.is_stale(statusline.read_metric(rec["session_id"])):
+        return None
+    pred_name = rec.get("predecessor")
+    pred = next((s for s in sessions if s.get("name") == pred_name), None)
+    if not pred_name or pred is None:
+        return None
+    old_nnn = int(pred["nnn"])
+    # Re-attach: same nnn/name, new sid everywhere.
+    state.update_fields_unlocked(key, nnn, session_id=new_session_id)
+    last["session_id"] = new_session_id
+    atomic.atomic_write_json(pfile, pref)
+    cp_dir = paths.session_dir(key, old_nnn) / "checkpoint"
+    root = Path(pref["root"])
+    status, details = validate.validate_checkpoint(cp_dir, cfg, root=root)
+    handoff_file = cp_dir / "handoff.md"
+    try:
+        handoff = handoff_file.read_text(encoding="utf-8")
+    except OSError:
+        handoff = ""
+    text = thresholds.c4_text(
+        new_name=rec["name"], old_name=pred_name, status=status,
+        details=details, handoff=handoff, handoff_path=str(handoff_file),
+        inline_max=int(cfg.get("inline_handoff_max_chars", 12000)),
+        new_work=_new_work_since_handoff(cp_dir, key, old_nnn))
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "session_start", "source": source,
+                   "claimed": pred_name, "validation": status,
+                   "reused": True})
+    return {"old_name": pred_name, "old_nnn": old_nnn,
+            "new_name": rec["name"], "new_nnn": nnn,
+            "validation": status, "details": details,
+            "bootstrap_text": text, "reused": True}

@@ -107,8 +107,15 @@ def handle(ctx: HookContext) -> dict | None:
                                           cfg=ctx.cfg,
                                           states=frozenset({"ROTATING"}),
                                           source="startup")
+                if res is None:
+                    # Index stability (2026-11-03): the pane-restart path —
+                    # a stalled successor is re-attached, never index-bumped.
+                    res = bootstrap.try_reuse_stalled(
+                        key, new_session_id=session_id, cfg=ctx.cfg,
+                        source="startup")
             _step("startup", "claim-result", t0,
-                  claim="yes" if res is not None else "none")
+                  claim="none" if res is None else
+                  ("reuse" if res.get("reused") else "yes"))
             if res is not None:
                 bootstrap.write_started(session_id)
                 notify_claimed(ctx.cfg, key, res)
@@ -151,8 +158,15 @@ def _clear(ctx: HookContext) -> dict | None:
             _step("clear", "lock-acquired", t0)
             res = bootstrap.try_claim(key, new_session_id=session_id,
                                       cfg=ctx.cfg)
+            if res is None and ctx.session is None:
+                # Index stability (2026-11-03): stalled successor > new
+                # record — re-attach instead of minting the next number.
+                res = bootstrap.try_reuse_stalled(
+                    key, new_session_id=session_id, cfg=ctx.cfg,
+                    source="clear")
         _step("clear", "claim-result", t0,
-              claim="yes" if res is not None else "none")
+              claim="none" if res is None else
+              ("reuse" if res.get("reused") else "yes"))
         if res is not None:
             bootstrap.write_started(session_id)
             notify_claimed(ctx.cfg, key, res)

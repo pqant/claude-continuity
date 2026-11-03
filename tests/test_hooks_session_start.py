@@ -702,3 +702,79 @@ def test_startup_plain_logs_steps(cc_home, capsys, tmp_path):
     assert any("step=entry" in l for l in lines)
     assert any("step=claim-result claim=none" in l for l in lines)
     assert any("step=exit" in l for l in lines)
+
+
+# --- index stability: stalled successor reused, never index-bumped -----------
+# user directive 2026-11-03: a pane restart after a swallowed RESUME must
+# not mint new indexes (connector-151/152/153/154 incident: 151 stuck at
+# BOOTSTRAPPING, restarts wrote 152/153/154 as empty ghosts).
+
+
+def _stuck_successor(repo, key, nnn):
+    """Claim the rotation (successor 002 BOOTSTRAPPING), then its CC dies
+    before submitting the RESUME prompt (Enter swallowed while CC was busy)."""
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-stuck",
+                                            source="clear")) == 0
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"
+    assert rec2["session_id"] == "sid-stuck"
+    return rec2
+
+
+def test_restart_reuses_stalled_successor_no_index_bump(cc_home, capsys,
+                                                        tmp_path, monkeypatch):
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)  # stuck CC never reported again
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-new",
+                                            source="startup")) == 0
+    out = _stdout_json(capsys)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("CONTINUITY BOOTSTRAP: you are spike-repo-002, "
+                          "continuing spike-repo-001. VALIDATION: OK")
+    pref = _project_record(repo)
+    assert pref["counter"] == 2               # NO index minted
+    assert len(pref["sessions"]) == 2
+    assert pref["sessions"][-1]["session_id"] == "sid-new"
+    rec2 = state.load_state(key, 2)
+    assert rec2["session_id"] == "sid-new"    # same index, sid re-attached
+    assert (paths.runtime_dir() / "sid-new.started").is_file()
+    events = (cc_home / "logs" / "events.log").read_text()
+    assert "step=claim-result claim=reuse" in events
+
+
+def test_restart_registers_normally_when_successor_alive(cc_home, capsys,
+                                                         tmp_path, monkeypatch):
+    # An unrelated plain startup while the successor's CC is ALIVE (fresh
+    # metric) must never steal it: today's register behaviour stands.
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=False)  # successor still reporting
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-other",
+                                            source="startup")) == 0
+    assert _project_record(repo)["counter"] == 3
+    assert state.load_state(key, 2)["session_id"] == "sid-stuck"  # untouched
+
+
+def test_restart_does_not_reuse_fresh_bootstrap(cc_home, capsys, tmp_path):
+    # REUSE_MIN_AGE_S keeps its production value: a just-spawned successor
+    # may still be mid-rotation (rotator driving it) — never steal it.
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-too-young",
+                                            source="startup")) == 0
+    assert _project_record(repo)["counter"] == 3
