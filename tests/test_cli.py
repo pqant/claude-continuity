@@ -14,7 +14,8 @@ import pytest
 
 from cc_continuity import __version__, cli, ledger, paths, rotator, state
 
-from hookutil import SID, make_repo, payload, register_session, run_hook
+from hookutil import (SID, make_repo, payload, register_session, run_hook,
+                      set_metric)
 
 
 def test_version_flag_prints_version(capsys):
@@ -342,6 +343,113 @@ def test_cli_off_on_toggle(cc_home, tmp_path):
     assert r.returncode == 0, r.stderr
     assert "off=false" in r.stdout
     assert _state.load_state(key, nnn)["off"] is False
+
+
+# ------------------------------------------------------------- repair cmds
+
+
+def _repair_fixture(tmp_path):
+    """Connector-style junk ledger: 151 BOOTSTRAPPING (dead sid), 152/153
+    ACTIVE ghosts (registered but never a conversation), 154 ACTIVE live
+    (fresh metric). Returns (repo, key)."""
+    repo = make_repo(tmp_path)
+    register_session(repo)  # nnn 001, irrelevant background record
+    for nnn, st in ((151, "BOOTSTRAPPING"), (152, "ACTIVE"),
+                    (153, "ACTIVE"), (154, "ACTIVE")):
+        state.create_session_state(key := _cli_project_key(repo),
+                                   f"spike-repo-{nnn}", nnn, f"sid-{nnn}",
+                                   initial_state=st)
+    set_metric(0.3, session_id="sid-154")  # fresh metric: 154 is live
+    return repo, key
+
+
+def _cli_project_key(repo):
+    from cc_continuity import project as _project
+    return _project.project_key_for_root(_project.resolve_root(repo))
+
+
+def test_repair_sessions_ghost_and_close(cc_home, tmp_path, capsys):
+    """Ghost marks off never-conversed records; close terminalizes the dead
+    BOOTSTRAPPING record; the live record is left untouched (user directive
+    2026-11-03: repair must never break the live structure)."""
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", key,
+                   "--ghost", "152,153", "--close", "151"])
+    assert rc == 0, capsys.readouterr().err
+    for nnn in (152, 153):
+        rec = state.load_state(key, nnn)
+        assert rec["off"] is True and rec["state"] == "ACTIVE"
+        assert any("ghost-off" in json.dumps(e)
+                   for e in ledger.read(paths.session_dir(key, nnn)))
+    rec151 = state.load_state(key, 151)
+    assert rec151["state"] == "ROTATED" and rec151["successor"] is None
+    assert any("manual_close" in json.dumps(e)
+               for e in ledger.read(paths.session_dir(key, 151)))
+    rec154 = state.load_state(key, 154)
+    assert rec154["state"] == "ACTIVE" and rec154["off"] is False
+
+
+def test_repair_close_refuses_live_metric(cc_home, tmp_path, capsys):
+    """A record with a fresh statusline metric is live — never closed."""
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", key, "--close", "154"])
+    assert rc == 1
+    assert "live" in capsys.readouterr().err.lower()
+    assert state.load_state(key, 154)["state"] == "ACTIVE"
+
+
+def test_repair_ghost_refuses_conversed(cc_home, tmp_path, capsys):
+    """A record whose ledger holds a user_prompt had a conversation —
+    ghost-off is refused (close is the admin path for those)."""
+    repo, key = _repair_fixture(tmp_path)
+    ledger.append(paths.session_dir(key, 152),
+                  {"type": "user_prompt", "text": "real work"})
+    rc = cli.main(["repair", "sessions", "--project", key, "--ghost", "152"])
+    assert rc == 1
+    assert "conversation" in capsys.readouterr().err.lower()
+    assert state.load_state(key, 152)["off"] is False
+
+
+def test_repair_ghost_refuses_live_metric(cc_home, tmp_path, capsys):
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", key, "--ghost", "154"])
+    assert rc == 1
+    assert "live" in capsys.readouterr().err.lower()
+    assert state.load_state(key, 154)["off"] is False
+
+
+def test_repair_close_idempotent_terminal(cc_home, tmp_path, capsys):
+    """Closing an already-ROTATED record is a no-op success."""
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", key, "--close", "151"])
+    assert rc == 0
+    assert cli.main(["repair", "sessions", "--project", key,
+                     "--close", "151"]) == 0
+    assert state.load_state(key, 151)["state"] == "ROTATED"
+
+
+def test_repair_unknown_project_exits_1(cc_home, tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", "nope-00000000",
+                   "--close", "1"])
+    assert rc == 1
+    assert "nope-00000000" in capsys.readouterr().err
+
+
+def test_repair_unknown_record_exits_1(cc_home, tmp_path, capsys):
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", key, "--close", "777"])
+    assert rc == 1
+    assert state.StateNotFoundError
+
+
+def test_repair_accepts_repo_path(cc_home, tmp_path, capsys):
+    """--project also accepts a repo path, resolved like every other cmd."""
+    repo, key = _repair_fixture(tmp_path)
+    rc = cli.main(["repair", "sessions", "--project", str(repo),
+                   "--close", "151"])
+    assert rc == 0
+    assert state.load_state(key, 151)["state"] == "ROTATED"
 
 
 def test_post_tool_use_noop_when_session_off(cc_home, capsys, tmp_path):

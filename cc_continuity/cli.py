@@ -83,6 +83,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("on",
                    help="re-enable cc-continuity for the current session")
 
+    p_rep = sub.add_parser("repair",
+                           help="admin repair of stuck/ghost ledger records")
+    rep_sub = p_rep.add_subparsers(dest="repair_command", metavar="<target>")
+    p_rep_s = rep_sub.add_parser(
+        "sessions", help="close stuck records / mark ghosts off (admin)")
+    p_rep_s.add_argument("--project", required=True, dest="project_arg",
+                         help="project key (dir under ~/.claude-continuity/"
+                              "projects) or repo path")
+    p_rep_s.add_argument("--ghost", default="",
+                         help="comma-separated nnn list: mark records that "
+                              "never had a conversation off")
+    p_rep_s.add_argument("--close", default="",
+                         help="comma-separated nnn list: force-close "
+                              "non-terminal records whose process is gone")
+    p_rep_s.add_argument("--reason", default="admin repair",
+                         help="ledger reason recorded on closed records")
+
     p_rot = sub.add_parser("rotate", help="rotator (PRD §11)")
     p_rot.add_argument("--session", required=True,
                        help="Claude Code session id being rotated")
@@ -560,6 +577,96 @@ def cmd_on(args: argparse.Namespace) -> int:
     return _toggle_off(args, False)
 
 
+def _repair_resolve_key(arg: str) -> str | None:
+    """Accept a project key (dir name under projects/) or a repo path."""
+    if (paths.project_dir(arg) / "project.json").is_file():
+        return arg
+    p = Path(arg).expanduser()
+    if p.is_dir():
+        key = project.project_key_for_root(project.resolve_root(p))
+        if (paths.project_dir(key) / "project.json").is_file():
+            return key
+    return None
+
+
+def _repair_nnns(spec: str) -> list[int]:
+    return [int(t) for t in spec.split(",") if t.strip()]
+
+
+def _repair_live(key: str, rec: dict) -> bool:
+    """True when the record's session id still reports a fresh metric."""
+    sid = rec.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return False
+    return not statusline.is_stale(statusline.read_metric(sid))
+
+
+def _repair_ghost(key: str, nnn: int) -> int:
+    rec = state.load_state(key, nnn)
+    if rec["state"] == "ROTATED":
+        print(f"repair: {rec['name']} already terminal, nothing to do")
+        return 0
+    if _repair_live(key, rec):
+        print(f"repair: refuse ghost {rec['name']}: metric is fresh (live)",
+              file=sys.stderr)
+        return 1
+    had_conversation = any(e.get("type") == "user_prompt"
+                           for e in ledger.read(paths.session_dir(key, nnn)))
+    if had_conversation:
+        print(f"repair: refuse ghost {rec['name']}: ledger holds a "
+              "conversation (use --close instead)", file=sys.stderr)
+        return 1
+    state.update_fields(key, nnn, off=True)
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "state",
+                   "fields": {"repair": "ghost-off"}})
+    print(f"repair: {rec['name']} ghost-off (never had a conversation)")
+    return 0
+
+
+def _repair_close(key: str, nnn: int, reason: str) -> int:
+    rec = state.load_state(key, nnn)
+    if _repair_live(key, rec):
+        print(f"repair: refuse close {rec['name']}: metric is fresh (live)",
+              file=sys.stderr)
+        return 1
+    before = rec["state"]
+    state.close_dead(key, nnn, reason)
+    if before == "ROTATED":
+        print(f"repair: {rec['name']} already terminal, nothing to do")
+    else:
+        print(f"repair: {rec['name']} closed {before} -> ROTATED "
+              f"({reason})")
+    return 0
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Admin repair for junk ledger records (user directive 2026-11-03:
+    cleanup only through sanctioned tooling, never hand-edits)."""
+    if args.repair_command != "sessions":
+        print("usage: cc-continuity repair sessions ...", file=sys.stderr)
+        return 2
+    key = _repair_resolve_key(args.project_arg)
+    if key is None:
+        print(f"repair: unknown project {args.project_arg!r} "
+              "(no registered ledger)", file=sys.stderr)
+        return 1
+    rc = 0
+    for nnn in _repair_nnns(args.ghost):
+        try:
+            rc |= _repair_ghost(key, nnn)
+        except state.StateNotFoundError:
+            print(f"repair: no record {nnn:03d} for {key}", file=sys.stderr)
+            rc = 1
+    for nnn in _repair_nnns(args.close):
+        try:
+            rc |= _repair_close(key, nnn, args.reason)
+        except state.StateNotFoundError:
+            print(f"repair: no record {nnn:03d} for {key}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def cmd_rotate(args: argparse.Namespace) -> int:
     """Rotator entry (PRD §11/§16) — spawned detached by the Stop hook."""
     from . import rotator  # local import: rotator imports hooks.common
@@ -996,6 +1103,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_off(args)
     if args.command == "on":
         return cmd_on(args)
+    if args.command == "repair":
+        return cmd_repair(args)
     if args.command == "rotate":
         return cmd_rotate(args)
     if args.command == "launch":
