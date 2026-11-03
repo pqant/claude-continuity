@@ -536,8 +536,8 @@ def test_run_defer_tolerates_bootstrap_rotated(fake_tmux, cc_home, tmp_path,
 def test_run_retry_does_not_redrive_when_bootstrap_rotated(
         fake_tmux, cc_home, tmp_path, monkeypatch):
     # Attempt 1 sends the continuation (the successor's SessionStart claims
-    # -> ROTATED) but _verify_resume misses it, so the retry loop re-enters.
-    # Attempt 2 must detect ROTATED and stop, NOT re-drive the pane.
+    # -> ROTATED) but _verify_resume misses it, so escalation re-enters.
+    # The first tick must detect ROTATED and stop, NOT re-drive the pane.
     d = _rotating(cc_home, tmp_path)
     key, nnn = d["key"], d["nnn"]
     calls = {"n": 0}
@@ -549,7 +549,10 @@ def test_run_retry_does_not_redrive_when_bootstrap_rotated(
         return True
     monkeypatch.setattr(rotator, "_clear_pane", clear_once_then_rotated)
     monkeypatch.setattr(rotator, "_verify_resume",
-                        lambda *a, **kw: False)  # force the retry
+                        lambda *a, **kw: False)  # force the escalation
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
+    monkeypatch.setattr(rotator, "RETRY_POLL_S", 0.05)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
 
     rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
                      rotation_id=d["rid"], cfg=d["cfg"])
@@ -603,16 +606,17 @@ def test_run_exits_on_rotation_id_mismatch(cc_home, tmp_path):
 # --- run(): failure path (PRD §11.9, §16, §18) ---------------------------------
 
 
-def test_run_failure_retries_once_notifies_and_stays_claimable(
+def test_run_deadline_notifies_and_stays_claimable(
         fake_tmux, cc_home, tmp_path, monkeypatch):
     # Dead pane: the fake tmux records keystrokes but no hook ever fires,
-    # so neither SessionStart nor the RESUME prompt ever lands.
+    # so neither SessionStart nor the RESUME prompt ever lands. The retry-
+    # until-RESUME deadline gives up LOUD (notify + push) and stays
+    # claimable. /clear is sent exactly ONCE (the old second attempt — which
+    # blind-fired the whole sequence again — is gone).
     d = _rotating(cc_home, tmp_path)
     repo, key, nnn, rid, cfg = (d["repo"], d["key"], d["nnn"], d["rid"],
                                 dict(d["cfg"]))
-    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    _shrink_deadline(monkeypatch)
     notify_file = tmp_path / "notify.log"
     notify_sh = tmp_path / "notify.sh"
     notify_sh.write_text(f"#!/bin/sh\necho \"$1 $2\" >> {notify_file}\n")
@@ -625,10 +629,9 @@ def test_run_failure_retries_once_notifies_and_stays_claimable(
     assert state.load_state(key, nnn)["state"] == "CHECKPOINT_VERIFIED"
     entries = ledger.read(paths.session_dir(key, nnn))
     assert entries[-1] == {**entries[-1], "type": "rotation_failed"}
-    calls = _calls(fake_tmux)
-    clears = [c for c in calls if c == ["send-keys", "-t", "%9",
-                                         "-l", "/clear"]]
-    assert len(clears) == 2  # one retry of steps 3–9, then give up
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    assert joined.count("send-keys -t %9 -l /clear") == 1  # never re-cleared
+    assert _rename_calls(fake_tmux) >= 1
     assert notify_file.read_text().strip() == "spike-repo ROTATION_FAILED"
     log_text = (paths.logs_dir() / "events.log").read_text()
     assert "ROTATION_FAILED" in log_text
@@ -638,9 +641,7 @@ def test_run_failure_retries_once_notifies_and_stays_claimable(
 def test_run_failure_without_notify_command_does_not_raise(
         fake_tmux, cc_home, tmp_path, monkeypatch):
     d = _rotating(cc_home, tmp_path)
-    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    _shrink_deadline(monkeypatch)
     rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
                      pane="%9", rotation_id=d["rid"], cfg=d["cfg"])
     assert rc == 1
@@ -690,9 +691,7 @@ def test_run_final_failure_pushes_row8_once(fake_tmux, cc_home, tmp_path,
     repo, key, nnn, rid = d["repo"], d["key"], d["nnn"], d["rid"]
     cfg = dict(d["cfg"], notify_enabled=True,
                notify_endpoint="https://ntfy.sh/example-topic")
-    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
-    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    _shrink_deadline(monkeypatch)
     sent = []
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
@@ -702,10 +701,332 @@ def test_run_final_failure_pushes_row8_once(fake_tmux, cc_home, tmp_path,
     assert rc == 1
     rows8 = [(p, b) for (tt, p, b) in sent
              if tt == "✗ cc-continuity: rotation failed"]
-    assert len(rows8) == 1  # both failed attempts -> still ONE push (dedup)
+    assert len(rows8) == 1  # escalation ticks -> still ONE push (dedup)
     prio, body = rows8[0]
     assert prio == "urgent"
-    assert "detail=no RESUME in successor ledger after 2 attempts" in body
+    assert "detail=no RESUME in successor ledger within 3s" in body
+
+
+# --- rotation resume guarantee (spec 2026-11-03) -------------------------------
+#
+# Live bug (connector-149, 2026-11-03): CC mid-command/hook-pending still
+# ACCUMULATES printable keystrokes but SILENTLY SWALLOWS Enter — the rotator's
+# blind-fire sequence corrupted: the attempt-2 blind re-typed /rename + the
+# swallowed Enter pasted the RESUME prompt onto the rename command and CC
+# "renamed" the session to the garbage string. The fix: retry-until-RESUME
+# with ack-driven escalation (bare Enter / re-paste / title-guarded rename),
+# never a blind fire.
+
+
+def _resume_ledger(key, nnn):
+    """Simulate the successor's ledger receiving the RESUME prompt (the
+    UserPromptSubmit hook would append this in the real world)."""
+    ledger.append(paths.session_dir(key, 2),
+                  {"type": "user_prompt", "agent_id": None,
+                   "text": f"CONTINUITY RESUME cp-{nnn:03d}: read /x "
+                           "completely, apply the VALIDATION result, then "
+                           "continue from Next Atomic Action."})
+
+
+def _fake_successor(monkeypatch, key):
+    """Successor record exists (claim already ran) without running hooks —
+    escalation ticks decide against a readable successor ledger."""
+    monkeypatch.setattr(
+        rotator, "_find_successor_rec",
+        lambda k, old: {"nnn": 2, "name": "spike-repo-002",
+                        "session_id": _NEW_SID} if k == key else None)
+
+
+def _shrink_deadline(monkeypatch, deadline=3.0):
+    # deadline is the TOTAL drive budget (attempt 1 + escalation), so it
+    # must stay above attempt 1's own shrunk waits.
+    monkeypatch.setattr(rotator, "RESUME_DEADLINE_S", deadline)
+    monkeypatch.setattr(rotator, "RETRY_POLL_S", 0.05)
+    monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.15)
+    monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.15)
+    monkeypatch.setattr(rotator, "RENAME_ACK_WAIT_S", 0.1)
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+
+
+def _enter_calls(log):
+    """Count bare-Enter send-keys calls (exactly send-keys -t <pane> Enter).
+
+    Empty argv lists occur when the log is read WHILE the fake tmux is
+    mid-write ("---" appended, b64 line not yet) — ignore those partials."""
+    return sum(1 for c in _calls(log)
+               if len(c) == 4 and c[0] == "send-keys" and c[3] == "Enter")
+
+
+def _paste_calls(log):
+    return sum(1 for c in _calls(log) if c and c[0] == "paste-buffer")
+
+
+def _rename_calls(log):
+    return sum(1 for c in _calls(log)
+               if len(c) >= 5 and c[0] == "send-keys" and c[3] == "-l"
+               and c[4].startswith("/rename"))
+
+
+# --- unit: helper predicates ----------------------------------------------------
+
+
+def test_resume_present_single_ledger_scan(cc_home, monkeypatch):
+    monkeypatch.setattr(
+        rotator, "_find_successor_rec",
+        lambda k, old: {"nnn": 2, "name": "spike-repo-002",
+                        "session_id": _NEW_SID})
+    ledger.append(paths.session_dir("k", 2),
+                  {"type": "user_prompt", "text": "unrelated"})
+    assert rotator._resume_present("k", 1, "cp-001", "spike-repo-001") is False
+    ledger.append(paths.session_dir("k", 2),
+                  {"type": "user_prompt",
+                   "text": "CONTINUITY RESUME cp-001: read /x ..."})
+    assert rotator._resume_present("k", 1, "cp-001", "spike-repo-001") is True
+    assert rotator._resume_present("k", 1, "cp-002", "spike-repo-001") is False
+
+
+def test_resume_present_no_successor_is_false(cc_home, monkeypatch):
+    monkeypatch.setattr(rotator, "_find_successor_rec", lambda k, old: None)
+    assert rotator._resume_present("k", 1, "cp-001", "spike-repo-001") is False
+
+
+def test_title_missing_reads_pane_not_the_input_box():
+    # old name in the status line -> rename needed
+    cap = lambda p: f"⏺ hi\n{_FRAME}\n  sess spike-repo-001 │\n"
+    assert rotator._title_missing("%9", "spike-repo-002", capture=cap) is True
+    # successor name visible (status line) -> already renamed
+    cap2 = lambda p: f"⏺ hi\n{_FRAME}\n  sess spike-repo-002 │\n"
+    assert rotator._title_missing("%9", "spike-repo-002", capture=cap2) is False
+    # the name only in the TYPED (unsubmitted) command must NOT count as
+    # proof the rename ran (live incident: Enter swallowed)
+    cap3 = lambda p: f"❯\xa0/rename spike-repo-002\n{_FRAME}\n  sess x │\n"
+    assert rotator._title_missing("%9", "spike-repo-002", capture=cap3) is True
+    # unknown pane (empty capture) -> never fire blind
+    assert rotator._title_missing("%9", "spike-repo-002",
+                                  capture=lambda p: "") is False
+
+
+def test_wait_pane_contains_ack_poll(fake_tmux, monkeypatch):
+    monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    # needle appears -> acked
+    assert rotator._wait_pane_contains("%9", "spike-repo-002", 0.1,
+                                       capture=lambda p: "sess spike-repo-002")
+    # non-empty pane without the needle -> times out (NOT acked)
+    assert rotator._wait_pane_contains("%9", "spike-repo-002", 0.1,
+                                       capture=lambda p: "sess spike-repo-001") is False
+    # empty capture = cannot observe -> fail-open (blind-fire parity)
+    assert rotator._wait_pane_contains("%9", "spike-repo-002", 0.1,
+                                       capture=lambda p: "") is True
+
+
+# --- escalation (b): bare Enter submits our swallowed prompt --------------------
+
+
+def test_run_escalation_bare_enter_submits_swallowed_prompt(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # The paste lands but its Enter is swallowed: the C.8 prompt sits in the
+    # input box. The tick must press a BARE Enter (submit it) — then the
+    # RESUME lands and the rotation completes without re-pasting.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    _fake_successor(monkeypatch, key)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text("")
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    # the fake paste puts the prompt in the box and it STAYS there (Enter lost)
+    box = (f"❯\xa0CONTINUITY RESUME cp-{nnn:03d}: read /x completely, apply\n"
+           f"{_FRAME}\n{_STATUS}\n")
+    monkeypatch.setenv("FAKE_PASTE_HOOK",
+                       f"python3 -c \"import pathlib;pathlib.Path({str(pane_file)!r}).write_text({box!r})\"")
+
+    def world():
+        # fire the RESUME ledger entry only once a bare Enter (4th: /clear,
+        # rename, paste, ESCALATION) proves the escalation submitted the box
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _enter_calls(fake_tmux) >= 4:
+                _resume_ledger(key, nnn)
+                return
+            time.sleep(0.02)
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    assert _enter_calls(fake_tmux) >= 4  # the bare Enter was pressed
+    assert _paste_calls(fake_tmux) == 1  # no blind re-paste happened
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    assert any(j == "send-keys -t %9 Enter" for j in
+               joined[joined.index("paste-buffer -p -d -b ccc -t %9"):])
+
+
+# --- escalation (c): re-paste when the box settled empty -------------------------
+
+
+def test_run_escalation_repastes_when_box_empty(fake_tmux, cc_home, tmp_path,
+                                                monkeypatch):
+    # The first paste never reached CC (lost entirely): box stays empty, the
+    # tick re-pastes C.8; the RESUME lands only after the second paste.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    _fake_successor(monkeypatch, key)
+    counter = tmp_path / "paste-count"
+    counter.write_text("0")
+    monkeypatch.setenv(
+        "FAKE_PASTE_HOOK",
+        f"python3 -c \"import pathlib;p=pathlib.Path({str(counter)!r});"
+        f"p.write_text(str(int(p.read_text())+1))\"")
+
+    def world():
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _paste_calls(fake_tmux) >= 2:
+                _resume_ledger(key, nnn)
+                return
+            time.sleep(0.02)
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    assert _paste_calls(fake_tmux) >= 2  # re-paste happened
+    joined = [" ".join(c) for c in _calls(fake_tmux)]
+    assert joined.count("send-keys -t %9 -l /clear") == 1  # pane cleared once
+    assert _rename_calls(fake_tmux) == 1  # title unknown -> never re-typed
+
+
+# --- escalation (d): title-guarded rename ----------------------------------------
+
+
+def test_run_escalation_rename_retried_only_while_title_missing(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # capture-pane proves the title was NOT renamed (status line keeps the
+    # old name): rename may be re-sent, but NEVER a paste onto an unacked
+    # rename -> with the ack never arriving, paste must stay at zero.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text(f"⏺ hi\n{_FRAME}\n  sess spike-repo-001 │\n")
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    monkeypatch.setenv("FAKE_CU_CLEARS", "0")
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 1  # deadline: RESUME never landed
+    assert _rename_calls(fake_tmux) >= 2  # retried while unrenamed
+    assert _paste_calls(fake_tmux) == 0  # never pasted onto an unacked rename
+    assert joined_clears(fake_tmux) == 1
+
+
+def joined_clears(log):
+    return [" ".join(c) for c in _calls(log)].count(
+        "send-keys -t %9 -l /clear")
+
+
+def test_run_escalation_never_renames_when_title_present(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # capture-pane shows the successor name already in the status line: the
+    # title guard must NOT re-send /rename (the connector-149 garbage-name
+    # incident guard). Re-pastes happen; deadline still fails loudly.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text(f"⏺ hi\n{_FRAME}\n  sess spike-repo-002 │\n")
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    monkeypatch.setenv("FAKE_CU_CLEARS", "0")
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 1
+    assert _rename_calls(fake_tmux) == 1  # attempt 1 only, never re-typed
+    assert _paste_calls(fake_tmux) >= 2   # escalation kept re-pasting
+    assert joined_clears(fake_tmux) == 1
+
+
+# --- escalation guard: never clobber live user input ------------------------------
+
+
+def test_run_escalation_skips_ticks_while_user_typing(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # After the clear the user starts typing: the box holds foreign text.
+    # Every box-touching tick must skip: no Enter beyond the fixed attempt-1
+    # three (clear/rename/paste), no re-paste; the deadline still fires loud.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    _fake_successor(monkeypatch, key)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text("")
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    user_box = f"❯\xa0user is drafting this\n{_FRAME}\n{_STATUS}\n"
+    monkeypatch.setenv("FAKE_PASTE_HOOK",
+                       f"python3 -c \"import pathlib;pathlib.Path({str(pane_file)!r}).write_text({user_box!r})\"")
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 1
+    assert _enter_calls(fake_tmux) == 3  # only attempt-1's clear/rename/paste
+    assert _paste_calls(fake_tmux) == 1  # never re-pasted onto the draft
+    assert "ROTATION_FAILED" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_run_escalation_late_resume_completes_without_touching_pane(
+        fake_tmux, cc_home, tmp_path, monkeypatch):
+    # The user manually submits the RESUME prompt (the connector-149 manual
+    # rescue): a late ledger hit must complete the rotation passively — no
+    # extra keystrokes at all.
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    _fake_successor(monkeypatch, key)
+    pane_file = tmp_path / "pane.txt"
+    pane_file.write_text("")
+    monkeypatch.setenv("FAKE_PANE_FILE", str(pane_file))
+    user_box = f"❯\xa0user is drafting this\n{_FRAME}\n{_STATUS}\n"
+    monkeypatch.setenv("FAKE_PASTE_HOOK",
+                       f"python3 -c \"import pathlib;pathlib.Path({str(pane_file)!r}).write_text({user_box!r})\"")
+
+    def world():
+        time.sleep(0.3)  # the user rescues manually mid-escalation
+        _resume_ledger(key, nnn)
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    assert _enter_calls(fake_tmux) == 3  # passive completion: no new keys
+    assert _paste_calls(fake_tmux) == 1
+
+
+def test_run_escalation_rotated_guard_stops_redrive(fake_tmux, cc_home,
+                                                     tmp_path, monkeypatch):
+    # A late hook claim moves the state to ROTATED during escalation: the
+    # tick must stop re-driving (ROTATED is terminal, successor is live).
+    d = _rotating(cc_home, tmp_path)
+    key, nnn = d["key"], d["nnn"]
+    _shrink_deadline(monkeypatch)
+    monkeypatch.setattr(rotator, "_verify_resume", lambda *a, **kw: False)
+
+    def world():
+        time.sleep(0.4)  # after attempt 1's verify fails, mid-escalation
+        state.transition(key, nnn, "ROTATED")
+
+    t = _world_thread(world)
+    rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
+                     rotation_id=d["rid"], cfg=d["cfg"])
+    t.join(timeout=10)
+    assert rc == 0
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+    assert _enter_calls(fake_tmux) == 3  # escalation added no keystrokes
+    assert "already completed (ROTATED)" in (paths.logs_dir()
+                                             / "events.log").read_text()
 
 
 # --- paneless self-heal: spawn_successor_detached ------------------------------

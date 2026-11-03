@@ -45,6 +45,15 @@ VERIFY_WAIT_S = 15.0     # §11.9 — RESUME prompt in the successor ledger
 POLL_S = 0.25
 TMUX_BUFFER = "ccc"      # §11.8 paste-buffer name
 
+#: Rotation resume guarantee (spec 2026-11-03): after attempt 1's verify
+#: fails, keep DRIVING the pane until the RESUME prompt lands — bounded by
+#: this total deadline so a truly dead pane still fails loudly. Escalation
+#: is ack-driven: every keystroke is verified before the next one fires
+#: (CC swallows Enter while mid-command; blind fire corrupts the sequence).
+RESUME_DEADLINE_S = 300.0   # escalation budget for one rotation
+RETRY_POLL_S = 5.0          # escalation tick cadence
+RENAME_ACK_WAIT_S = 3.0     # ack poll after a /rename keystroke
+
 #: Input-box protection: how long to wait for the box to settle EMPTY
 #: after C-u, and how many consecutive empty captures "settled" requires.
 CLEAR_SETTLE_S = 2.0
@@ -432,20 +441,70 @@ def _clear_pane(pane: str, key: str, nnn: int, *,
     return True
 
 
+def _resume_present(key: str, nnn: int, cp_id: str, old_name: str) -> bool:
+    """One non-blocking check for the ``CONTINUITY RESUME <cp_id>`` prompt in
+    the successor ledger (escalation ticks must decide without blocking)."""
+    succ = _find_successor_rec(key, old_name)
+    if succ is None:
+        return False
+    prefix = f"CONTINUITY RESUME {cp_id}"
+    for entry in ledger.read(paths.session_dir(key, int(succ["nnn"]))):
+        if (entry.get("type") == "user_prompt"
+                and str(entry.get("text", "")).startswith(prefix)):
+            return True
+    return False
+
+
 def _verify_resume(key: str, nnn: int, cp_id: str, old_name: str) -> bool:
     """PRD §11.9 — a ``CONTINUITY RESUME <cp_id>`` prompt must land in the
     successor session's ledger within ``VERIFY_WAIT_S``."""
-    prefix = f"CONTINUITY RESUME {cp_id}"
     deadline = time.monotonic() + VERIFY_WAIT_S
     while time.monotonic() < deadline:
-        succ = _find_successor_rec(key, old_name)
-        if succ is not None:
-            for entry in ledger.read(paths.session_dir(key, int(succ["nnn"]))):
-                if (entry.get("type") == "user_prompt"
-                        and str(entry.get("text", "")).startswith(prefix)):
-                    return True
+        if _resume_present(key, nnn, cp_id, old_name):
+            return True
         time.sleep(POLL_S)
     return False
+
+
+def _pane_text_without_box(pane: str, *, capture=capture_pane_text) -> str:
+    """Capture-pane text with input-box lines removed. The rename title
+    guard reads this view so a TYPED (unsubmitted) ``/rename <name>`` sitting
+    in the box never counts as evidence the rename actually executed."""
+    text = capture(pane)
+    if not text.strip():
+        return ""
+    return "\n".join(l for l in text.splitlines()
+                     if not watchdog.INPUT_LINE_RE.match(l))
+
+
+def _title_missing(pane: str, name_new: str, *,
+                   capture=capture_pane_text) -> bool:
+    """True when capture-pane PROVES the pane has not been renamed yet.
+    Unknown (empty/failed capture) → False: never re-type ``/rename`` blind
+    (live incident 2026-11-03 connector-149: attempt 2 re-typed /rename
+    while CC was mid-command, the Enter was swallowed, the pasted prompt
+    concatenated onto it, and CC renamed the session to the garbage string).
+    """
+    hay = _pane_text_without_box(pane, capture=capture)
+    if not hay:
+        return False
+    return name_new not in hay
+
+
+def _wait_pane_contains(pane: str, needle: str, timeout: float, *,
+                        capture=capture_pane_text) -> bool:
+    """Ack poll after a keystroke: True when the pane (excluding the input
+    box) shows ``needle``. An empty capture means the pane cannot be
+    observed → True (fail-open: preserves the blind-fire behavior of today
+    rather than stalling on an unobservable pane)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        hay = _pane_text_without_box(pane, capture=capture)
+        if not hay or needle in hay:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_S)
 
 
 def _notify(cfg: dict, slug: str, event: str) -> None:
@@ -482,6 +541,31 @@ def _defer_to_checkpoint(key: str, nnn: int, reason: str) -> None:
               f"({reason})")
 
 
+def _complete(key: str, nnn: int, rec: dict, name_new: str,
+              cfg: dict) -> int:
+    """§11.9 success bookkeeping, shared by attempt 1 and escalation ticks."""
+    state.transition(key, nnn, "ROTATED")
+    delete_pending_prompt(key, nnn)  # consumed by the C.8 note
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "rotation_completed", "successor": name_new})
+    log_event(f"rotator: ROTATION_COMPLETED key={key} {nnn:03d} "
+              f"-> {name_new}")
+    succ = _find_successor_rec(key, rec["name"])
+    r1 = None
+    sid_new = (succ or {}).get("session_id")
+    if sid_new:
+        m_new = statusline.read_metric(sid_new)
+        if not statusline.is_stale(m_new):
+            r1 = m_new.get("ratio")
+    # Phase 9 — spec §5 row 5 (high priority)
+    notify.safe_send(cfg, "rotation_complete",
+                     slug=notify.project_slug(key), nnn=nnn,
+                     nnn_new=int(succ["nnn"]) if succ else nnn + 1,
+                     r0=rec.get("ratio_at_pending"), r1=r1,
+                     naa=notify.naa_snippet(_handoff_path(key, nnn)))
+    return 0
+
+
 def run(*, key: str, nnn: int, session_id: str, pane: str,
         rotation_id: str, cfg: dict) -> int:
     """PRD §11 — one full-auto rotation. Never kills Claude Code, never
@@ -514,73 +598,111 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
                                  "activity after Stop — next Stop retries")
             return 0
         cp_id = f"cp-{nnn:03d}"
-        for attempt in (1, 2):  # §11.9: retry steps 3–9 once
-            # The retry is for a botched keystroke sequence, NOT a second
-            # rotation. If the state already advanced to ROTATED (bootstrap
-            # closed the old session when the successor's SessionStart/clear
-            # claimed the rotation — the previous attempt's continuation
-            # prompt already launched it), stop: re-driving the pane would
-            # fight the live successor, and ROTATED is terminal.
-            if state.load_state(key, nnn)["state"] == "ROTATED":
-                log_event(f"rotator: rotation already completed (ROTATED) "
-                          f"key={key} nnn={nnn:03d} attempt={attempt} — "
-                          "not re-driving")
-                return 0
-            # §11.6 — remember existing markers BEFORE the keystrokes.
-            before = _started_names()
-            # §11.4–5 — save in-progress input, then /clear only when the
-            # box is verified settled-empty; defer while the user types.
-            if not _clear_pane(pane, key, nnn):
-                _defer_to_checkpoint(key, nnn,
-                                     "input box busy — user still typing; "
-                                     "next Stop retries")
-                return 0
-            if not _wait_new_started(before):
-                log_event("rotator: SESSIONSTART_MISSING — continuing "
-                          "anyway (F14; the continuation prompt is "
-                          "self-sufficient)")
-            # §11.7 — rename to the successor (S10: name survives /clear).
-            name_new = _successor_name(key, nnn, rec["name"])
-            _tmux("send-keys", "-t", pane, "-l", f"/rename {name_new}")
-            _tmux("send-keys", "-t", pane, "Enter")
+        name_new = _successor_name(key, nnn, rec["name"])
+        c8 = thresholds.c8_text(cp_id, _handoff_path(key, nnn))
+        deadline = time.monotonic() + RESUME_DEADLINE_S
+
+        # --- attempt 1: the full §11.4–9 sequence (spec: unchanged) ---------
+        # The retry is for a botched keystroke sequence, NOT a second
+        # rotation. If the state already advanced to ROTATED (bootstrap
+        # closed the old session when the successor's SessionStart/clear
+        # claimed the rotation), stop: re-driving the pane would fight the
+        # live successor, and ROTATED is terminal.
+        if state.load_state(key, nnn)["state"] == "ROTATED":
+            log_event(f"rotator: rotation already completed (ROTATED) "
+                      f"key={key} nnn={nnn:03d} — not re-driving")
+            return 0
+        # §11.6 — remember existing markers BEFORE the keystrokes.
+        before = _started_names()
+        # §11.4–5 — save in-progress input, then /clear only when the
+        # box is verified settled-empty; defer while the user types.
+        if not _clear_pane(pane, key, nnn):
+            _defer_to_checkpoint(key, nnn,
+                                 "input box busy — user still typing; "
+                                 "next Stop retries")
+            return 0
+        if not _wait_new_started(before):
+            log_event("rotator: SESSIONSTART_MISSING — continuing "
+                      "anyway (F14; the continuation prompt is "
+                      "self-sufficient)")
+        # §11.7 — rename to the successor (S10: name survives /clear), then
+        # ACK before the paste: CC swallows Enter while mid-command, so we
+        # never paste the continuation onto an unacked /rename.
+        _tmux("send-keys", "-t", pane, "-l", f"/rename {name_new}")
+        _tmux("send-keys", "-t", pane, "Enter")
+        # pending-prompt note read AFTER _clear_pane saved it (§11.4–5)
+        c8 = c8_with_pending(c8, read_pending_prompt(key, nnn))
+        if _wait_pane_contains(pane, name_new, RENAME_ACK_WAIT_S):
             # §11.8 — continuation prompt, byte-exact via paste-buffer
             # (plus the reference-only pending-prompt note, when the user
             # was typing at rotation time).
-            c8 = thresholds.c8_text(cp_id, _handoff_path(key, nnn))
-            c8 = c8_with_pending(c8, read_pending_prompt(key, nnn))
             _tmux("set-buffer", "-b", TMUX_BUFFER, c8)
             _tmux("paste-buffer", "-p", "-d", "-b", TMUX_BUFFER, "-t", pane)
             _tmux("send-keys", "-t", pane, "Enter")
-            # §11.9 — verify.
-            if _verify_resume(key, nnn, cp_id, rec["name"]):
-                state.transition(key, nnn, "ROTATED")
-                delete_pending_prompt(key, nnn)  # consumed by the C.8 note
-                ledger.append(paths.session_dir(key, nnn),
-                              {"type": "rotation_completed",
-                               "successor": name_new})
-                log_event(f"rotator: ROTATION_COMPLETED key={key} {nnn:03d} "
-                          f"-> {name_new}")
-                succ = _find_successor_rec(key, rec["name"])
-                r1 = None
-                sid_new = (succ or {}).get("session_id")
-                if sid_new:
-                    m_new = statusline.read_metric(sid_new)
-                    if not statusline.is_stale(m_new):
-                        r1 = m_new.get("ratio")
-                # Phase 9 — spec §5 row 5 (high priority)
-                notify.safe_send(cfg, "rotation_complete",
-                                 slug=notify.project_slug(key), nnn=nnn,
-                                 nnn_new=int(succ["nnn"]) if succ
-                                 else nnn + 1,
-                                 r0=rec.get("ratio_at_pending"),
-                                 r1=r1,
-                                 naa=notify.naa_snippet(
-                                     _handoff_path(key, nnn)))
+        else:
+            log_event(f"rotator: rename not acked key={key} nnn={nnn:03d} — "
+                      "paste deferred to escalation (never paste onto an "
+                      "unacked rename)")
+        # §11.9 — verify.
+        if _verify_resume(key, nnn, cp_id, rec["name"]):
+            return _complete(key, nnn, rec, name_new, cfg)
+        log_event(f"rotator: attempt 1: no RESUME in successor ledger — "
+                  "escalating (retry-until-RESUME)")
+
+        # --- escalation: retry-until-RESUME (spec 2026-11-03) ---------------
+        # Every tick re-checks the two passive guards first (ROTATED, late
+        # RESUME), then touches the box ONLY when it is ours or empty; user
+        # input is never clobbered and every fire is ack-verified.
+        tick = 1
+        while time.monotonic() < deadline:
+            time.sleep(min(RETRY_POLL_S,
+                           max(0.0, deadline - time.monotonic())))
+            tick += 1
+            if state.load_state(key, nnn)["state"] == "ROTATED":
+                log_event(f"rotator: rotation already completed (ROTATED) "
+                          f"key={key} nnn={nnn:03d} tick={tick} — "
+                          "not re-driving")
                 return 0
-            log_event(f"rotator: attempt {attempt}: no RESUME in successor "
-                      f"ledger — " + ("retrying" if attempt == 1
-                                      else "giving up"))
-        # §11.9 / P6-D7 — final failure: stay claimable, notify, exit 1.
+            if _resume_present(key, nnn, cp_id, rec["name"]):
+                log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                          f"tick={tick} action=late-resume")
+                return _complete(key, nnn, rec, name_new, cfg)
+            box = _parse_input_box(capture_pane_text(pane))
+            if box and not (box.startswith("CONTINUITY RESUME")
+                            or box.startswith("/rename")):
+                # foreign text in the box = the user is typing: skip this
+                # tick (never clobber live input); the deadline keeps running
+                log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                          f"tick={tick} action=skip-typing")
+                continue
+            if box:
+                # our own text stuck in the box (its Enter was swallowed):
+                # submit it with a bare Enter, then re-verify
+                log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                          f"tick={tick} action=submit-box")
+                _tmux("send-keys", "-t", pane, "Enter")
+                if _verify_resume(key, nnn, cp_id, rec["name"]):
+                    return _complete(key, nnn, rec, name_new, cfg)
+                continue
+            # box settled empty: title-guarded rename, then re-paste C.8
+            if _title_missing(pane, name_new):
+                _tmux("send-keys", "-t", pane, "-l", f"/rename {name_new}")
+                _tmux("send-keys", "-t", pane, "Enter")
+                if not _wait_pane_contains(pane, name_new, RENAME_ACK_WAIT_S):
+                    log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                              f"tick={tick} action=rename-unacked")
+                    continue  # never paste onto an unacked rename
+                log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                          f"tick={tick} action=rename")
+            log_event(f"rotator: ESCALATION key={key} nnn={nnn:03d} "
+                      f"tick={tick} action=repaste")
+            _tmux("set-buffer", "-b", TMUX_BUFFER, c8)
+            _tmux("paste-buffer", "-p", "-d", "-b", TMUX_BUFFER, "-t", pane)
+            _tmux("send-keys", "-t", pane, "Enter")
+            if _verify_resume(key, nnn, cp_id, rec["name"]):
+                return _complete(key, nnn, rec, name_new, cfg)
+
+        # §11.9 / P6-D7 — deadline failure: stay claimable, notify, exit 1.
         state.transition(key, nnn, "CHECKPOINT_VERIFIED")
         ledger.append(paths.session_dir(key, nnn),
                       {"type": "rotation_failed"})
@@ -592,8 +714,8 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
                          slug=notify.project_slug(key), nnn=nnn,
                          dedup_key=f"rotation_failed:{rotation_id}",
                          what="rotation",
-                         detail="no RESUME in successor ledger after 2 "
-                                "attempts")
+                         detail=f"no RESUME in successor ledger within "
+                                f"{RESUME_DEADLINE_S:g}s")
         return 1
     finally:
         rlock.release()
