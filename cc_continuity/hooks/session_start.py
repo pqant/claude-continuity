@@ -27,10 +27,23 @@ skeleton for every event that carries ``CLAUDE_ENV_FILE``.
 from __future__ import annotations
 
 import math
+import time
 
 from .. import (bootstrap, checkpoint, ledger, lock, naming, notify, paths,
                 project, state, statusline)
-from .common import HookContext, log_error, notify_claimed, session_start_output
+from .common import (HookContext, log_error, log_event, notify_claimed,
+                     session_start_output)
+
+
+def _step(source: str, step: str, t0: float, **fields) -> None:
+    """spec 2026-11-03-rotation-resume-guarantee §3: one grep-friendly timed
+    line per milestone (``session_start source=clear step=claim-result
+    claim=yes ms=42``). If the hook ever hangs again, the LAST step line in
+    events.log names the milestone it never came back from (the 2026-11-03
+    connector-149 hang left no breadcrumb at all)."""
+    extra = "".join(f" {k}={v}" for k, v in fields.items())
+    ms = int((time.monotonic() - t0) * 1000)
+    log_event(f"session_start source={source} step={step}{extra} ms={ms}")
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -71,12 +84,14 @@ def handle(ctx: HookContext) -> dict | None:
             return None
     if source != "startup":
         return None
+    t0 = time.monotonic()
     cwd = ctx.payload.get("cwd")
     session_id = ctx.payload.get("session_id")
     if not isinstance(cwd, str) or not cwd:
         return None
     if not isinstance(session_id, str) or not session_id:
         return None
+    _step("startup", "entry", t0)
     try:
         root = project.resolve_root(cwd)
         key = project.project_key_for_root(root)
@@ -87,18 +102,25 @@ def handle(ctx: HookContext) -> dict | None:
             # works" guarantee. AMCL/CV sessions are still live in the
             # user's terminal and keep the C.5-notice + user-/clear path.
             with lock.held(key):
+                _step("startup", "lock-acquired", t0)
                 res = bootstrap.try_claim(key, new_session_id=session_id,
                                           cfg=ctx.cfg,
                                           states=frozenset({"ROTATING"}),
                                           source="startup")
+            _step("startup", "claim-result", t0,
+                  claim="yes" if res is not None else "none")
             if res is not None:
                 bootstrap.write_started(session_id)
                 notify_claimed(ctx.cfg, key, res)
                 bootstrap.record_tmux_session(key, res["new_nnn"])
+                _step("startup", "output-ready", t0)
                 return session_start_output(res["bootstrap_text"])
             _register(ctx, session_id)
-        return _pending_notice(ctx, key)
+        out = _pending_notice(ctx, key)
+        _step("startup", "output-ready" if out is not None else "exit", t0)
+        return out
     except Exception:
+        _step("startup", "failed", t0)
         log_error(f"SessionStart(startup): registration failed for {session_id}")
         return None
 
@@ -114,27 +136,36 @@ def _clear(ctx: HookContext) -> dict | None:
     is written for the rotator (PRD §11.6). Without a claimable session the
     new conversation registers exactly like a plain startup.
     """
+    t0 = time.monotonic()
     cwd = ctx.payload.get("cwd")
     session_id = ctx.payload.get("session_id")
     if not isinstance(cwd, str) or not cwd:
         return None
     if not isinstance(session_id, str) or not session_id:
         return None
+    _step("clear", "entry", t0)
     try:
         root = project.resolve_root(cwd)
         key = project.project_key_for_root(root)
         with lock.held(key):
+            _step("clear", "lock-acquired", t0)
             res = bootstrap.try_claim(key, new_session_id=session_id,
                                       cfg=ctx.cfg)
+        _step("clear", "claim-result", t0,
+              claim="yes" if res is not None else "none")
         if res is not None:
             bootstrap.write_started(session_id)
             notify_claimed(ctx.cfg, key, res)
             bootstrap.record_tmux_session(key, res["new_nnn"])
+            _step("clear", "output-ready", t0)
             return session_start_output(res["bootstrap_text"])
         if ctx.session is None:
             _register(ctx, session_id)
-        return _pending_notice(ctx, key)
+        out = _pending_notice(ctx, key)
+        _step("clear", "output-ready" if out is not None else "exit", t0)
+        return out
     except Exception:
+        _step("clear", "failed", t0)
         log_error(f"SessionStart(clear): claim failed for {session_id}")
         return None
 

@@ -9,6 +9,7 @@ new one when it does not (Phase 27 — CC native auto-resume).
 
 import json
 import os
+import re
 
 import pytest
 
@@ -656,3 +657,48 @@ def test_startup_does_not_claim_amcl_session(cc_home, capsys, tmp_path):
     assert rec2["session_id"] == "sid-new-3"
     assert rec2["predecessor"] == "spike-repo-001"
     assert not (paths.runtime_dir() / "sid-new-3.started").exists()
+
+
+# --- step logging (spec 2026-11-03-rotation-resume-guarantee §3) -------------
+# grep-friendly timed step lines in events.log so the next hook hang names
+# its own step (the 2026-11-03 connector-149 hang left no breadcrumb).
+
+
+def _step_lines(cc_home, source):
+    log = (cc_home / "logs" / "events.log").read_text()
+    return [l for l in log.splitlines()
+            if f"session_start source={source} step=" in l]
+
+
+def test_clear_claim_path_logs_greppable_timed_steps(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-step-1",
+                                            source="clear")) == 0
+    lines = _step_lines(cc_home, "clear")
+    for want in ("step=entry", "step=lock-acquired",
+                 "step=claim-result claim=yes", "step=output-ready"):
+        assert any(want in l for l in lines), want
+    assert all(re.search(r" ms=\d+$", l) for l in lines)
+
+
+def test_clear_no_claim_logs_none_and_exit(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-step-2",
+                                            source="clear")) == 0
+    lines = _step_lines(cc_home, "clear")
+    assert any("step=entry" in l for l in lines)
+    assert any("step=claim-result claim=none" in l for l in lines)
+    assert any("step=exit" in l for l in lines)
+
+
+def test_startup_plain_logs_steps(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    assert run_hook("SessionStart", fixture_payload("SessionStart", repo)) == 0
+    lines = _step_lines(cc_home, "startup")
+    assert any("step=entry" in l for l in lines)
+    assert any("step=claim-result claim=none" in l for l in lines)
+    assert any("step=exit" in l for l in lines)

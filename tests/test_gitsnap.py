@@ -172,3 +172,32 @@ def test_worktree_snapshot(tmp_path, git_repo):
     snap = gitsnap.make_snapshot(wt, "repo", 4)
     tree_files = _git(git_repo, "ls-tree", "-r", "--name-only", snap["tree"])
     assert "wt-only.txt" in tree_files
+
+
+# spec 2026-11-03-rotation-resume-guarantee §2: gitsnap sits on the
+# SessionStart claim path (validate.write_tree); a hung git must convert to
+# GitSnapError (validate already catches it → fail-open) instead of stalling
+# the hook forever.
+
+
+def test_write_tree_timeout_raises_gitsnaperror(git_repo, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(gitsnap.subprocess, "run", fake_run)
+    with pytest.raises(gitsnap.GitSnapError):
+        gitsnap.write_tree(git_repo)
+
+
+def test_every_git_call_carries_timeout(git_repo, monkeypatch):
+    seen = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(gitsnap.subprocess, "run", fake_run)
+    gitsnap.write_tree(git_repo)
+    assert seen and all(kw.get("timeout") == gitsnap.GITSNAP_TIMEOUT_S
+                        for kw in seen)

@@ -65,7 +65,11 @@ def test_clear_while_not_rotating_is_not_logged(cc_home, tmp_path):
     key, nnn = register_session(repo)
     assert state.load_state(key, nnn)["state"] == "ACTIVE"  # Phase 5 D3
     run_hook("SessionEnd", payload("SessionEnd", repo, reason="clear"))
-    assert not (cc_home / "logs" / "events.log").exists()
+    # "not logged" = no ROTATING event line. SessionStart step breadcrumbs
+    # (spec 2026-11-03-rotation-resume-guarantee §3) may exist in events.log
+    # from register_session; they are not this event.
+    events = cc_home / "logs" / "events.log"
+    assert "ROTATING" not in (events.read_text() if events.is_file() else "")
 
 
 def test_unregistered_session_is_silently_ignored(cc_home, tmp_path):
@@ -323,7 +327,12 @@ def test_session_end_ends_outside_window_do_not_count(cc_home, tmp_path,
     sent = _capture_sends(monkeypatch)
     run_hook("SessionEnd", payload("SessionEnd", repo))
     assert len(sent) == 1
-    assert not (cc_home / "logs" / "events.log").exists()
+    # no suppression happened (the counterpart asserts the suppression line
+    # IS logged); step breadcrumbs from register_session may exist (spec
+    # 2026-11-03 §3), so check the marker, not file absence.
+    events = cc_home / "logs" / "events.log"
+    assert "session_end push suppressed" not in (
+        events.read_text() if events.is_file() else "")
 
 
 def test_session_end_corrupt_state_file_self_heals(cc_home, tmp_path,

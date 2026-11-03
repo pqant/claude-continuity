@@ -41,7 +41,11 @@ def test_precompact_after_checkpoint_no_log(cc_home, capsys, tmp_path):
     repo, key, nnn = _setup(cc_home, tmp_path, s="CHECKPOINT_VERIFIED")
     run_hook("PreCompact", payload("PreCompact", repo))
     assert (paths.session_dir(key, nnn) / "emergency-snapshot.json").is_file()
-    assert not (cc_home / "logs" / "events.log").exists()
+    # "no log" = no COMPACT_BEFORE_ROTATION line (the counterpart asserts it
+    # IS logged); SessionStart step breadcrumbs may exist (spec 2026-11-03 §3).
+    events = cc_home / "logs" / "events.log"
+    assert "COMPACT_BEFORE_ROTATION" not in (
+        events.read_text() if events.is_file() else "")
 
 
 def test_precompact_unregistered_is_silent(cc_home, capsys, tmp_path):

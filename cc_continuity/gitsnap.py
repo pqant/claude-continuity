@@ -39,7 +39,14 @@ _IDENTITY = {
 
 
 class GitSnapError(RuntimeError):
-    """Git snapshot could not be taken (non-git dir, git failure)."""
+    """Git snapshot could not be taken (non-git dir, git failure, timeout)."""
+
+
+#: spec 2026-11-03-rotation-resume-guarantee §2: gitsnap sits on the
+#: SessionStart claim path (validate.py calls write_tree and already catches
+#: GitSnapError), so a hung git must fail-open — convert to GitSnapError
+#: after a bounded wait instead of stalling the hook forever.
+GITSNAP_TIMEOUT_S = 20.0
 
 
 def _git(cwd: Path, *args: str, env_extra: dict | None = None,
@@ -50,12 +57,22 @@ def _git(cwd: Path, *args: str, env_extra: dict | None = None,
     depends on the caller's HOME/user config (Gate 5 finding B): rotation
     (fake HOME) and claim (real HOME) must compute identical trees.
     Repo ``.gitignore`` and ``$GIT_DIR/info/exclude`` still apply.
+
+    A hang (no exit within ``GITSNAP_TIMEOUT_S``) becomes ``GitSnapError``:
+    every caller treats that as "snapshot unavailable" and fails open, which
+    is strictly better than an unbounded wait inside a hook.
     """
     env = {**os.environ, **_IDENTITY, **(env_extra or {})}
-    proc = subprocess.run(
-        ["git", "-c", "core.excludesFile=/dev/null", *args],
-        cwd=cwd, env=env, capture_output=True, text=True
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.excludesFile=/dev/null", *args],
+            cwd=cwd, env=env, capture_output=True, text=True,
+            timeout=GITSNAP_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitSnapError(
+            f"git {' '.join(args)} timed out after {GITSNAP_TIMEOUT_S:g}s"
+        ) from exc
     # rstrip only: porcelain output is space-significant (" M path").
     out = proc.stdout.rstrip("\n")
     if check and proc.returncode != 0:
