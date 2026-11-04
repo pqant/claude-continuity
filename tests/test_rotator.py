@@ -979,7 +979,10 @@ def test_run_escalation_late_resume_completes_without_touching_pane(
         fake_tmux, cc_home, tmp_path, monkeypatch):
     # The user manually submits the RESUME prompt (the connector-149 manual
     # rescue): a late ledger hit must complete the rotation passively — no
-    # extra keystrokes at all.
+    # extra keystrokes at all. The ledger flip is driven from attempt 1's
+    # verify (synchronous, right at the escalation boundary) instead of a
+    # wall-clock thread: a blind sleep raced the 0.05s tick cadence and
+    # flaked the exact keystroke count on loaded CI runners.
     d = _rotating(cc_home, tmp_path)
     key, nnn = d["key"], d["nnn"]
     _shrink_deadline(monkeypatch)
@@ -991,14 +994,19 @@ def test_run_escalation_late_resume_completes_without_touching_pane(
     monkeypatch.setenv("FAKE_PASTE_HOOK",
                        f"python3 -c \"import pathlib;pathlib.Path({str(pane_file)!r}).write_text({user_box!r})\"")
 
-    def world():
-        time.sleep(0.3)  # the user rescues manually mid-escalation
-        _resume_ledger(key, nnn)
+    calls = {"n": 0}
 
-    t = _world_thread(world)
+    def rescue_on_first_verify(*a, **kw):
+        # attempt-1 verify fails, the user's manual submit lands, and
+        # escalation's FIRST guard tick must complete passively.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            _resume_ledger(key, nnn)
+        return False
+
+    monkeypatch.setattr(rotator, "_verify_resume", rescue_on_first_verify)
     rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
                      rotation_id=d["rid"], cfg=d["cfg"])
-    t.join(timeout=10)
     assert rc == 0
     assert state.load_state(key, nnn)["state"] == "ROTATED"
     assert _enter_calls(fake_tmux) == 3  # passive completion: no new keys
@@ -1009,19 +1017,26 @@ def test_run_escalation_rotated_guard_stops_redrive(fake_tmux, cc_home,
                                                      tmp_path, monkeypatch):
     # A late hook claim moves the state to ROTATED during escalation: the
     # tick must stop re-driving (ROTATED is terminal, successor is live).
+    # The flip is driven from attempt 1's verify (synchronous, at the
+    # escalation boundary) instead of a wall-clock thread racing the
+    # 0.05s tick: on loaded CI runners the late transition let one extra
+    # re-paste fire (flaky 4-vs-3 keystrokes).
     d = _rotating(cc_home, tmp_path)
     key, nnn = d["key"], d["nnn"]
     _shrink_deadline(monkeypatch)
-    monkeypatch.setattr(rotator, "_verify_resume", lambda *a, **kw: False)
+    calls = {"n": 0}
 
-    def world():
-        time.sleep(0.4)  # after attempt 1's verify fails, mid-escalation
-        state.transition(key, nnn, "ROTATED")
+    def late_claim_on_first_verify(*a, **kw):
+        # attempt-1 verify fails; the hook claim lands; escalation's
+        # FIRST guard tick must see ROTATED and stop before any keystroke.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            state.transition(key, nnn, "ROTATED")
+        return False
 
-    t = _world_thread(world)
+    monkeypatch.setattr(rotator, "_verify_resume", late_claim_on_first_verify)
     rc = rotator.run(key=key, nnn=nnn, session_id=d["sid"], pane="%9",
                      rotation_id=d["rid"], cfg=d["cfg"])
-    t.join(timeout=10)
     assert rc == 0
     assert state.load_state(key, nnn)["state"] == "ROTATED"
     assert _enter_calls(fake_tmux) == 3  # escalation added no keystrokes
