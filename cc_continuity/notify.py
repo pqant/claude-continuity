@@ -21,11 +21,14 @@ user-supplied (P9-D1); any ntfy-compatible server works.
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import subprocess
+import sys
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import DEVNULL, SubprocessError
@@ -91,8 +94,10 @@ def envelope(*, slug: str, nnn: int, name: str, host: str,
              branch: str | None = None, sha: str | None = None,
              dirty: bool = False, model: str | None = None,
              ratio: float | None = None) -> list[str]:
-    """The three envelope lines (pure function of its inputs — B1)."""
-    lines = [f"proj={slug} {nnn:03d} ({name})"]
+    """The three envelope lines (pure function of its inputs — B1). An
+    unavailable name omits the parenthetical rather than printing ``()``
+    (B3: a push with only ``proj=`` is still a good push)."""
+    lines = [f"proj={slug} {nnn:03d}" + (f" ({name})" if name else "")]
     host_line = f"host={host}"
     if branch and sha:
         host_line += f" branch={branch} @{sha}" + ("*" if dirty else "")
@@ -530,6 +535,124 @@ def build_message(event: str, *, slug: str, nnn: int,
     return t, body, pr
 
 
+# ---------------------------------------------------------------- emit pipeline
+# Spec B1/B5/B8 (issue #7): hook/rotator/CLI PARENTS do no git/transcript/
+# metric work — ``safe_send`` (wait=False) writes a JSON spec to
+# ``runtime/notify-queue/`` and spawns ``python -m cc_continuity
+# notify-emit``; the child runs ``emit_spec`` (collectors + curl). The
+# ``wait=True`` path (CLI/doctor, never a hook) calls ``emit_spec`` inline so
+# a failure stays observable. P9-D7: neither side ever raises.
+
+
+def _queue_dir() -> Path:
+    return paths.runtime_dir() / "notify-queue"
+
+
+def emit_spec(spec: dict, *, cfg: dict | None = None,
+              msg_fn=build_message, runner=None,
+              unlink: bool = True) -> bool:
+    """Build and send one queued push (the detached child's whole job).
+
+    Best-effort enrichment — every failure omits only its own line (B3):
+    ``name`` falls back to the sid's session record; ``objective``/``next``
+    come from ``fields["handoff_path"]``; ``stop_done`` gets its ``said``
+    excerpt from ``fields["transcript_path"]``. ``notify_content`` off
+    (B5/B8) strips the content bodies ``said``/``msg``/``reason``/``summary``
+    (the scrubber already guards them whenever they ship). NEVER raises;
+    the spec file (``spec["_path"]``) is consumed in ``finally``.
+    """
+    path = spec.get("_path") if isinstance(spec, dict) else None
+    event = str(spec.get("event")) if isinstance(spec, dict) else "?"
+    try:
+        if cfg is None:
+            cfg = config.load_config()
+        slug = str(spec.get("slug") or "")
+        nnn = int(spec.get("nnn") or 0)
+        fields = dict(spec.get("fields") or {})
+        sid = spec.get("sid") or None
+        name = str(spec.get("name") or "")
+        if not name and sid:
+            from . import statusline
+            rec = statusline.find_session_by_id(str(sid))
+            if isinstance(rec, dict):
+                name = str(rec.get("name") or "")
+        if name:
+            fields.setdefault("name", name)
+        env = build_env(slug, nnn, name=name, sid=sid,
+                        repo=spec.get("repo"))
+        hp = fields.get("handoff_path")
+        if hp:
+            fields.setdefault("objective", objective_from(str(hp)))
+            fields.setdefault("next", naa_snippet(str(hp), 200))
+        if event == "stop_done" and "said" not in fields:
+            fields["said"] = last_assistant_text(
+                fields.get("transcript_path"))
+        if cfg.get("notify_content") is False:
+            for k in ("said", "msg", "reason", "summary"):
+                fields.pop(k, None)
+        title, body, priority = msg_fn(event, slug=slug, nnn=nnn,
+                                       env=env, **fields)
+        return send(str(cfg.get("notify_endpoint") or "").strip(),
+                    title, body, priority, event=event, wait=True,
+                    tags=TAGS.get(event, ""), runner=runner or subprocess.run)
+    except Exception:
+        _log_failure(event, "emit_spec: "
+                     + (traceback.format_exc().splitlines()[-1]
+                        if __debug__ else ""))
+        return False
+    finally:
+        if path and unlink:
+            try:
+                Path(str(path)).unlink()
+            except OSError:
+                pass
+
+
+def safe_send(cfg: dict, event: str, *, slug: str, nnn: int = 0,
+              dedup_key: str | None = None, wait: bool = False,
+              spawn=None, **fields) -> bool:
+    """The single call-site wrapper (spec §4 + issue #7 B1).
+
+    No-ops when disabled (no spec file, no spawn — Review Focus 5) and
+    dedups error events. ``wait=False`` (hooks/rotator): atomically writes
+    the spec and spawns the detached ``notify-emit`` child — no
+    git/transcript/metric work in the hook budget. ``wait=True``
+    (CLI/doctor): resolves sid/repo best-effort and runs ``emit_spec``
+    inline (synchronous, observable). NEVER raises. Returns True when a
+    push was fired (detached) or sent (wait).
+    """
+    try:
+        if not enabled(cfg):
+            return False
+        if dedup_key is not None and dedup_seen(dedup_key):
+            return False
+        spec = {
+            "event": event, "slug": slug, "nnn": nnn,
+            "name": str(fields.get("name") or ""),
+            "sid": (fields.get("sid")
+                    or os.environ.get("CC_CONTINUITY_SESSION", "").strip()
+                    or None),
+            "repo": fields.get("repo") or os.getcwd(),
+            "fields": dict(fields),
+            "source": str(fields.get("source") or "safe_send"),
+        }
+        if wait:
+            return emit_spec(spec, cfg=cfg)
+        qdir = _queue_dir()
+        qdir.mkdir(parents=True, exist_ok=True)
+        path = qdir / f"{uuid.uuid4().hex}.json"
+        atomic.atomic_write_json(path, spec)
+        (spawn or subprocess.Popen)(
+            [sys.executable, "-m", "cc_continuity", "notify-emit", str(path)],
+            stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL,
+            start_new_session=True)
+        return True
+    except Exception:
+        _log_failure(event, "safe_send: "
+                   + (traceback.format_exc().splitlines()[-1] if __debug__ else ""))
+        return False
+
+
 def on_state_enter(cfg: dict | None, key: str, nnn: int, new_state: str,
                    ratio: float | None = None) -> None:
     """spec §5 rows 2/3 — fired by ``thresholds.advance()`` when a walk
@@ -549,26 +672,3 @@ def on_state_enter(cfg: dict | None, key: str, nnn: int, new_state: str,
     except Exception:
         _log_failure(new_state, "on_state_enter: "
                    + (traceback.format_exc().splitlines()[-1] if __debug__ else ""))
-
-
-def safe_send(cfg: dict, event: str, *, slug: str, nnn: int = 0,
-              dedup_key: str | None = None, wait: bool = False,
-              **fields) -> bool:
-    """The single call-site wrapper (spec §4): reads config, no-ops when
-    disabled, dedups error events, builds the message, fires curl
-    (fire-and-forget unless ``wait``), logs failures. NEVER raises.
-    Returns True when a push was actually fired."""
-    try:
-        if not enabled(cfg):
-            return False
-        if dedup_key is not None and dedup_seen(dedup_key):
-            return False
-        title, body, priority = build_message(event, slug=slug, nnn=nnn,
-                                              **fields)
-        return send(str(cfg.get("notify_endpoint") or "").strip(),
-                    title, body, priority, event=event, wait=wait,
-                    tags=TAGS.get(event, ""))
-    except Exception:
-        _log_failure(event, "safe_send: "
-                   + (traceback.format_exc().splitlines()[-1] if __debug__ else ""))
-        return False

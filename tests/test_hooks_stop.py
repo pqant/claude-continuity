@@ -14,8 +14,8 @@ import pytest
 
 from cc_continuity import checkpoint, ledger, paths, state
 from cc_continuity.hooks import stop
-from hookutil import (SID, make_repo, payload, register_session, run_hook,
-                      stdout_json, walk_to)
+from hookutil import (SID, InlineEmitSub, make_repo, payload,
+                      register_session, run_hook, stdout_json, walk_to)
 
 AMCL = "Checkpoint ready. Type /clear to continue automatically."
 
@@ -321,6 +321,7 @@ def test_stop_finalize_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
         raise checkpoint.CheckpointError("verify: checksum mismatch")
     monkeypatch.setattr(checkpoint, "finalize", boom)
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)
@@ -433,6 +434,7 @@ def test_stop_spawn_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
     monkeypatch.setattr(rotator, "spawn", bad_spawn)
     monkeypatch.setenv("TMUX_PANE", "%9")
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)

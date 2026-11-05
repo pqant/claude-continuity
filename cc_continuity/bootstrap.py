@@ -175,7 +175,7 @@ def register_session(cwd, session_id: str, *, cfg: dict,
                    "name": name, "nnn": nnn})
     notify.safe_send(cfg, "session_started",
                      slug=notify.project_slug(key), nnn=nnn, name=name,
-                     host=notify.host())
+                     host=notify.host(), prev=predecessor or "")
     record_tmux_session(key, nnn)
     return key, nnn
 

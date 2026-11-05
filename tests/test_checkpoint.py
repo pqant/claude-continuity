@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from cc_continuity import checkpoint, config, ledger, naming, paths, state
-from hookutil import SID, make_repo, payload, register_session, run_hook
+from hookutil import (SID, InlineEmitSub, make_repo, payload,
+                      register_session, run_hook)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -801,14 +802,21 @@ def test_finalize_verified_pushes_row4(cc_home, tmp_path, monkeypatch):
     cfg = dict(_cfg_for(repo), notify_enabled=True,
                notify_endpoint="https://ntfy.sh/example-topic")
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)
     cp_id, degraded = checkpoint.finalize(key, nnn, cfg=cfg, root=repo)
     assert degraded is False
-    assert sent == [("✓ cc-continuity: handoff written & verified",
-                     "default",
-                     f"proj=spike-repo {nnn:03d} cp-{nnn:03d} sha256 OK")]
+    assert len(sent) == 1
+    title, prio, body = sent[0]
+    assert (title, prio) == ("✓ cc-continuity: handoff written & verified",
+                             "default")
+    # issue #7 G1: envelope rows prepend the template row (B3: which ones
+    # ship is machine-dependent — pin only the deterministic last line).
+    assert body.splitlines()[-1] == (
+        f"proj=spike-repo {nnn:03d} cp-{nnn:03d} sha256 OK")
+    assert body.splitlines()[0].startswith(f"proj=spike-repo {nnn:03d}")
 
 
 def test_finalize_degraded_pushes_row8(cc_home, tmp_path, monkeypatch):
@@ -817,6 +825,7 @@ def test_finalize_degraded_pushes_row8(cc_home, tmp_path, monkeypatch):
     cfg = dict(_cfg_for(repo), notify_enabled=True,
                notify_endpoint="https://ntfy.sh/example-topic")
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)

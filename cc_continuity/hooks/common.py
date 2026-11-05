@@ -87,8 +87,17 @@ def notify_claimed(cfg: dict, key: str, res: dict) -> None:
     predecessor's NAA (resumed). Never raises (safe_send)."""
     nnn = int(res["new_nnn"])
     slug = notify.project_slug(key)
+    handoff_path = ""
+    try:
+        handoff_path = str(
+            paths.session_dir(key, int(res["old_nnn"]))
+            / "checkpoint" / "handoff.md")
+    except (KeyError, TypeError, ValueError):
+        pass  # enrichment is best-effort (B3)
     notify.safe_send(cfg, "session_started", slug=slug, nnn=nnn,
-                     name=res["new_name"], host=notify.host())
+                     name=res["new_name"], host=notify.host(),
+                     prev=res.get("old_name") or "",
+                     handoff_path=handoff_path)
     if res.get("validation") == "OK":
         notify.safe_send(cfg, "resumed", slug=slug, nnn=nnn)
 

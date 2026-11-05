@@ -14,8 +14,8 @@ import pytest
 
 from cc_continuity import bootstrap, ledger, lock, paths, rotator, state
 
-from hookutil import (SID, make_repo, payload, register_session, run_hook,
-                      set_metric, walk_to)
+from hookutil import (SID, InlineEmitSub, make_repo, payload,
+                      register_session, run_hook, set_metric, walk_to)
 
 FAKE_TMUX = """#!/bin/sh
 # Log argv base64-encoded, one line per call (0x1f-joined inside the blob):
@@ -655,6 +655,7 @@ def test_run_happy_path_pushes_row5(fake_tmux, cc_home, tmp_path, monkeypatch):
                notify_endpoint="https://ntfy.sh/example-topic")
     _shrink_waits(monkeypatch)
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)
@@ -693,6 +694,7 @@ def test_run_final_failure_pushes_row8_once(fake_tmux, cc_home, tmp_path,
                notify_endpoint="https://ntfy.sh/example-topic")
     _shrink_deadline(monkeypatch)
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, prio, body)) or True)

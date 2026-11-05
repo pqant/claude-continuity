@@ -15,8 +15,9 @@ import pytest
 
 from cc_continuity import ledger, paths, project, state
 
-from hookutil import (SID, fixture_payload, make_repo, payload, project_key_for,
-                      register_session, run_hook, set_metric, walk_to)
+from hookutil import (SID, InlineEmitSub, fixture_payload, make_repo,
+                      payload, project_key_for, register_session, run_hook,
+                      set_metric, walk_to)
 
 
 def _project_record(repo):
@@ -480,6 +481,7 @@ def test_startup_registration_pushes_session_started(cc_home, tmp_path,
         "notify_endpoint": "https://ntfy.sh/example-topic"}),
         encoding="utf-8")
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (ep, title, body, prio)) or True)

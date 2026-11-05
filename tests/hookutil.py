@@ -57,6 +57,35 @@ def fixture_payload(event: str, repo: Path, session_id: str = SID) -> dict:
     return p
 
 
+class InlineEmitSub:
+    """Fake ``notify.subprocess`` for the detached emit child (issue #7 B1).
+
+    ``Popen`` re-enters ``notify.emit_spec`` in-process — exactly what
+    ``cc-continuity notify-emit <spec>`` does in the child (argv tail is the
+    spec path) — so tests that monkeypatch ``notify.send`` still capture the
+    push and no real curl ever leaves the test process. ``run`` keeps the
+    ``subprocess.run`` surface for any code path that reaches ``send``.
+    """
+
+    def __init__(self, notify_mod):
+        self.notify = notify_mod
+        self.popen_calls = []
+
+    def Popen(self, cmd, **kw):
+        self.popen_calls.append((cmd, kw))
+        path = str(cmd[-1])
+        try:
+            spec = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return object()
+        spec["_path"] = path
+        self.notify.emit_spec(spec)
+        return object()
+
+    def run(self, cmd, **kw):
+        return type("P", (), {"returncode": 0})()
+
+
 def run_hook(event: str, p: dict) -> int:
     """Run one hook event end-to-end (common skeleton + handler registry)."""
     from cc_continuity.hooks import common

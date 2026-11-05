@@ -11,10 +11,12 @@ and ``launch`` (the zsh wrapper backend, Appendix D).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -209,6 +211,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sig.add_argument("kind", choices=["needs-human", "done"])
     p_sig.add_argument("text",
                        help="reason (needs-human) or summary (done)")
+
+    p_nt = sub.add_parser("notify",
+                          help="generic Stop/Notification hook push "
+                               "(issue #7)")
+    p_nt.add_argument("kind", choices=["stop", "notification"])
+
+    p_ne = sub.add_parser("notify-emit",
+                          help="emit one queued notify spec (internal, "
+                               "issue #7)")
+    p_ne.add_argument("spec_path")
 
     p_launch = sub.add_parser("launch",
                               help="zsh wrapper backend (Appendix D)")
@@ -552,6 +564,77 @@ def cmd_signal(args: argparse.Namespace) -> int:
     print(f"cc-continuity: {label}"
           + (" — push sent" if sent else
              " — push not sent (disabled or failed; see errors.log)"))
+    return 0
+
+
+def cmd_notify(args: argparse.Namespace) -> int:
+    """Issue #7 B5/B8 — generic Stop/Notification hook push.
+
+    The settings.json Notification/Stop hooks curl a fixed body today; they
+    migrate here so the push carries the session envelope + scrubbed
+    content. JSON payload on stdin (bad/empty -> ``{}``). ALWAYS exit 0
+    (P9-D7 — a dead endpoint must never fail the hook).
+    """
+    from . import notify
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        raw = ""
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    cfg = config.load_config()
+    if not notify.enabled(cfg):
+        return 0
+    sid = (str(payload.get("session_id") or "").strip()
+           or os.environ.get("CC_CONTINUITY_SESSION", "").strip())
+    rec = statusline.find_session_by_id(sid) if sid else None
+    key = (rec or {}).get("project_key") or ""
+    slug = notify.project_slug(key) if key else ""
+    nnn = int((rec or {}).get("nnn") or 0)
+    cwd = str(payload.get("cwd") or Path.cwd())
+    if args.kind == "stop":
+        event = "stop_done"
+        fields = {"transcript_path": payload.get("transcript_path")}
+    else:
+        event = "notification"
+        msg = str(payload.get("message") or "")
+        if not msg:
+            return 0
+        digest = hashlib.sha1(msg.encode("utf-8")).hexdigest()[:10]
+        bucket = int(time.time() // 60)  # B8: one push per minute
+        if notify.dedup_seen(f"notification:{sid}:{digest}:{bucket}"):
+            return 0
+        fields = {"msg": msg}
+    notify.safe_send(cfg, event, slug=slug, nnn=nnn, wait=False,
+                     source="cli", sid=sid or None, repo=cwd, **fields)
+    return 0
+
+
+def cmd_notify_emit(args: argparse.Namespace) -> int:
+    """Issue #7 B1 — the detached emit child (spawned by safe_send).
+
+    Reads one queued spec, builds the message with the collectors, fires
+    curl. ALWAYS exit 0 (P9-D7); a corrupt spec is logged and consumed.
+    """
+    from . import notify
+    path = Path(args.spec_path)
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            raise ValueError("spec is not an object")
+    except (OSError, ValueError) as e:
+        notify._log_failure("notify-emit", f"{args.spec_path}: {e}")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return 0
+    spec["_path"] = str(path)
+    notify.emit_spec(spec)
     return 0
 
 
@@ -1099,6 +1182,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_request_rotation(args)
     if args.command == "signal":
         return cmd_signal(args)
+    if args.command == "notify":
+        return cmd_notify(args)
+    if args.command == "notify-emit":
+        return cmd_notify_emit(args)
     if args.command == "off":
         return cmd_off(args)
     if args.command == "on":

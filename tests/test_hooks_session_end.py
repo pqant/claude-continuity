@@ -8,7 +8,8 @@ import json
 
 from cc_continuity import ledger, paths, state
 
-from hookutil import fixture_payload, make_repo, payload, register_session, run_hook
+from hookutil import (InlineEmitSub, fixture_payload, make_repo, payload,
+                      register_session, run_hook)
 
 
 def _to_rotating(key, nnn):
@@ -89,16 +90,20 @@ def test_session_end_pushes_row10(cc_home, tmp_path, monkeypatch):
         "notify_enabled": True,
         "notify_endpoint": "https://ntfy.sh/example-topic"}),
         encoding="utf-8")
-    register_session(repo)
     sent = []
+    monkeypatch.setattr(notify, "subprocess", InlineEmitSub(notify))
     monkeypatch.setattr(notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, body)) or True)
+    register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     p = fixture_payload("SessionEnd", repo)
     p["reason"] = "clear"
     assert run_hook("SessionEnd", p) == 0
-    assert sent == [("■ cc-continuity: session ended",
-                     "proj=spike-repo 001 reason=clear")]
+    assert len(sent) == 1
+    title, body = sent[0]
+    assert title == "■ cc-continuity: session ended"
+    assert body.splitlines()[-1] == "proj=spike-repo 001 reason=clear"
 
 
 # ------------------- Phase 12: progress pane cleanup on SessionEnd
@@ -252,7 +257,11 @@ def _enable_notify(cc_home):
 
 
 def _capture_sends(monkeypatch):
+    """Capture pushes in-process. safe_send's detached child (issue #7 B1)
+    is simulated by InlineEmitSub so the monkeypatched ``send`` is reached
+    and no real curl leaves the test."""
     sent = []
+    monkeypatch.setattr(_notify, "subprocess", InlineEmitSub(_notify))
     monkeypatch.setattr(_notify, "send",
                         lambda ep, title, body, prio, **kw: sent.append(
                             (title, body)) or True)
@@ -264,13 +273,17 @@ def test_session_end_first_two_ends_still_push(cc_home, tmp_path,
     # guardrail: below the churn threshold every end pushes as before
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
-    register_session(repo)
     sent = _capture_sends(monkeypatch)
+    register_session(repo)
+    del sent[:]  # row-1 registration push (inline child) is not under test
     run_hook("SessionEnd", payload("SessionEnd", repo))
     run_hook("SessionEnd", payload("SessionEnd", repo))
     assert len(sent) == 2
-    assert sent[0] == ("■ cc-continuity: session ended",
-                       "proj=spike-repo 001 reason=other")
+    title, body = sent[0]
+    assert title == "■ cc-continuity: session ended"
+    # issue #7 G1: envelope lines prepend the template row — pin the last
+    # (template) line; env rows are machine-dependent (B3).
+    assert body.splitlines()[-1] == "proj=spike-repo 001 reason=other"
 
 
 def test_session_end_third_end_in_window_suppresses_push(cc_home, tmp_path,
@@ -280,8 +293,9 @@ def test_session_end_third_end_in_window_suppresses_push(cc_home, tmp_path,
     # event-log line, but the ledger entry is still appended
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
-    key, nnn = register_session(repo)
     sent = _capture_sends(monkeypatch)
+    key, nnn = register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     for _ in range(3):
         run_hook("SessionEnd", payload("SessionEnd", repo))
     assert len(sent) == 2  # the 3rd end's push was suppressed
@@ -300,8 +314,9 @@ def test_session_end_suppression_cooldown_rearms_push(cc_home, tmp_path,
     # reopens the window for the following ends
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
-    register_session(repo)
     sent = _capture_sends(monkeypatch)
+    register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     monkeypatch.setattr(se_mod, "SESSION_END_PUSH_COOLDOWN_S", 0.2)
     for _ in range(3):
         run_hook("SessionEnd", payload("SessionEnd", repo))
@@ -319,12 +334,13 @@ def test_session_end_ends_outside_window_do_not_count(cc_home, tmp_path,
     # this end is the 1st that counts, so it pushes (no suppression)
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
+    sent = _capture_sends(monkeypatch)
     key, nnn = register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     d = paths.session_dir(key, nnn)
     old = time.time() - 720
     ledger.append(d, {"type": "session_end", "reason": "other", "ts": old})
     ledger.append(d, {"type": "session_end", "reason": "other", "ts": old})
-    sent = _capture_sends(monkeypatch)
     run_hook("SessionEnd", payload("SessionEnd", repo))
     assert len(sent) == 1
     # no suppression happened (the counterpart asserts the suppression line
@@ -341,8 +357,9 @@ def test_session_end_corrupt_state_file_self_heals(cc_home, tmp_path,
     # is still suppressed and the state file is rewritten valid
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
-    key, nnn = register_session(repo)
     sent = _capture_sends(monkeypatch)
+    key, nnn = register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     run_hook("SessionEnd", payload("SessionEnd", repo))
     run_hook("SessionEnd", payload("SessionEnd", repo))
     st = paths.project_dir(key) / _STATE_FILE
@@ -388,8 +405,9 @@ def test_session_end_window_is_not_reset_by_inside_ends(cc_home, tmp_path,
     # re-arms the push
     repo = make_repo(tmp_path)
     _enable_notify(cc_home)
-    key, nnn = register_session(repo)
     sent = _capture_sends(monkeypatch)
+    key, nnn = register_session(repo)
+    del sent[:]  # row-1 registration push is not under test
     monkeypatch.setattr(se_mod, "SESSION_END_PUSH_COOLDOWN_S", 2.0)
     for _ in range(4):
         run_hook("SessionEnd", payload("SessionEnd", repo))

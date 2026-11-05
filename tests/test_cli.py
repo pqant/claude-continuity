@@ -529,6 +529,11 @@ def test_cli_rotate_runs_rotator(cc_home, tmp_path, fake_tmux, monkeypatch,
     monkeypatch.setattr(rotator, "STARTED_WAIT_S", 0.3)
     monkeypatch.setattr(rotator, "VERIFY_WAIT_S", 0.3)
     monkeypatch.setattr(rotator, "POLL_S", 0.02)
+    # escalation loop (spec 2026-11-03) shrinks too — same pattern as
+    # test_rotator._shrink_deadline: deadline covers attempt 1 + escalation.
+    monkeypatch.setattr(rotator, "RESUME_DEADLINE_S", 1.0)
+    monkeypatch.setattr(rotator, "RETRY_POLL_S", 0.05)
+    monkeypatch.setattr(rotator, "RENAME_ACK_WAIT_S", 0.1)
     rc = cli.main(["rotate", "--session", d["sid"], "--pane", "%9",
                    "--rotation-id", d["rid"]])
     # dead pane (no hooks) -> full failure path
@@ -615,8 +620,14 @@ def test_signal_done_pushes_and_records(cc_home, tmp_path, monkeypatch):
     monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)  # primary resolution
     monkeypatch.chdir(repo)
     assert cli.main(["signal", "done", "all 14 tasks green"]) == 0
-    assert sent == [("✅ cc-continuity: task complete",
-                     "proj=spike-repo summary=all 14 tasks green")]
+    assert len(sent) == 1
+    title, body = sent[0]
+    assert title == "✅ cc-continuity: task complete"
+    # issue #7 G1: envelope lines prepend the template line; host/branch/
+    # model lines are machine-dependent (B3 omits what's unavailable), so
+    # pin only the deterministic envelope row + the template suffix.
+    assert body.splitlines()[0] == "proj=spike-repo 001 (spike-repo-001)"
+    assert body.endswith("\nproj=spike-repo summary=all 14 tasks green")
     last = ledger.read(paths.session_dir(key, nnn))[-1]
     last.pop("ts")  # ledger.append always adds ts
     assert last == {"type": "task_done", "summary": "all 14 tasks green"}
@@ -771,3 +782,98 @@ def test_cli_progress_pane_passes_window_id(cc_home, monkeypatch):
         lambda **kw: calls.append(kw))
     assert cli.main(["progress-pane", "@7"]) == 0
     assert calls == [{"window_id": "@7"}]
+
+
+# ------------------------------------------------------- notify CLI (issue #7)
+
+
+class _NotifySub:
+    def __init__(self):
+        self.popen_calls = []
+        self.run_calls = []
+
+    def Popen(self, cmd, **kw):
+        self.popen_calls.append((cmd, kw))
+        return object()
+
+    def run(self, cmd, **kw):
+        self.run_calls.append((cmd, kw))
+        return type("P", (), {"returncode": 0})()
+
+
+def _notify_cfg(cc_home):
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+
+
+def test_cli_notify_stop_spawns(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    _notify_cfg(cc_home)
+    register_session(repo)
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID,
+               "transcript_path": str(repo / "t.jsonl"),
+               "cwd": str(repo)}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    sub = _NotifySub()
+    monkeypatch.setattr(notify, "subprocess", sub)
+    assert cli.main(["notify", "stop"]) == 0
+    assert len(sub.popen_calls) == 1
+    cmd = sub.popen_calls[0][0]
+    assert cmd[3] == "notify-emit"
+    spec = json.loads(open(cmd[4], encoding="utf-8").read())
+    assert spec["event"] == "stop_done"
+    assert spec["source"] == "cli"
+    assert spec["sid"] == SID
+    assert spec["fields"]["transcript_path"] == str(repo / "t.jsonl")
+
+
+def test_cli_notify_notification_dedup_minute_bucket(cc_home, tmp_path,
+                                                     monkeypatch):
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    _notify_cfg(cc_home)
+    register_session(repo)
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID, "message": "deploy? y/n", "cwd": str(repo)}
+    sub = _NotifySub()
+    monkeypatch.setattr(notify, "subprocess", sub)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "notification"]) == 0
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "notification"]) == 0  # same minute -> dedup
+    assert len(sub.popen_calls) == 1
+    cmd = sub.popen_calls[0][0]
+    spec = json.loads(open(cmd[4], encoding="utf-8").read())
+    assert spec["event"] == "notification"
+    assert spec["fields"]["msg"] == "deploy? y/n"
+
+
+def test_cli_notify_emit_corrupt_exits_zero(cc_home, tmp_path):
+    _notify_cfg(cc_home)
+    bad = tmp_path / "spec.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert cli.main(["notify-emit", str(bad)]) == 0
+    assert not bad.exists()  # corrupt spec consumed, not left in queue
+
+
+def test_notify_claimed_passes_prev_and_handoff(cc_home, tmp_path,
+                                                monkeypatch):
+    from cc_continuity import notify
+    from cc_continuity.hooks import common
+    captured = {}
+    def fake(cfg, event, **kw):
+        captured["event"] = event
+        captured.update(kw)
+        return True
+    monkeypatch.setattr(notify, "safe_send", fake)
+    res = {"new_nnn": "101", "new_name": "proj-101",
+           "old_name": "proj-99", "old_nnn": "99",
+           "validation": "OK", "sid": SID, "key": "k1"}
+    common.notify_claimed(_ := {}, "k1", res)
+    assert captured["prev"] == "proj-99"
+    assert captured["handoff_path"].endswith(
+        "sessions/099/checkpoint/handoff.md")

@@ -361,6 +361,12 @@ def test_envelope_omits_missing():
     ]
 
 
+def test_envelope_omits_empty_name_parens():
+    # B3 polish: an unresolved name must not print empty "()" noise
+    lines = notify.envelope(slug="proj", nnn=3, name="", host="mbp")
+    assert lines[0] == "proj=proj 003"
+
+
 # ---------------------------------------------------------------- git_state
 
 
@@ -573,15 +579,6 @@ def test_send_wait_true_passes_tags(cc_home):
     assert "Tags: bell" in seen["cmd"]
 
 
-def test_safe_send_attaches_event_tags(cc_home, monkeypatch):
-    fake = FakeSub()
-    monkeypatch.setattr(notify, "subprocess", fake)
-    assert notify.safe_send(_cfg(), "session_started", slug="p", nnn=1,
-                            name="p-001") is True
-    cmd = fake.popen_calls[0][0]
-    assert "Tags: rocket" in cmd
-
-
 def test_tags_dict_covers_all_events():
     for ev in ("session_started", "warned", "rotation_pending",
                "handoff_verified", "rotation_complete", "resumed",
@@ -591,3 +588,123 @@ def test_tags_dict_covers_all_events():
                "freeze_detected", "exit_hang", "frozen_nudge",
                "zombie_cleaned"):
         assert notify.TAGS[ev], ev
+
+
+# ------------------------------------------------- detached emit pipeline (T6)
+
+
+def test_safe_send_detached_writes_spec_and_spawns(cc_home, monkeypatch):
+    import sys
+    fake = FakeSub()
+    monkeypatch.setattr(notify, "subprocess", fake)
+    assert notify.safe_send(_cfg(), "session_started", slug="p", nnn=2,
+                            name="p-002", wait=False) is True
+    (cmd, kw) = fake.popen_calls[0]
+    assert cmd[0] == sys.executable
+    assert cmd[1:3] == ["-m", "cc_continuity"]
+    assert cmd[3] == "notify-emit"
+    spec_path = notify.Path(cmd[4])
+    assert kw.get("start_new_session") is True
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert spec["event"] == "session_started"
+    assert spec["slug"] == "p"
+    assert spec["nnn"] == 2
+    assert spec["name"] == "p-002"
+    assert spec["fields"]["name"] == "p-002"
+
+
+def test_safe_send_disabled_no_spawn(cc_home, monkeypatch):
+    fake = FakeSub()
+    monkeypatch.setattr(notify, "subprocess", fake)
+    assert notify.safe_send(_cfg(notify_enabled=False), "stop_done",
+                            slug="p", nnn=1, said="x") is False
+    assert fake.popen_calls == []
+    qdir = notify.paths.runtime_dir() / "notify-queue"
+    assert not qdir.exists() or not list(qdir.iterdir())
+
+
+def test_emit_spec_strips_content_when_flag_off(cc_home):
+    seen = []
+
+    def runner(cmd, **kw):
+        seen.append(cmd)
+        return FakeProc(0)
+
+    ok = notify.emit_spec(
+        {"event": "notification", "slug": "p", "nnn": 1,
+         "fields": {"msg": "approve the deploy sk-ant-AP4I8fj293"}},
+        cfg=_cfg(notify_content=False), runner=runner)
+    assert ok is True
+    body = seen[0][-1]  # --data-raw payload
+    assert "approve the deploy" not in body
+    assert "msg:" not in body
+
+
+def test_emit_spec_enriches_from_handoff(cc_home, tmp_path):
+    handoff = tmp_path / "handoff.md"
+    handoff.write_text("# H\n\n## Objective\n\nShip rich pushes.\n\n"
+                       "## Next Atomic Action\n\nTask 6 GREEN\n",
+                       encoding="utf-8")
+    seen = []
+    notify.emit_spec(
+        {"event": "session_started", "slug": "p", "nnn": 3,
+         "name": "p-003",
+         "fields": {"name": "p-003",
+                    "handoff_path": str(handoff)}},
+        cfg=_cfg(), runner=lambda cmd, **kw: seen.append(cmd) or FakeProc(0))
+    body = seen[0][-1]
+    assert "objective: Ship rich pushes." in body
+    assert "next: Task 6 GREEN" in body
+
+
+def test_emit_spec_stop_done_said_from_transcript(cc_home, tmp_path):
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({"type": "assistant",
+                             "message": {"content": "All done, ship it."}}),
+                 encoding="utf-8")
+    seen = []
+    notify.emit_spec(
+        {"event": "stop_done", "slug": "p", "nnn": 1,
+         "fields": {"transcript_path": str(t)}},
+        cfg=_cfg(), runner=lambda cmd, **kw: seen.append(cmd) or FakeProc(0))
+    assert "said: All done, ship it." in seen[0][-1]
+
+
+def test_emit_spec_never_raises(cc_home):
+    def boom(*a, **k):
+        raise RuntimeError("template bug")
+    assert notify.emit_spec(
+        {"event": "needs_human", "slug": "p", "nnn": 1,
+         "fields": {"reason": "x", "host": "h"}},
+        cfg=_cfg(), msg_fn=boom) is False
+    log = (paths.logs_dir() / "errors.log").read_text(encoding="utf-8")
+    assert "emit_spec" in log
+
+
+def test_emit_spec_uses_tags(cc_home):
+    seen = []
+    notify.emit_spec(
+        {"event": "notification", "slug": "p", "nnn": 1,
+         "fields": {"msg": "hello"}},
+        cfg=_cfg(), runner=lambda cmd, **kw: seen.append(cmd) or FakeProc(0))
+    assert "Tags: bell" in seen[0]
+
+
+def test_emit_spec_unlinks_spec_file(cc_home, tmp_path):
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps({"event": "notification", "slug": "p", "nnn": 1,
+                              "fields": {"msg": "hi"}}), encoding="utf-8")
+    notify.emit_spec({"event": "notification", "slug": "p", "nnn": 1,
+                      "fields": {"msg": "hi"}, "_path": str(sp)},
+                     cfg=_cfg(),
+                     runner=lambda cmd, **kw: FakeProc(0))
+    assert not sp.exists()
+
+
+def test_safe_send_attaches_event_tags(cc_home, monkeypatch):
+    fake = FakeSub()
+    monkeypatch.setattr(notify, "subprocess", fake)
+    assert notify.safe_send(_cfg(), "session_started", slug="p", nnn=1,
+                            name="p-001", wait=True) is True
+    cmd = fake.run_calls[0][0]
+    assert "Tags: rocket" in cmd

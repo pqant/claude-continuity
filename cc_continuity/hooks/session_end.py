@@ -41,7 +41,8 @@ def handle(ctx: HookContext) -> dict | None:
     if _end_push_allowed(ctx):
         notify.safe_send(ctx.cfg, "session_end",
                          slug=notify.project_slug(ctx.session["project_key"]),
-                         nnn=int(ctx.session["nnn"]), reason=reason)
+                         nnn=int(ctx.session["nnn"]), reason=reason,
+                         sid=ctx.session.get("session_id"))
     if reason == "clear" and ctx.session.get("state") == "ROTATING":
         log_event(
             f"SessionEnd reason=clear while state=ROTATING "

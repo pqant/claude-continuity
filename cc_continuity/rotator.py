@@ -221,7 +221,8 @@ def spawn_successor_detached(key: str, nnn: int, session_id: str, cfg: dict,
                              slug=notify.project_slug(key), nnn=nnn,
                              nnn_new=int(succ["nnn"]) if succ else nnn + 1,
                              r0=rec.get("ratio_at_pending"), r1=r1,
-                             naa=notify.naa_snippet(_handoff_path(key, nnn)))
+                             naa=notify.naa_snippet(_handoff_path(key, nnn)),
+                             handoff_path=_handoff_path(key, nnn))
             return "completed", info
         # Claim landed but the C.8 prompt never reached the successor
         # ledger: the successor is alive with the C.4 bootstrap, and the
@@ -562,7 +563,8 @@ def _complete(key: str, nnn: int, rec: dict, name_new: str,
                      slug=notify.project_slug(key), nnn=nnn,
                      nnn_new=int(succ["nnn"]) if succ else nnn + 1,
                      r0=rec.get("ratio_at_pending"), r1=r1,
-                     naa=notify.naa_snippet(_handoff_path(key, nnn)))
+                     naa=notify.naa_snippet(_handoff_path(key, nnn)),
+                     handoff_path=_handoff_path(key, nnn))
     return 0
 
 

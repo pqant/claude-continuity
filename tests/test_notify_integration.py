@@ -99,12 +99,18 @@ def test_full_lifecycle_push_sequence(ntfy, cc_home, tmp_path, fake_tmux,
     _wait(ntfy, 8)  # row 10
 
     got = [(p["title"], p["priority"]) for p in ntfy.pushes]
-    assert got[:4] == [
-        ("▶ cc-continuity: session started", "default"),       # 001
-        ("⚠ cc-continuity: context warning", "default"),
-        ("◆ cc-continuity: rotation pending", "high"),
-        ("✓ cc-continuity: handoff written & verified", "default"),
+    # issue #7 B1: warned+pending are two detached emit children fired by
+    # consecutive advance() calls — python-startup jitter means no wire
+    # order between the pair (same class as the 5→6 pair below).
+    assert got[0] == ("▶ cc-continuity: session started", "default")  # 001
+    assert got[1:3] in [
+        [("⚠ cc-continuity: context warning", "default"),
+         ("◆ cc-continuity: rotation pending", "high")],
+        [("◆ cc-continuity: rotation pending", "high"),
+         ("⚠ cc-continuity: context warning", "default")],
     ]
+    assert got[3] == ("✓ cc-continuity: handoff written & verified",
+                      "default")
     # P9-D7: pushes are best-effort fire-and-forget (detached curl). The
     # successor's "started" (SessionStart hook — the hook writes its
     # .started marker BEFORE firing the curl, so the rotator proceeds
@@ -125,14 +131,18 @@ def test_full_lifecycle_push_sequence(ntfy, cc_home, tmp_path, fake_tmux,
         ("🔄 cc-continuity: rotation complete", "high"),
         ("■ cc-continuity: session ended", "default"),
     ]
+    # issue #7 G1: every body now LEADS with envelope rows (proj/host/
+    # model — which rows ship is machine-dependent, B3), so template rows
+    # are pinned by scanning lines, not by whole-body equality.
     bodies = [p["body"] for p in ntfy.pushes]
     assert bodies[0].startswith("proj=spike-repo 001 (spike-repo-001)")
     assert "proj=spike-repo 001" in bodies[2]
-    assert bodies[3] == "proj=spike-repo 001 cp-001 sha256 OK"
+    assert bodies[3].splitlines()[-1] == "proj=spike-repo 001 cp-001 sha256 OK"
     # the started-002/resumed pair may be swapped on the wire (above)
     started_i = 4 if got[4][0].endswith("session started") else 5
     assert "proj=spike-repo 002" in bodies[started_i]
-    assert bodies[6].startswith("proj=spike-repo 001→002 ratio ")
+    assert any(l.startswith("proj=spike-repo 001→002 ratio ")
+               for l in bodies[6].splitlines())
     assert "proj=spike-repo 001" in bodies[7]
 
 
@@ -150,7 +160,12 @@ def test_signal_needs_human_reaches_server(ntfy, cc_home, tmp_path,
     monkeypatch.chdir(repo)
     assert cli.main(["signal", "needs-human", "drop prod db?"]) == 0
     _wait(ntfy, 2)  # row 1 + needs_human (the CLI path is wait=True)
-    last = ntfy.pushes[-1]
-    assert last["title"] == "🛑 cc-continuity: BLOCKED — waiting for you"
+    # row 1 is the detached emit child now (issue #7 B1): child startup
+    # jitter can land it AFTER the synchronous needs_human curl — select
+    # by title (P9-D7: the capture is polled, never assumed in order).
+    rows = [p for p in ntfy.pushes
+            if p["title"] == "🛑 cc-continuity: BLOCKED — waiting for you"]
+    assert len(rows) == 1
+    last = rows[0]
     assert last["priority"] == "urgent"
     assert "reason=drop prod db?" in last["body"]

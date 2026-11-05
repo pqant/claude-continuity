@@ -586,11 +586,13 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
         _set_latest_checkpoint(key, nnn, snapshot, final)
     # Phase 9 — spec §5 rows 4/8 (P9-D7: push must never break finalize)
     slug = notify.project_slug(key)
+    sid = (metric or {}).get("session_id") or None  # envelope name (B2)
     if degraded:
         notify.safe_send(cfg, "error", slug=slug, nnn=nnn,
                          dedup_key=f"degraded:cp-{nnn:03d}",
-                         what="checkpoint",
+                         what="checkpoint", sid=sid,
                          detail="degraded — handoff draft missing/invalid")
     else:
-        notify.safe_send(cfg, "handoff_verified", slug=slug, nnn=nnn)
+        notify.safe_send(cfg, "handoff_verified", slug=slug, nnn=nnn,
+                         sid=sid)
     return snapshot["checkpoint"], degraded
