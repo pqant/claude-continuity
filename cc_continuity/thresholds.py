@@ -95,7 +95,10 @@ def c2_text(ratio: float, draft_path: str,
             f"Finish only the step you are in (at most: complete the current "
             f"edit and run its quick check). Then write the handoff to "
             f"{draft_path} using exactly these headings, in this order and "
-            f"format (level-2 markdown): {headings}. Only "
+            f"format (level-2 markdown): {headings}. Also add two optional "
+            "plain lines above the first heading: 'Spec: <path of the spec "
+            "file you are following; omit the line if none>' and 'Language: "
+            "<the language you and the user converse in>'. Only "
             "write what you know that git/logs cannot show. Then end your "
             "turn." + _blocked_suffix(blocked))
 
@@ -214,9 +217,19 @@ def c4_text(*, new_name: str, old_name: str, status: str,
     lines = [f"CONTINUITY BOOTSTRAP: you are {new_name}, continuing "
              f"{old_name}. VALIDATION: {status}"]
     lines.extend(details)
-    lines.append(f"Protocol: read the handoff below (or at {handoff_path}) "
-                 "fully; do not redo completed work; start with Next Atomic "
-                 "Action.")
+    lines.append(
+        f"Protocol: read the handoff below (or at {handoff_path}) "
+        "fully; do not redo completed work; start with Next Atomic "
+        "Action. Before any tool call, print the navigator panel as your "
+        "first visible reply text: '◆ navigator: " + new_name + " ← cp-<NNN "
+        "of the handoff>', then '✅ Done — previous session' listing items "
+        "from Completed This Session, then '▶ Next — this session' listing "
+        "Next Atomic Action and Remaining Plan items; if the handoff "
+        "carries a 'Spec:' line, read that file and tick its items "
+        "(✓ done, ▶ in progress, ○ pending) with a '<k>/<n> done' count — "
+        "omit the section when the line is absent. Plain lines only, no "
+        "box-drawing characters; write items in the handoff's 'Language:' "
+        "language (fallback: English). Then begin work in the same reply.")
     lines.append("---")
     if handoff and len(handoff) <= inline_max:
         lines.append(handoff.rstrip())
@@ -235,4 +248,6 @@ def c8_text(cp_id: str, handoff_path: str) -> str:
     """Appendix C.8 — the single-line continuation prompt the rotator types."""
     return (f"CONTINUITY RESUME {cp_id}: read {handoff_path} completely, "
             "apply the VALIDATION result, then continue from Next Atomic "
-            "Action. Do not repeat completed work.")
+            "Action. Do not repeat completed work. Before any tool call, "
+            "print the navigator panel from the handoff (Done/Next + "
+            "spec ticks) as your first visible output.")

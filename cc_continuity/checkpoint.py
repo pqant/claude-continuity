@@ -54,6 +54,36 @@ class CheckpointError(RuntimeError):
     """Checkpoint build/finalization failed (message is user-facing)."""
 
 
+#: Optional navigator fields (issue #6): plain lines above the first
+#: heading of the draft — "Spec: <path>" and "Language: <lang>". They are
+#: never required (old drafts stay valid); the successor's resume prompt
+#: tells the model to render them as the navigator panel.
+_SPEC_LINE = re.compile(r"^Spec:[ \t]*(\S.*?)\s*$")
+_LANGUAGE_LINE = re.compile(r"^Language:[ \t]*(\S.*?)\s*$")
+
+
+def navigator_fields(text: str) -> dict:
+    """Parse the optional Spec:/Language: preamble of a draft or handoff.
+
+    Only the preamble (lines before the first markdown heading) counts:
+    a 'Spec:' mention inside a section body is prose, not the field.
+    Absent lines yield None; the panel degrades (spec section omitted,
+    language falls back to English at render time).
+    """
+    out = {"spec": None, "language": None}
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            break
+        m = _SPEC_LINE.match(line)
+        if m and out["spec"] is None:
+            out["spec"] = m.group(1)
+            continue
+        m = _LANGUAGE_LINE.match(line)
+        if m and out["language"] is None:
+            out["language"] = m.group(1)
+    return out
+
+
 @dataclass
 class DraftReport:
     ok: bool

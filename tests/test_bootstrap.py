@@ -48,9 +48,43 @@ def test_c8_text_is_single_line_prd_verbatim():
     from cc_continuity import thresholds
     t = thresholds.c8_text("cp-001", "/x/checkpoint/handoff.md")
     assert "\n" not in t
-    assert t == ("CONTINUITY RESUME cp-001: read /x/checkpoint/handoff.md "
-                 "completely, apply the VALIDATION result, then continue from "
-                 "Next Atomic Action. Do not repeat completed work.")
+    assert t == (
+        "CONTINUITY RESUME cp-001: read /x/checkpoint/handoff.md "
+        "completely, apply the VALIDATION result, then continue from "
+        "Next Atomic Action. Do not repeat completed work. Before any tool "
+        "call, print the navigator panel from the handoff (Done/Next + "
+        "spec ticks) as your first visible output.")
+
+
+def test_c8_text_carries_navigator_directive():
+    # issue #6 — degraded paths that reach the successor without hook
+    # context must still get the panel instruction.
+    from cc_continuity import thresholds
+    t = thresholds.c8_text("cp-001", "/x/checkpoint/handoff.md")
+    assert "navigator panel" in t and "first visible output" in t
+
+
+def test_c4_text_carries_navigator_directive():
+    # issue #6 — the always-attached resume context instructs the panel.
+    from cc_continuity import thresholds
+    t = thresholds.c4_text(new_name="p-002", old_name="p-001", status="OK",
+                           details=[], handoff="# Handoff\nbody",
+                           handoff_path="/x/handoff.md", inline_max=12000)
+    proto = next(l for l in t.splitlines() if l.startswith("Protocol:"))
+    assert "navigator panel" in proto
+    assert "◆ navigator: p-002 ← cp-" in proto
+    assert "✅ Done — previous session" in proto
+    assert "▶ Next — this session" in proto
+    assert "Spec:" in proto and "Language:" in proto
+    assert "no box-drawing" in proto
+
+
+def test_c2_text_asks_for_navigator_fields():
+    # issue #6 — the rotation request tells the writer the two optional
+    # plain lines that feed the panel (Spec path + conversation language).
+    from cc_continuity import thresholds
+    t = thresholds.c2_text(0.62, "/x/handoff.draft.md")
+    assert "Spec:" in t and "Language:" in t
 
 
 def test_c4_text_inlines_short_handoff():

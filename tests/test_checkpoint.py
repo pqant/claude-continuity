@@ -87,6 +87,36 @@ def test_clean_draft_ok():
     assert r.word_count == len(text.split())
 
 
+def test_draft_with_navigator_preamble_ok():
+    # issue #6 — optional 'Spec:'/'Language:' plain lines above the first
+    # heading must validate cleanly (backward compatible: drafts without
+    # them stay valid too).
+    text = "Spec: docs/PLP-SPEC.md\nLanguage: Turkish\n\n" + _draft()
+    r = checkpoint.validate_draft(text, _cfg())
+    assert r.ok is True and r.problems == []
+    assert r.redacted_text == text
+
+
+def test_navigator_fields_extracted_from_preamble():
+    text = "Spec: docs/PLP-SPEC.md\nLanguage: Turkish\n\n" + _draft()
+    f = checkpoint.navigator_fields(text)
+    assert f == {"spec": "docs/PLP-SPEC.md", "language": "Turkish"}
+
+
+def test_navigator_fields_absent_is_none():
+    f = checkpoint.navigator_fields(_draft())
+    assert f == {"spec": None, "language": None}
+
+
+def test_navigator_fields_ignore_mentions_after_first_heading():
+    # 'Spec:' inside a section body is prose, not the navigator field.
+    text = _draft().replace(
+        "Ship the checkpoint engine for cc-continuity this session.",
+        "Ship the checkpoint engine. Spec: fake/path.md (a mention only)", 1)
+    f = checkpoint.navigator_fields(text)
+    assert f["spec"] is None
+
+
 def test_missing_heading_reported():
     r = checkpoint.validate_draft(_draft(omit=("Remaining Plan",)), _cfg())
     assert r.ok is False
