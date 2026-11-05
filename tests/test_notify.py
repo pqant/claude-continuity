@@ -445,3 +445,57 @@ def test_build_env_tolerates_missing(cc_home):
     lines = notify.build_env("proj", 3, name="proj-3", sid="nope",
                              repo="/nope", host="mbp", runner=boom)
     assert lines == ["proj=proj 003 (proj-3)", "host=mbp"]
+
+
+# ---------------------------------------------------------- content fetchers
+
+
+def test_last_assistant_text_picks_last(tmp_path):
+    p = tmp_path / "t.jsonl"
+    lines = [
+        json.dumps({"type": "user", "message": {"content": "go"}}),
+        json.dumps({"type": "assistant", "message": {"content": "one"}}),
+        json.dumps({"type": "tool_use", "name": "Bash"}),
+        json.dumps({"type": "assistant", "message": {"content": "two"}}),
+    ]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert notify.last_assistant_text(str(p)) == "two"
+
+
+def test_last_assistant_text_blocks_and_whitespace(tmp_path):
+    p = tmp_path / "t.jsonl"
+    rec = {"type": "assistant",
+           "message": {"content": [
+               {"type": "tool_use", "id": "1", "name": "Bash"},
+               {"type": "text", "text": "hello\n\n  world sk-ant-AP4I8fj293"}]}}
+    p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    out = notify.last_assistant_text(str(p))
+    assert out == "hello world [redacted]"
+    long_rec = {"type": "assistant",
+                "message": {"content": "x" * 500}}
+    p.write_text(json.dumps(long_rec) + "\n", encoding="utf-8")
+    assert len(notify.last_assistant_text(str(p))) <= 300
+
+
+def test_last_assistant_text_corrupt(tmp_path):
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not json\n{\n", encoding="utf-8")
+    assert notify.last_assistant_text(str(bad)) is None
+    none = tmp_path / "none.jsonl"
+    none.write_text(json.dumps(
+        {"type": "user", "message": {"content": "hi"}}) + "\n", encoding="utf-8")
+    assert notify.last_assistant_text(str(none)) is None
+    assert notify.last_assistant_text(str(tmp_path / "missing.jsonl")) is None
+    assert notify.last_assistant_text(None) is None
+
+
+def test_objective_from(tmp_path):
+    h = tmp_path / "handoff.md"
+    h.write_text("# Handoff\n\n## Objective\n\nShip rich lifecycle pushes.\n"
+                 "More detail later.\n\n## Current Task and Exact Stopping "
+                 "Point\n...\n", encoding="utf-8")
+    assert notify.objective_from(str(h)) == "Ship rich lifecycle pushes."
+    empty = tmp_path / "empty.md"
+    empty.write_text("## Objective\n\n## Current Task\nx\n", encoding="utf-8")
+    assert notify.objective_from(str(empty)) is None
+    assert notify.objective_from(None) is None

@@ -219,6 +219,70 @@ def naa_snippet(handoff_path: str, n: int = 60) -> str:
     return _clip(" ".join(out), n)
 
 
+def last_assistant_text(path: str | None, *,
+                        limit: int = 300) -> str | None:
+    """Scrubbed, clipped excerpt of the LAST assistant message in a JSONL
+    transcript (spec B5): string content or list-of-blocks; bad lines are
+    skipped (torn tail), None when nothing usable comes back."""
+    if not path:
+        return None
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    best: str | None = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        msg = rec.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        text = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = [b.get("text") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str)]
+            if parts:
+                text = "\n".join(parts)
+        if text and text.strip():
+            best = text
+    if best is None:
+        return None
+    return _clip(scrub(best), limit)
+
+
+def objective_from(handoff_path: str | None, *,
+                   limit: int = 200) -> str | None:
+    """First content line under the handoff's ``## Objective`` heading
+    (spec G2); None when the heading or a content line is absent."""
+    if not handoff_path:
+        return None
+    try:
+        lines = Path(handoff_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    on = False
+    for line in lines:
+        if line.strip().lower().startswith("## objective"):
+            on = True
+            continue
+        if on:
+            if line.startswith("## "):
+                break
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                return _clip(stripped, limit)
+    return None
+
+
 def curl_cmd(endpoint: str, title: str, body: str, priority: str) -> list[str]:
     """P9-D7 wire form: curl -s -m 5, Title/Priority headers, plain body."""
     return ["curl", "-s", "-m", str(int(CURL_TIMEOUT_S)),
