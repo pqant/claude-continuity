@@ -333,3 +333,115 @@ def test_scrub_private_key_truncates():
     out = notify.scrub(text)
     assert out == "summary before"
     assert "BEGIN" not in out and "QUJD" not in out
+
+
+# ---------------------------------------------------------------- envelope
+
+
+def test_envelope_full():
+    lines = notify.envelope(slug="claude-continuity", nnn=161,
+                            name="claude-continuity-161", host="mbp",
+                            branch="main", sha="4004411", dirty=True,
+                            model="qwen3.8-flash-next", ratio=0.643)
+    assert lines == [
+        "proj=claude-continuity 161 (claude-continuity-161)",
+        "host=mbp branch=main @4004411*",
+        "model=qwen3.8-flash-next ratio=64.3%",
+    ]
+
+
+def test_envelope_omits_missing():
+    lines = notify.envelope(slug="proj", nnn=3, name="proj-3",
+                            host="mbp", model="opus")
+    assert lines == [
+        "proj=proj 003 (proj-3)",
+        "host=mbp",
+        "model=opus",
+    ]
+
+
+# ---------------------------------------------------------------- git_state
+
+
+def test_git_state_parses():
+    outs = iter(["main\n", "753f7e7\n", " M cc_continuity/notify.py\n"])
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, stdout=next(outs),
+                                           stderr="")
+
+    assert notify.git_state("/repo", runner=runner) == ("main", "753f7e7",
+                                                        True)
+    assert len(calls) == 3
+    for cmd, kw in calls:
+        assert cmd[:3] == ["git", "-C", "/repo"]
+        assert kw.get("timeout") == 2
+
+
+def test_git_state_none_on_failure():
+    def raiser(cmd, **kw):
+        raise OSError("no git")
+
+    assert notify.git_state("/repo", runner=raiser) is None
+
+    def to(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 2)
+
+    assert notify.git_state("/repo", runner=to) is None
+
+    def bad(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, "", "fatal: not a repo")
+
+    assert notify.git_state("/repo", runner=bad) is None
+
+    def empty_branch(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="\n", stderr="")
+
+    assert notify.git_state("/repo", runner=empty_branch) is None
+    assert notify.git_state(None) is None
+
+
+# ---------------------------------------------------------------- metric_env
+
+
+def test_metric_env_lines_stale(cc_home):
+    from cc_continuity import statusline
+    statusline.write_metric({"session_id": "sid-2", "ts": 0,
+                             "model": "opus", "ratio": 0.5})
+    assert notify.metric_env_lines("sid-2") == (None, None)
+    assert notify.metric_env_lines(None) == (None, None)
+
+
+# ---------------------------------------------------------------- build_env
+
+
+def test_build_env_full(cc_home):
+    import time
+    from cc_continuity import statusline
+    statusline.write_metric({"session_id": "sid-1", "ts": time.time(),
+                             "model": "qwen3.8-flash-next", "ratio": 0.5})
+    outs = iter(["main\n", "abc1234\n", "?? x\n"])
+
+    def runner(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout=next(outs),
+                                           stderr="")
+
+    lines = notify.build_env("claude-continuity", 162,
+                             name="claude-continuity-162", sid="sid-1",
+                             repo="/repo", host="mbp", runner=runner)
+    assert lines == [
+        "proj=claude-continuity 162 (claude-continuity-162)",
+        "host=mbp branch=main @abc1234*",
+        "model=qwen3.8-flash-next ratio=50.0%",
+    ]
+
+
+def test_build_env_tolerates_missing(cc_home):
+    def boom(cmd, **kw):
+        raise OSError("no git")
+
+    lines = notify.build_env("proj", 3, name="proj-3", sid="nope",
+                             repo="/nope", host="mbp", runner=boom)
+    assert lines == ["proj=proj 003 (proj-3)", "host=mbp"]

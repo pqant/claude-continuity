@@ -80,6 +80,92 @@ def _clip(s: object, n: int) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
+# ---------------------------------------------------------------- envelope
+# Spec G1/B2/B3 (issue #7): who/where/what on the first three lines, most
+# critical first (phones show ~5). Every part past the proj line is
+# best-effort — a missing field is omitted, never an error.
+
+
+def envelope(*, slug: str, nnn: int, name: str, host: str,
+             branch: str | None = None, sha: str | None = None,
+             dirty: bool = False, model: str | None = None,
+             ratio: float | None = None) -> list[str]:
+    """The three envelope lines (pure function of its inputs — B1)."""
+    lines = [f"proj={slug} {nnn:03d} ({name})"]
+    host_line = f"host={host}"
+    if branch and sha:
+        host_line += f" branch={branch} @{sha}" + ("*" if dirty else "")
+    lines.append(host_line)
+    parts = []
+    if model:
+        parts.append(f"model={model}")
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        parts.append(f"ratio={ratio * 100:.1f}%")
+    if parts:
+        lines.append(" ".join(parts))
+    return lines
+
+
+def git_state(repo: str | None, *,
+              runner=subprocess.run) -> tuple[str, str, bool] | None:
+    """(branch, short-sha, dirty) from three ``git -C`` probes (2 s each);
+    None on ANY failure — the envelope omits the git parts (B3)."""
+    if not repo:
+        return None
+
+    def _git(*args: str) -> str:
+        res = runner(["git", "-C", str(repo), *args],
+                     capture_output=True, text=True, timeout=2)
+        if getattr(res, "returncode", 1) != 0:
+            raise RuntimeError(f"git {args[0]} rc={res.returncode}")
+        return str(res.stdout or "").strip()
+
+    try:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        sha = _git("rev-parse", "--short", "HEAD")
+        porcelain = _git("status", "--porcelain")
+        if not branch or not sha:
+            return None  # empty repo / detached weirdness
+        return (branch, sha, bool(porcelain))
+    except Exception:
+        return None
+
+
+def metric_env_lines(sid: str | None) -> tuple[str | None, float | None]:
+    """(model, ratio) from the sid's statusline metric (B2); (None, None)
+    when absent or stale (10-min rule). statusline imported lazily so the
+    hook-time import graph stays cycle-free."""
+    if not sid:
+        return (None, None)
+    from . import statusline
+    metric = statusline.read_metric(sid)
+    if statusline.is_stale(metric) or not isinstance(metric, dict):
+        return (None, None)
+    model = metric.get("model")
+    ratio = metric.get("ratio")
+    return (
+        model if isinstance(model, str) and model else None,
+        ratio if isinstance(ratio, (int, float))
+        and not isinstance(ratio, bool) else None,
+    )
+
+
+def build_env(slug, nnn, *, name: str = "", sid: str | None = None,
+              repo: str | None = None, host: str | None = None,
+              runner=subprocess.run) -> list[str]:
+    """Run the collectors and compose the envelope lines; every failure is
+    tolerated (runs in the detached notify-emit child, never the hook
+    budget — B1)."""
+    git = git_state(repo, runner=runner)
+    model, ratio = metric_env_lines(sid)
+    return envelope(slug=slug, nnn=nnn, name=name,
+                    host=host if host is not None else socket.gethostname(),
+                    branch=git[0] if git else None,
+                    sha=git[1] if git else None,
+                    dirty=bool(git and git[2]),
+                    model=model, ratio=ratio)
+
+
 # ---------------------------------------------------------------- scrubber
 # Spec B4 (issue #7): mask credentials in every user-content body BEFORE the
 # clip, so replacements count toward the cap. Envelope fields are never
