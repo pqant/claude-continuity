@@ -423,6 +423,78 @@ def install(home: Path, *, window: int | None = None,
     return manifest
 
 
+# ------------------------------------------- generic-hook migration (issue #7)
+
+# The three user-level generic curls (spec B6) are matched by signature,
+# replaced IN PLACE (never reordered), and the file is backed up once with
+# install()'s timestamped pattern. NOT wired into install() — a one-time,
+# user-approved migration owned by its own entry point.
+_GENERIC_SIGNATURES: tuple[tuple[str, str], ...] = (
+    ("Claude is waiting for your approval",
+     "$HOME/.local/bin/cc-continuity notify notification"),
+    ("Claude is waiting for you",
+     "$HOME/.local/bin/cc-continuity notify notification"),
+    ("Claude is done",
+     "$HOME/.local/bin/cc-continuity notify stop"),
+)
+
+
+def migrate_generic_hooks(home: Path, *,
+                          now: str | None = None) -> dict:
+    """Rewrite the three generic ntfy curl hook commands to the
+    ``cc-continuity notify`` CLI (spec G6/B6). One timestamped backup
+    (skipped entirely when nothing changes — idempotent second run returns
+    ``replaced == 0`` and no backup). Unknown hooks and everything else
+    (order, other keys) are untouched. Returns
+    ``{"backed_up": str | None, "replaced": int}``."""
+    settings_path = Path(home) / ".claude" / "settings.json"
+    result = {"backed_up": None, "replaced": 0}
+    if not settings_path.is_file():
+        return result
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise InstallError(
+            f"settings.json must be a JSON object: {settings_path}")
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return result
+    for event_entries in hooks.values():
+        if not isinstance(event_entries, list):
+            continue
+        for group in event_entries:
+            if not isinstance(group, dict):
+                continue
+            inner = group.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            for entry in inner:
+                if not isinstance(entry, dict):
+                    continue
+                command = entry.get("command")
+                if not isinstance(command, str):
+                    continue
+                for signature, replacement in _GENERIC_SIGNATURES:
+                    if signature in command and \
+                            command != replacement:
+                        entry["command"] = replacement
+                        result["replaced"] += 1
+                        break
+    if result["replaced"] == 0:
+        return result
+    bak = settings_path.with_name(
+        f"settings.json.bak-{now or _ts()}")
+    n = 1
+    while bak.exists():  # two migrations in the same second
+        n += 1
+        bak = settings_path.with_name(f"settings.json.bak-{_ts()}-{n}")
+    shutil.copy2(settings_path, bak)
+    result["backed_up"] = str(bak)
+    settings_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    return result
+
+
 # -------------------------------------------------------------- uninstall
 
 

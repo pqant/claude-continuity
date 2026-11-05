@@ -328,3 +328,109 @@ def test_managed_block_has_signal_guidance(fake_home):
     text = (fake_home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
     assert "cc-continuity signal needs-human" in text
     assert "cc-continuity signal done" in text
+
+
+# ------------------------------------- generic-hook migration (issue #7, B6)
+
+# The three user-level curls exactly as they live in ~/.claude/settings.json
+# today (topic name substituted by the build battery's rule).
+_GENERIC_NOTIFICATION_APPROVAL = (
+    "curl -s -H 'Title: 🔐 Claude is waiting for your approval' "
+    "-H 'Priority: urgent' -d \"${CLAUDE_NOTIFICATION}\" "
+    "https://ntfy.sh/example-topic && exit 0")
+_GENERIC_NOTIFICATION_WAITING = (
+    "curl -s -H 'Title: 💬 Claude is waiting for you' "
+    "-H 'Priority: high' -d \"${CLAUDE_NOTIFICATION}\" "
+    "https://ntfy.sh/example-topic && exit 0")
+_GENERIC_STOP_DONE = (
+    "curl -s -H 'Title: ✅ Claude is done!' -H 'Priority: default' "
+    "-d 'Task has been completed, please check.' "
+    "https://ntfy.sh/example-topic; exit 0")
+
+
+def _seed_generic_hooks(home):
+    (home / ".claude").mkdir()
+    settings = {
+        "hooks": {
+            "Notification": [
+                {"matcher": "", "hooks": [
+                    {"type": "command",
+                     "command": _GENERIC_NOTIFICATION_APPROVAL}]},
+                {"matcher": "", "hooks": [
+                    {"type": "command",
+                     "command": _GENERIC_NOTIFICATION_WAITING}]},
+                {"matcher": "", "hooks": [
+                    {"type": "command",
+                     "command": "python3 ~/notify_team.py"}]},
+            ],
+            "Stop": [
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": _GENERIC_STOP_DONE}]},
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": "~/audit.sh"}]},
+            ],
+        },
+        "env": {"KEEP": "1"},
+    }
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+
+
+def _commands(home, event):
+    return [h["command"]
+            for grp in _settings(home)["hooks"][event]
+            for h in grp["hooks"]]
+
+
+def test_migrate_replaces_three(fake_home):
+    _seed_generic_hooks(fake_home)
+    res = install.migrate_generic_hooks(fake_home, now="20261105-150000")
+    assert res["replaced"] == 3
+    assert Path(res["backed_up"]).name == "settings.json.bak-20261105-150000"
+    assert Path(res["backed_up"]).is_file()
+    assert _commands(fake_home, "Notification") == [
+        "$HOME/.local/bin/cc-continuity notify notification",
+        "$HOME/.local/bin/cc-continuity notify notification",
+        "python3 ~/notify_team.py",
+    ]
+    assert _commands(fake_home, "Stop") == [
+        "$HOME/.local/bin/cc-continuity notify stop",
+        "~/audit.sh",
+    ]
+
+
+def test_migrate_idempotent(fake_home):
+    _seed_generic_hooks(fake_home)
+    first = install.migrate_generic_hooks(fake_home, now="20261105-150000")
+    assert first["replaced"] == 3
+    second = install.migrate_generic_hooks(fake_home, now="20261105-150001")
+    assert second["replaced"] == 0
+    assert second["backed_up"] is None
+    backups = list((fake_home / ".claude").glob("settings.json.bak-*"))
+    assert len(backups) == 1
+
+
+def test_migrate_leaves_others(fake_home):
+    # unknown hooks untouched (never reordered), unrelated top-level keys
+    # preserved; a settings.json without any generic curl -> zero-op,
+    # no backup written.
+    _seed_generic_hooks(fake_home)
+    before = _settings(fake_home)
+    install.migrate_generic_hooks(fake_home, now="20261105-150000")
+    after = _settings(fake_home)
+    assert [g for g in after["hooks"]["Notification"]][-1] == \
+        before["hooks"]["Notification"][-1]
+    assert after["hooks"]["Stop"][1]["hooks"][0]["command"] == "~/audit.sh"
+    assert after["env"] == {"KEEP": "1"}
+    plain = fake_home / "home2"
+    plain.mkdir()
+    (plain / ".claude").mkdir()
+    (plain / ".claude" / "settings.json").write_text(
+        json.dumps({"hooks": {"Stop": [
+            {"matcher": "", "hooks": [{"type": "command",
+                                       "command": "~/audit.sh"}]}]}}),
+        encoding="utf-8")
+    res = install.migrate_generic_hooks(plain, now="20261105-150000")
+    assert res == {"backed_up": None, "replaced": 0}
+    assert not list((plain / ".claude").glob("settings.json.bak-*"))
