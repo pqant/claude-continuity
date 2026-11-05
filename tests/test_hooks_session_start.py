@@ -490,7 +490,7 @@ def test_startup_registration_pushes_session_started(cc_home, tmp_path,
     assert ep == "https://ntfy.sh/example-topic"
     assert title == "▶ cc-continuity: session started"
     assert prio == "default"
-    assert body.startswith("proj=spike-repo 001 (spike-repo-001) host=")
+    assert body.startswith("proj=spike-repo 001 (spike-repo-001)")  # host moved to env (issue #7)
 
 
 def test_startup_registration_silent_when_notify_disabled(cc_home, tmp_path,

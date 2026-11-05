@@ -56,7 +56,7 @@ def test_build_session_started():
         "session_started", slug="spike-repo", nnn=3,
         name="spike-repo-003", host="box")
     assert (t, p) == ("▶ cc-continuity: session started", "default")
-    assert b == "proj=spike-repo 003 (spike-repo-003) host=box"
+    assert b == "proj=spike-repo 003 (spike-repo-003)"  # host moved to env
 
 
 def test_build_warned_and_pending():
@@ -93,8 +93,8 @@ def test_build_rotation_complete():
         "rotation_complete", slug="spike-repo", nnn=3, nnn_new=4,
         r0=0.65, r1=None, naa="Run pytest -q and fix any failure.")
     assert (t, p) == ("🔄 cc-continuity: rotation complete", "high")
-    assert b == ("proj=spike-repo 003→004 ratio 65.0%→— resumed: "
-                 "Run pytest -q and fix any failure.")
+    assert b == ("proj=spike-repo 003→004 ratio 65.0%→—\n"
+                 "resumed: Run pytest -q and fix any failure.")
 
 
 def test_build_needs_human_urgent_and_error():
@@ -123,8 +123,9 @@ def test_build_task_done():
 
 def test_build_clips_long_fields_and_rejects_unknown_event():
     t, b, p = notify.build_message(
-        "needs_human", slug="s", nnn=1, reason="x" * 300, host="box")
-    assert len(b) <= 200 and "..." in b
+        "needs_human", slug="s", nnn=1, reason="x" * 1200, host="box")
+    assert len(b) <= 1000 and "..." in b
+    assert "x" * 301 not in b  # reason clipped to 300 (was 80)
     with pytest.raises(ValueError):
         notify.build_message("nope", slug="s", nnn=1)
 
@@ -499,3 +500,94 @@ def test_objective_from(tmp_path):
     empty.write_text("## Objective\n\n## Current Task\nx\n", encoding="utf-8")
     assert notify.objective_from(str(empty)) is None
     assert notify.objective_from(None) is None
+
+
+# --------------------------------------------------- rich templates (issue #7)
+
+
+def test_build_message_session_started_rich():
+    env = ["proj=p 002 (p-2)", "host=mbp", "model=x ratio=64.2%"]
+    _, b, _ = notify.build_message(
+        "session_started", slug="p", nnn=2, name="p-2", env=env,
+        prev="p-1", objective="Ship rich pushes sk-ant-AP4I8fj293",
+        next="Task 5 GREEN")
+    assert b == ("proj=p 002 (p-2)\nhost=mbp\nmodel=x ratio=64.2%\n"
+                 "prev=p-1\nobjective: Ship rich pushes [redacted]\n"
+                 "next: Task 5 GREEN")
+    # fields absent → their lines omitted; no duplicate proj line (B3)
+    _, b2, _ = notify.build_message(
+        "session_started", slug="p", nnn=2, name="p-2", env=env)
+    assert b2 == "proj=p 002 (p-2)\nhost=mbp\nmodel=x ratio=64.2%"
+
+
+def test_build_message_stop_done():
+    t, b, pr = notify.build_message(
+        "stop_done", slug="proj", nnn=9, env=["proj=proj 009 (proj-9)"],
+        said="Shipped. token=hunter2secret all green")
+    assert (t, pr) == ("✅ cc-continuity: Claude is done", "default")
+    assert b == ("proj=proj 009 (proj-9)\n"
+                 "said: Shipped. key=[redacted] all green")
+    # no said (content off / unreadable transcript) → still a push
+    t, b, pr = notify.build_message("stop_done", slug="proj", nnn=9)
+    assert b == "proj=proj 009"
+
+
+def test_build_message_notification():
+    t, b, pr = notify.build_message(
+        "notification", slug="proj", nnn=9,
+        msg="Bash(rm -rf /tmp/x) needs approval")
+    assert (t, pr) == ("🔔 cc-continuity: Claude needs you", "high")
+    assert b == "msg: Bash(rm -rf /tmp/x) needs approval"
+    t, b, pr = notify.build_message("notification", slug="proj", nnn=9)
+    assert b == "proj=proj 009"
+
+
+def test_build_message_cap_1000():
+    _, base, _ = notify.build_message("handoff_verified", slug="s", nnn=1)
+    fill = 1000 - len(base) - 1  # env line + "\n" + event line = exactly 1000
+    notify.build_message("handoff_verified", slug="s", nnn=1,
+                         env=["z" * fill])
+    with pytest.raises(ValueError):
+        notify.build_message("handoff_verified", slug="s", nnn=1,
+                             env=["z" * (fill + 1)])
+
+
+def test_curl_cmd_tags_header():
+    assert notify.curl_cmd("https://ntfy.sh/t", "T", "b", "high",
+                           tags="rocket") == [
+        "curl", "-s", "-m", "5", "-X", "POST", "https://ntfy.sh/t",
+        "-H", "Title: T", "-H", "Priority: high", "-H", "Tags: rocket",
+        "--data-raw", "b"]
+
+
+def test_send_wait_true_passes_tags(cc_home):
+    seen = {}
+
+    def runner(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc(0)
+
+    assert notify.send("https://ntfy.sh/t", "T", "b", "default",
+                       event="e", wait=True, tags="bell",
+                       runner=runner) is True
+    assert "Tags: bell" in seen["cmd"]
+
+
+def test_safe_send_attaches_event_tags(cc_home, monkeypatch):
+    fake = FakeSub()
+    monkeypatch.setattr(notify, "subprocess", fake)
+    assert notify.safe_send(_cfg(), "session_started", slug="p", nnn=1,
+                            name="p-001") is True
+    cmd = fake.popen_calls[0][0]
+    assert "Tags: rocket" in cmd
+
+
+def test_tags_dict_covers_all_events():
+    for ev in ("session_started", "warned", "rotation_pending",
+               "handoff_verified", "rotation_complete", "resumed",
+               "needs_human", "error", "task_done", "session_end",
+               "stop_done", "notification", "dgx_down", "dgx_up",
+               "dgx_power_cycle", "turn_dead", "turn_recovered",
+               "freeze_detected", "exit_hang", "frozen_nudge",
+               "zombie_cleaned"):
+        assert notify.TAGS[ev], ev

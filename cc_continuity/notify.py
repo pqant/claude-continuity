@@ -10,11 +10,12 @@ endpoint must not add latency to the 100 ms hook budget; Gate 8 measured
 p95 52 ms). CLI/doctor call sites pass ``wait=True`` (``subprocess.run``,
 timeout 6 s) so a failure is observable.
 
-Message format (P9-D4): English, emoji + one-line title + compact body
-(≤ 200 chars, mobile-readable). Fields: project slug, session NNN,
-ratio/reason/summary when relevant, hostname. No secrets, no file
-contents. The endpoint is user-supplied (P9-D1); any ntfy-compatible
-server works.
+Message format (P9-D4 + issue #7): English, emoji title + multi-line body
+(≤ 1000 chars) — a common envelope (proj/host/branch/model/ratio) then
+event-specific lines. Content fields (transcript excerpt, notification
+text, reasons, summaries) go through ``scrub`` before the clip; the whole
+path stays behind the ``notify_content`` config flag. The endpoint is
+user-supplied (P9-D1); any ntfy-compatible server works.
 """
 
 from __future__ import annotations
@@ -283,17 +284,22 @@ def objective_from(handoff_path: str | None, *,
     return None
 
 
-def curl_cmd(endpoint: str, title: str, body: str, priority: str) -> list[str]:
-    """P9-D7 wire form: curl -s -m 5, Title/Priority headers, plain body."""
-    return ["curl", "-s", "-m", str(int(CURL_TIMEOUT_S)),
-            "-X", "POST", endpoint,
-            "-H", f"Title: {title}",
-            "-H", f"Priority: {priority}",
-            "--data-raw", body]
+def curl_cmd(endpoint: str, title: str, body: str, priority: str,
+             tags: str = "") -> list[str]:
+    """P9-D7 wire form: curl -s -m 5, Title/Priority headers (+ Tags when
+    set, spec G4), plain body."""
+    cmd = ["curl", "-s", "-m", str(int(CURL_TIMEOUT_S)),
+           "-X", "POST", endpoint,
+           "-H", f"Title: {title}",
+           "-H", f"Priority: {priority}"]
+    if tags:
+        cmd += ["-H", f"Tags: {tags}"]
+    cmd += ["--data-raw", body]
+    return cmd
 
 
 def send(endpoint: str, title: str, body: str, priority: str, *,
-         event: str = "", wait: bool = False,
+         event: str = "", wait: bool = False, tags: str = "",
          runner=subprocess.run) -> bool:
     """Fire one push. NEVER raises.
 
@@ -303,7 +309,7 @@ def send(endpoint: str, title: str, body: str, priority: str, *,
     """
     name = event or title
     try:
-        cmd = curl_cmd(endpoint, title, body, priority)
+        cmd = curl_cmd(endpoint, title, body, priority, tags)
         if wait:
             proc = runner(cmd, capture_output=True,
                           timeout=CURL_TIMEOUT_S + 1)
@@ -366,103 +372,162 @@ def _fmt_minutes(s: float) -> str:
     return f"{m // 60}h {m % 60:02d}m"
 
 
+BODY_CAP = 1000  # spec G3 (issue #7): ntfy allows 512 KB — the cap stays
+                 # only as the template-bug guard (was 200, self-imposed).
+
+#: ntfy ``Tags`` header per event (spec G4, SH-exemplar style).
+TAGS: dict[str, str] = {
+    "session_started": "rocket",
+    "warned": "warning",
+    "rotation_pending": "hourglass_flowing_sand",
+    "handoff_verified": "white_check_mark",
+    "rotation_complete": "arrows_counterclockwise",
+    "resumed": "twisted_rightwards_arrows",
+    "needs_human": "rotating_light",
+    "error": "x",
+    "task_done": "white_check_mark",
+    "session_end": "black_square_button",
+    "stop_done": "white_check_mark",
+    "notification": "bell",
+    "dgx_down": "electric_plug",
+    "dgx_up": "electric_plug",
+    "dgx_power_cycle": "electric_plug",
+    "turn_dead": "warning",
+    "turn_recovered": "warning",
+    "freeze_detected": "snowflake",
+    "exit_hang": "boom",
+    "frozen_nudge": "snowflake",
+    "zombie_cleaned": "zombie",
+}
+
+
 def build_message(event: str, *, slug: str, nnn: int,
+                  env: list[str] | None = None,
                   **fields) -> tuple[str, str, str]:
-    """(title, body, priority) for one lifecycle event (spec §5, verbatim
-    templates). Pure — unit-tested against exact strings. ``ValueError`` on
-    an unknown event or a body over 200 chars (a template bug must not
-    break the loop; ``safe_send`` logs it)."""
+    """(title, body, priority) for one lifecycle event (spec §5 + issue #7
+    G1–G4). Pure — unit-tested against exact strings. ``env`` carries the
+    envelope lines (G1); it is prepended and de-duplicated (an identical
+    line never shows up twice). User-content fields are scrubbed before the
+    clip (B4). ``ValueError`` on an unknown event or a body over
+    ``BODY_CAP`` chars (a template bug must not break the loop;
+    ``safe_send`` logs it)."""
     p = f"{nnn:03d}"
     if event == "session_started":
         t, pr = "▶ cc-continuity: session started", "default"
-        b = f"proj={slug} {p} ({fields['name']}) host={fields['host']}"
+        lines = [f"proj={slug} {p} ({fields['name']})"]
+        if fields.get("prev"):
+            lines.append(f"prev={fields['prev']}")
+        if fields.get("objective"):
+            lines.append(f"objective: {scrub(fields['objective'])}")
+        if fields.get("next"):
+            lines.append(f"next: {scrub(fields['next'])}")
     elif event == "warned":
         t, pr = "⚠ cc-continuity: context warning", "default"
-        b = (f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
-             f"rotating at {fields['rotate_threshold'] * 100:.0f}%")
+        lines = [(f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
+                  f"rotating at {fields['rotate_threshold'] * 100:.0f}%")]
     elif event == "rotation_pending":
         t, pr = "◆ cc-continuity: rotation pending", "high"
-        b = (f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
-             "no interruption; rotates at turn end")
+        lines = [(f"proj={slug} {p} ratio={_fmt_ratio(fields['ratio'])} — "
+                  "no interruption; rotates at turn end")]
     elif event == "handoff_verified":
         t, pr = "✓ cc-continuity: handoff written & verified", "default"
-        b = f"proj={slug} {p} cp-{p} sha256 OK"
+        lines = [f"proj={slug} {p} cp-{p} sha256 OK"]
     elif event == "rotation_complete":
         t, pr = "🔄 cc-continuity: rotation complete", "high"
-        b = (f"proj={slug} {p}→{fields['nnn_new']:03d} "
-             f"ratio {_fmt_ratio(fields['r0'])}→{_fmt_ratio(fields['r1'])} "
-             f"resumed: {fields['naa'] or '—'}")
+        lines = [(f"proj={slug} {p}→{fields['nnn_new']:03d} "
+                  f"ratio {_fmt_ratio(fields['r0'])}→"
+                  f"{_fmt_ratio(fields['r1'])}")]
+        if fields.get("objective"):
+            lines.append(f"objective: {scrub(fields['objective'])}")
+        lines.append(f"resumed: "
+                     f"{scrub(fields['naa']) if fields.get('naa') else '—'}")
     elif event == "resumed":
         t, pr = "↻ cc-continuity: resumed", "default"
-        b = f"proj={slug} {p} VALIDATION OK — continuing from NAA"
+        lines = [f"proj={slug} {p} VALIDATION OK — continuing from NAA"]
+        if fields.get("next"):
+            lines.append(f"next: {scrub(fields['next'])}")
     elif event == "needs_human":
         t, pr = "🛑 cc-continuity: BLOCKED — waiting for you", "urgent"
-        b = (f"proj={slug} {p} reason={_clip(fields['reason'], 80)} "
-             f"host={fields['host']} — remote in and reply in session {p}")
+        lines = [(f"proj={slug} {p} "
+                  f"reason={_clip(scrub(str(fields['reason'])), 300)} "
+                  f"host={fields['host']} — remote in and reply in "
+                  f"session {p}")]
     elif event == "error":
         t, pr = f"✗ cc-continuity: {fields['what']} failed", "urgent"
         prefix = (f"proj={slug} {p} "
-                  f"detail={_clip(fields['detail'], 60)} — see ")
+                  f"detail={_clip(scrub(str(fields['detail'])), 60)} — see ")
         see = str(paths.continuity_home() / "errors.log")
-        if len(prefix) + len(see) > 200:
+        if len(prefix) + len(see) > BODY_CAP:
             # a long store path (e.g. macOS TMPDIR in tests) would break the
-            # 200-char body cap: ellipsize the HEAD, keep the tail visible
-            see = "…" + see[len(see) - (200 - len(prefix) - 1):]
-        b = prefix + see
+            # body cap: ellipsize the HEAD, keep the tail visible
+            see = "…" + see[len(see) - (BODY_CAP - len(prefix) - 1):]
+        lines = [prefix + see]
     elif event == "task_done":
         t, pr = "✅ cc-continuity: task complete", "default"
-        b = f"proj={slug} summary={_clip(fields['summary'], 80)}"
+        lines = [f"proj={slug} "
+                 f"summary={_clip(scrub(str(fields['summary'])), 200)}"]
+    elif event == "stop_done":
+        t, pr = "✅ cc-continuity: Claude is done", "default"
+        lines = ([f"said: {scrub(str(fields['said']))}"]
+                 if fields.get("said") else [f"proj={slug} {p}"])
+    elif event == "notification":
+        t, pr = "🔔 cc-continuity: Claude needs you", "high"
+        lines = ([f"msg: {scrub(str(fields['msg']))}"]
+                 if fields.get("msg") else [f"proj={slug} {p}"])
     elif event == "session_end":
         t, pr = "■ cc-continuity: session ended", "default"
-        b = f"proj={slug} {p} reason={fields['reason']}"
+        lines = [f"proj={slug} {p} reason={fields['reason']}"]
     elif event == "dgx_down":
         t, pr = "🔌 cc-continuity: model server DOWN", "urgent"
-        b = (f"host={fields['host']} — probing every "
-             f"{fields['interval_min']} min; nudges deferred")
+        lines = [(f"host={fields['host']} — probing every "
+                  f"{fields['interval_min']} min; nudges deferred")]
     elif event == "dgx_up":
         t, pr = "🔌 cc-continuity: model server back", "high"
-        b = f"down for {_fmt_minutes(fields['downtime_s'])} — nudges resume"
+        lines = [f"down for {_fmt_minutes(fields['downtime_s'])} — "
+                 "nudges resume"]
     elif event == "dgx_power_cycle":
         t, pr = "🔌 cc-continuity: DGX power-cycling (auto)", "urgent"
-        b = (f"down for {_fmt_minutes(fields['downtime_s'])} — relay "
-             "cycled; expect ~15-20 min until models are loaded")
+        lines = [(f"down for {_fmt_minutes(fields['downtime_s'])} — relay "
+                  "cycled; expect ~15-20 min until models are loaded")]
     elif event == "turn_dead":
         t, pr = "⟲ cc-continuity: turn died — recovering", "high"
-        b = (f"proj={slug} {p} idle {fields['idle_minutes']}m — "
-             f"nudge 1/{fields['max_nudges']}")
+        lines = [(f"proj={slug} {p} idle {fields['idle_minutes']}m — "
+                  f"nudge 1/{fields['max_nudges']}")]
     elif event == "turn_recovered":
         t, pr = "✅ cc-continuity: turn recovered", "default"
-        b = (f"proj={slug} {p} nudge {fields['nudge']} "
-             "verified (user_prompt)")
+        lines = [(f"proj={slug} {p} nudge {fields['nudge']} "
+                  "verified (user_prompt)")]
     elif event == "freeze_detected":
         t, pr = "🧊 cc-continuity: retry-loop freeze?", "high"
-        b = f"proj={slug} {p} pane stuck, input closed — no auto-fix"
+        lines = [f"proj={slug} {p} pane stuck, input closed — no auto-fix"]
     elif event == "exit_hang":
         t, pr = "💥 cc-continuity: /exit hang — killed", "high"
-        b = (f"proj={slug} {p} /exit hung {int(fields['age_s'])}s — "
-             f"killed ({fields['mode']})")
+        lines = [(f"proj={slug} {p} /exit hung {int(fields['age_s'])}s — "
+                  f"killed ({fields['mode']})")]
     elif event == "frozen_nudge":
         if fields.get("nudge") is None:
             # picker variant (Phase 22-C): frozen pane WITHOUT a turn in
             # flight — the daemon sent a single ESC, no nudge
             t, pr = "🧊 cc-continuity: frozen pane — ESC sent", "urgent"
-            b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
-                 "no turn active")
+            lines = [(f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
+                      "no turn active")]
         else:
             t, pr = "🧊 cc-continuity: frozen turn — escalated", "urgent"
-            b = (f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
-                 f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")
+            lines = [(f"proj={slug} {p} frozen {fields['frozen_minutes']}m — "
+                      f"ESC + nudge {fields['nudge']}/{fields['max_nudges']}")]
     elif event == "zombie_cleaned":
         # Phase 23 (fix a): an off session's tmux session was still alive
         # on the orphaned progress-pane (no CC) — the daemon killed it
         t, pr = "🧟 cc-continuity: zombie session cleaned", "default"
-        b = (f"proj={slug} {p} {_clip(fields['session'], 40)} — "
-             "no CC, killed")
+        lines = [(f"proj={slug} {p} {_clip(fields['session'], 40)} — "
+                  "no CC, killed")]
     else:
         raise ValueError(f"unknown notify event {event!r}")
-    if len(b) > 200:
-        raise ValueError(f"notify body > 200 chars ({event}): {len(b)}")
-    return t, b, pr
+    body = "\n".join(dict.fromkeys([*(env or []), *lines]))
+    if len(body) > BODY_CAP:
+        raise ValueError(f"notify body > {BODY_CAP} chars ({event}): "
+                         f"{len(body)}")
+    return t, body, pr
 
 
 def on_state_enter(cfg: dict | None, key: str, nnn: int, new_state: str,
@@ -501,7 +566,8 @@ def safe_send(cfg: dict, event: str, *, slug: str, nnn: int = 0,
         title, body, priority = build_message(event, slug=slug, nnn=nnn,
                                               **fields)
         return send(str(cfg.get("notify_endpoint") or "").strip(),
-                    title, body, priority, event=event, wait=wait)
+                    title, body, priority, event=event, wait=wait,
+                    tags=TAGS.get(event, ""))
     except Exception:
         _log_failure(event, "safe_send: "
                    + (traceback.format_exc().splitlines()[-1] if __debug__ else ""))
