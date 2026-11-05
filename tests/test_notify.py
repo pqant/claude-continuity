@@ -542,7 +542,7 @@ def test_build_message_notification():
     t, b, pr = notify.build_message(
         "notification", slug="proj", nnn=9,
         msg="Bash(rm -rf /tmp/x) needs approval")
-    assert (t, pr) == ("🔔 cc-continuity: Claude needs you", "high")
+    assert (t, pr) == ("📌 cc-continuity: Claude needs you", "high")
     assert b == "msg: Bash(rm -rf /tmp/x) needs approval"
     t, b, pr = notify.build_message("notification", slug="proj", nnn=9)
     assert b == "proj=proj 009"
@@ -574,9 +574,9 @@ def test_send_wait_true_passes_tags(cc_home):
         return FakeProc(0)
 
     assert notify.send("https://ntfy.sh/t", "T", "b", "default",
-                       event="e", wait=True, tags="bell",
+                       event="e", wait=True, tags="round_pushpin",
                        runner=runner) is True
-    assert "Tags: bell" in seen["cmd"]
+    assert "Tags: round_pushpin" in seen["cmd"]
 
 
 def test_tags_dict_covers_all_events():
@@ -687,7 +687,7 @@ def test_emit_spec_uses_tags(cc_home):
         {"event": "notification", "slug": "p", "nnn": 1,
          "fields": {"msg": "hello"}},
         cfg=_cfg(), runner=lambda cmd, **kw: seen.append(cmd) or FakeProc(0))
-    assert "Tags: bell" in seen[0]
+    assert "Tags: round_pushpin" in seen[0]
 
 
 def test_emit_spec_unlinks_spec_file(cc_home, tmp_path):

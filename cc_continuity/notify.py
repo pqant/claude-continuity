@@ -393,7 +393,7 @@ TAGS: dict[str, str] = {
     "task_done": "white_check_mark",
     "session_end": "black_square_button",
     "stop_done": "white_check_mark",
-    "notification": "bell",
+    "notification": "round_pushpin",
     "dgx_down": "electric_plug",
     "dgx_up": "electric_plug",
     "dgx_power_cycle": "electric_plug",
@@ -476,7 +476,7 @@ def build_message(event: str, *, slug: str, nnn: int,
         lines = ([f"said: {scrub(str(fields['said']))}"]
                  if fields.get("said") else [f"proj={slug} {p}"])
     elif event == "notification":
-        t, pr = "🔔 cc-continuity: Claude needs you", "high"
+        t, pr = "📌 cc-continuity: Claude needs you", "high"
         lines = ([f"msg: {_clip(scrub(str(fields['msg'])), 700)}"]
                  if fields.get("msg") else [f"proj={slug} {p}"])
     elif event == "session_end":

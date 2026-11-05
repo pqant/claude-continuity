@@ -143,7 +143,7 @@ def run_doctor(home: Path, runner=subprocess.run,
     if not ((cfg or {}).get("notify_enabled") and ep):
         add("notify", True, "not configured (disabled)")
     else:
-        ok = notify.send(str(ep), "🔔 cc-continuity test",
+        ok = notify.send(str(ep), "📌 cc-continuity test",
                          f"{notify.host()} cc-continuity {__version__}",
                          "default", event="notify-test", wait=True,
                          runner=runner)

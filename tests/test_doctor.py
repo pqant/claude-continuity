@@ -198,7 +198,7 @@ def test_doctor_notify_sends_test_message_when_configured(fake_home):
     assert by["notify"].ok is True
     assert by["notify"].detail == "https://ntfy.sh/example-topic"
     assert fake.notify_cmd is not None
-    assert "Title: 🔔 cc-continuity test" in fake.notify_cmd
+    assert "Title: 📌 cc-continuity test" in fake.notify_cmd
 
 
 def test_doctor_notify_failed_test_send_is_not_ok(fake_home):
