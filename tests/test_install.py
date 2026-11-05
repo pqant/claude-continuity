@@ -390,12 +390,12 @@ def test_migrate_replaces_three(fake_home):
     assert Path(res["backed_up"]).name == "settings.json.bak-20261105-150000"
     assert Path(res["backed_up"]).is_file()
     assert _commands(fake_home, "Notification") == [
-        "$HOME/.local/bin/cc-continuity notify notification",
-        "$HOME/.local/bin/cc-continuity notify notification",
+        f"{fake_home}/.local/bin/cc-continuity notify notification",
+        f"{fake_home}/.local/bin/cc-continuity notify notification",
         "python3 ~/notify_team.py",
     ]
     assert _commands(fake_home, "Stop") == [
-        "$HOME/.local/bin/cc-continuity notify stop",
+        f"{fake_home}/.local/bin/cc-continuity notify stop",
         "~/audit.sh",
     ]
 

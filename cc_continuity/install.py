@@ -430,12 +430,9 @@ def install(home: Path, *, window: int | None = None,
 # install()'s timestamped pattern. NOT wired into install() — a one-time,
 # user-approved migration owned by its own entry point.
 _GENERIC_SIGNATURES: tuple[tuple[str, str], ...] = (
-    ("Claude is waiting for your approval",
-     "$HOME/.local/bin/cc-continuity notify notification"),
-    ("Claude is waiting for you",
-     "$HOME/.local/bin/cc-continuity notify notification"),
-    ("Claude is done",
-     "$HOME/.local/bin/cc-continuity notify stop"),
+    ("Claude is waiting for your approval", "notification"),
+    ("Claude is waiting for you", "notification"),
+    ("Claude is done", "stop"),
 )
 
 
@@ -458,6 +455,9 @@ def migrate_generic_hooks(home: Path, *,
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return result
+    # Same canonical path install() symlinks (P7-D3); derived from home so
+    # no personal path ever enters the public source.
+    base = Path(home) / ".local" / "bin" / "cc-continuity"
     for event_entries in hooks.values():
         if not isinstance(event_entries, list):
             continue
@@ -473,7 +473,8 @@ def migrate_generic_hooks(home: Path, *,
                 command = entry.get("command")
                 if not isinstance(command, str):
                     continue
-                for signature, replacement in _GENERIC_SIGNATURES:
+                for signature, event in _GENERIC_SIGNATURES:
+                    replacement = f"{base} notify {event}"
                     if signature in command and \
                             command != replacement:
                         entry["command"] = replacement
