@@ -305,3 +305,31 @@ def test_watchdog_bodies_under_200_chars():
     ]:
         _, b, _ = notify.build_message(ev, slug="s" * 40, nnn=999, **kw)
         assert len(b) <= 200, ev
+
+
+# ---------------------------------------------------------------- scrubber
+
+
+def test_scrub_masks_each_pattern():
+    text = ("boot ok sk-ant-AP4I8fj293 done password=hunter2secret "
+            "aws AKIA" + "ABCDEFGHIJKLMNOP auth bearer supersecrettoken123 "
+            "cfg api_key: xyz789secret")
+    out = notify.scrub(text)
+    for secret in ("sk-ant-AP4I8fj293", "hunter2secret",
+                   "AKIA" + "ABCDEFGHIJKLMNOP", "supersecrettoken123",
+                   "xyz789secret"):
+        assert secret not in out
+    assert "boot ok" in out and "done" in out and "aws" in out
+
+
+def test_scrub_clean_unchanged():
+    text = "ratio 64% — commit 753f7e7 shipped"
+    assert notify.scrub(text) == text
+
+
+def test_scrub_private_key_truncates():
+    text = ("summary before\n-----BEGIN RSA " "PRIVATE KEY-----\n"
+            "QUJDREVG/WLJhc2U2NA==\n-----END RSA PRIVATE KEY-----\nafter")
+    out = notify.scrub(text)
+    assert out == "summary before"
+    assert "BEGIN" not in out and "QUJD" not in out

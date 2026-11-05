@@ -20,6 +20,7 @@ server works.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import subprocess
 import time
@@ -77,6 +78,39 @@ def _clip(s: object, n: int) -> str:
     """Collapse whitespace; truncate to n chars ('...' ellipsis when cut)."""
     s = " ".join(str(s).split())
     return s if len(s) <= n else s[: n - 3] + "..."
+
+
+# ---------------------------------------------------------------- scrubber
+# Spec B4 (issue #7): mask credentials in every user-content body BEFORE the
+# clip, so replacements count toward the cap. Envelope fields are never
+# scrubbed. PRIVATE KEY blocks are truncated first (that line and everything
+# after it is dropped), then the patterns below run in order.
+
+_PRIVATE_KEY_LINE = re.compile(r"(?im)^.*-----BEGIN [^-]*PRIVATE KEY-----.*$")
+
+SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "[redacted]"),
+    (re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key)"
+                r"\s*[:=]\s*\S+"), "key=[redacted]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[redacted]"),
+    (re.compile(r"(?i)bearer\s+\S{10,}"), "bearer [redacted]"),
+)
+
+
+def scrub(text: str) -> str:
+    """Mask known secret shapes in a free-text push body (spec B4).
+
+    Case-insensitive; a ``-----BEGIN ... PRIVATE KEY-----`` line truncates
+    the body at that line. Clean text is returned unchanged.
+    """
+    if not text:
+        return text
+    m = _PRIVATE_KEY_LINE.search(text)
+    if m:
+        text = text[: m.start()].rstrip("\n")
+    for pattern, repl in SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
 
 
 def naa_snippet(handoff_path: str, n: int = 60) -> str:
