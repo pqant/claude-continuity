@@ -708,3 +708,23 @@ def test_safe_send_attaches_event_tags(cc_home, monkeypatch):
                             name="p-001", wait=True) is True
     cmd = fake.run_calls[0][0]
     assert "Tags: rocket" in cmd
+
+
+def test_build_message_notification_long_msg_clipped():
+    # Final-review finding (issue #7): msg was the only content body without
+    # a clip — a long approval message blew BODY_CAP and the push was
+    # DROPPED (anti-goal: message loss). Clip like said/reason/summary.
+    t, b, pr = notify.build_message(
+        "notification", slug="proj", nnn=7, msg="x" * 3000)
+    assert len(b) <= notify.BODY_CAP
+    assert b.startswith("msg: xxxx")
+    assert b.endswith("...")
+
+
+def test_build_message_notification_env_plus_long_msg_fits():
+    env = ["proj=proj 007 (p-007)",
+           "host=eralps-mac branch=main @abc1234*",
+           "model=Qwen3.8-27B ratio=64.5%"]
+    t, b, pr = notify.build_message(
+        "notification", slug="proj", nnn=7, env=env, msg="y" * 5000)
+    assert len(b) <= notify.BODY_CAP

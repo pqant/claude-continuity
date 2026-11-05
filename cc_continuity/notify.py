@@ -477,7 +477,7 @@ def build_message(event: str, *, slug: str, nnn: int,
                  if fields.get("said") else [f"proj={slug} {p}"])
     elif event == "notification":
         t, pr = "🔔 cc-continuity: Claude needs you", "high"
-        lines = ([f"msg: {scrub(str(fields['msg']))}"]
+        lines = ([f"msg: {_clip(scrub(str(fields['msg'])), 700)}"]
                  if fields.get("msg") else [f"proj={slug} {p}"])
     elif event == "session_end":
         t, pr = "■ cc-continuity: session ended", "default"
