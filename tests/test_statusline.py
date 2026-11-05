@@ -1217,3 +1217,16 @@ def test_run_mode2_renders_breathing_no_sweep_state(cc_home, monkeypatch):
     # mode 2 never touches the pane; no shimmer-state write
     assert calls == []
     assert not statusline._shimmer_state_path().exists()
+
+
+def test_extract_metric_captures_model(cc_home):
+    p = _payload(model={"id": "m", "display_name": "qwen3.8-flash-next"})
+    m = statusline.extract_metric(p, window_tokens=1000)
+    assert m["model"] == "qwen3.8-flash-next"
+
+
+def test_extract_metric_model_absent(cc_home):
+    p = _payload()
+    p.pop("model", None)
+    m = statusline.extract_metric(p, window_tokens=1000)
+    assert "model" not in m

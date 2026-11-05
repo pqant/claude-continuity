@@ -67,6 +67,10 @@ def extract_metric(payload: dict | None, window_tokens: int) -> dict | None:
     ratio = round(used / window_tokens, 4) if window_tokens else 0.0
     workspace = payload.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
+    model = payload.get("model")
+    model = (model.get("display_name")
+             if isinstance(model, dict)
+             and isinstance(model.get("display_name"), str) else None)
     return {
         "session_id": session_id,
         "ts": time.time(),
@@ -78,6 +82,7 @@ def extract_metric(payload: dict | None, window_tokens: int) -> dict | None:
         "transcript_path": payload.get("transcript_path"),
         "cc_version": payload.get("version"),
         "cc_context_window_size": cw.get("context_window_size"),
+        **({"model": model} if model else {}),
     }
 
 
