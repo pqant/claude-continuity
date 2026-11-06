@@ -287,7 +287,7 @@ def test_resolve_ntfy_tty_prompt_is_english_generic():
 
     assert install.resolve_ntfy(None, is_tty=True, prompt=prompt) == ""
     assert seen == ["ntfy endpoint? (e.g. https://ntfy.sh/<topic> "
-                    "— Enter = off) "]
+                    "- Enter = off) "]
 
 
 def test_validate_endpoint_error_is_english_generic():

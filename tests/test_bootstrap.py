@@ -54,7 +54,9 @@ def test_c8_text_is_single_line_prd_verbatim():
         "Next Atomic Action. Do not repeat completed work. Before any tool "
         "call, print the navigator panel from the handoff (Done/Next + "
         "spec ticks) as your first visible output. Echo the handoff's "
-        "Transcript: line as the panel's last plain line when present.")
+        "Transcript: line as the panel's last line formatted as "
+        "**Transcript:** plus the file:// URI wrapped in single "
+        "backticks (the URI byte-verbatim and clickable), when present.")
 
 
 def test_c8_text_carries_navigator_directive():
@@ -74,10 +76,12 @@ def test_c4_text_carries_navigator_directive():
     proto = next(l for l in t.splitlines() if l.startswith("Protocol:"))
     assert "navigator panel" in proto
     assert "◆ navigator: p-002 ← cp-" in proto
-    assert "✅ Done — previous session" in proto
-    assert "▶ Next — this session" in proto
+    assert "✅ Done - previous session" in proto
+    assert "▶ Next - this session" in proto
     assert "Spec:" in proto and "Language:" in proto
     assert "no box-drawing" in proto
+    # issue #13: the clickable transcript link must stand out
+    assert "**Transcript:**" in proto and "single backticks" in proto
 
 
 def test_c2_text_asks_for_navigator_fields():
@@ -130,7 +134,7 @@ def test_c4_text_new_work_section():
                            new_work=["do A", "do B"])
     assert t.endswith(
         "# Handoff\nbody\n---\nNEW WORK SINCE HANDOFF (arrived after the "
-        "handoff was written; not in the handoff — add these to your task "
+        "handoff was written; not in the handoff - add these to your task "
         "list):\n  > do A\n  > do B")
 
 

@@ -1,4 +1,4 @@
-"""Threshold logic (PRD §7/§8/§9, Phase 5 spec §4) — the single source of
+"""Threshold logic (PRD §7/§8/§9, Phase 5 spec §4) - the single source of
 truth for ratio reading, state walking, the PreToolUse allowlist, and the
 Appendix C injected texts.
 
@@ -79,7 +79,7 @@ def c1_text(ratio: float, window: int) -> str:
 
 def _blocked_suffix(blocked: str | None) -> str:
     """P9-D5/P9-P5: instruction line when a needs_human entry is
-    unconsumed — the handoff must tell the successor what is blocked."""
+    unconsumed - the handoff must tell the successor what is blocked."""
     if not blocked:
         return ""
     return (f' Add the line "BLOCKED on: {blocked}" to the '
@@ -120,7 +120,7 @@ def c6_text(problems: list, draft_path: str) -> str:
 
 
 def c9_text() -> str:
-    # Phase-5 tuning (spec §4): no "will rotate automatically" — rotation
+    # Phase-5 tuning (spec §4): no "will rotate automatically" - rotation
     # is a manual /clear until Phase 6.
     return ("CONTINUITY: handoff accepted. Do not start any more work in "
             "this session. End your turn now.")
@@ -158,13 +158,13 @@ def advance(key: str, nnn: int, target: str, *,
     walk tables, re-used; every non-empty entry already ends at
     HANDOFF_REQUESTED, so nothing is appended). On the step entering
     ROTATION_PENDING the
-    fields ``warned=True`` and — when ``ratio`` is not None —
+    fields ``warned=True`` and - when ``ratio`` is not None -
     ``ratio_at_pending=ratio`` are written; the WARNED step always writes
     ``warned=True``. Any unreachable source (unknown
     target, backwards move, or an illegal single step) raises
     ``state.InvalidTransitionError``.
 
-    ``cfg`` — when given, the walk fires the spec §5 row 2/3
+    ``cfg`` - when given, the walk fires the spec §5 row 2/3
     pushes on the steps entering WARNED / ROTATION_PENDING
     (``notify.on_state_enter``); ``None`` keeps the call silent.
     """
@@ -204,13 +204,13 @@ def advance(key: str, nnn: int, target: str, *,
 def c4_text(*, new_name: str, old_name: str, status: str,
             details: list, handoff: str, handoff_path: str,
             inline_max: int, new_work: list | None = None) -> str:
-    """Appendix C.4 — the SessionStart(clear) bootstrap block.
+    """Appendix C.4 - the SessionStart(clear) bootstrap block.
 
     ``details``: validation detail lines (may be empty). ``handoff`` is
     inlined when non-empty and <= ``inline_max`` chars, otherwise the path
     is shown instead (PRD §9; S5: 12K inline is safe for the local model).
     ``new_work``: user prompts that landed in the old session's live
-    ledger AFTER the handoff was written (the rotation window) — they
+    ledger AFTER the handoff was written (the rotation window) - they
     are not in the handoff, so they are appended as a separate section
     (empty/None → the text is exactly the old format).
     """
@@ -222,15 +222,18 @@ def c4_text(*, new_name: str, old_name: str, status: str,
         "fully; do not redo completed work; start with Next Atomic "
         "Action. Before any tool call, print the navigator panel as your "
         "first visible reply text: '◆ navigator: " + new_name + " ← cp-<NNN "
-        "of the handoff>', then '✅ Done — previous session' listing items "
-        "from Completed This Session, then '▶ Next — this session' listing "
+        "of the handoff>', then '✅ Done - previous session' listing items "
+        "from Completed This Session, then '▶ Next - this session' listing "
         "Next Atomic Action and Remaining Plan items; if the handoff "
         "carries a 'Spec:' line, read that file and tick its items "
-        "(✓ done, ▶ in progress, ○ pending) with a '<k>/<n> done' count — "
+        "(✓ done, ▶ in progress, ○ pending) with a '<k>/<n> done' count - "
         "omit the section when the line is absent; if the handoff carries "
-        "a 'Transcript:' line, echo it verbatim as the last plain line of "
-        "the panel - omit when absent. Plain lines only, no "
-        "box-drawing characters; write items in the handoff's 'Language:' "
+        "a 'Transcript:' line, echo it as the panel's last line formatted "
+        "as **Transcript:** plus the file:// URI wrapped in single "
+        "backticks (the URI byte-verbatim and clickable); omit it when "
+        "the handoff has no such line. Everything else stays plain lines: "
+        "no box-drawing characters and no other markdown; write items in "
+        "the handoff's 'Language:' "
         "language (fallback: English). Then begin work in the same reply.")
     lines.append("---")
     if handoff and len(handoff) <= inline_max:
@@ -240,17 +243,19 @@ def c4_text(*, new_name: str, old_name: str, status: str,
     if new_work:
         lines.append("---")
         lines.append("NEW WORK SINCE HANDOFF (arrived after the handoff "
-                     "was written; not in the handoff — add these to your "
+                     "was written; not in the handoff - add these to your "
                      "task list):")
         lines.extend(f"  > {w}" for w in new_work)
     return "\n".join(lines)
 
 
 def c8_text(cp_id: str, handoff_path: str) -> str:
-    """Appendix C.8 — the single-line continuation prompt the rotator types."""
+    """Appendix C.8 - the single-line continuation prompt the rotator types."""
     return (f"CONTINUITY RESUME {cp_id}: read {handoff_path} completely, "
             "apply the VALIDATION result, then continue from Next Atomic "
             "Action. Do not repeat completed work. Before any tool call, "
             "print the navigator panel from the handoff (Done/Next + "
             "spec ticks) as your first visible output. Echo the handoff's "
-            "Transcript: line as the panel's last plain line when present.")
+            "Transcript: line as the panel's last line formatted as "
+            "**Transcript:** plus the file:// URI wrapped in single "
+            "backticks (the URI byte-verbatim and clickable), when present.")

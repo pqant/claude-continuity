@@ -3,13 +3,13 @@
 ``install``: prerequisite checks; copy the app to
 ``~/.claude-continuity/app/`` + symlink ``~/.local/bin/cc-continuity``;
 merge (never replace) ``~/.claude/settings.json`` (hooks, statusLine
-chain, env, permissions — home-relative form per S12) with a timestamped
+chain, env, permissions - home-relative form per S12) with a timestamped
 backup; managed block in ``~/.claude/CLAUDE.md`` (Appendix A); the six
 user skills; managed block in ``~/.zshrc`` (Appendix D, symlink-aware);
 write ``config.json`` (defaults + window + chained_statusline + manifest).
 Idempotent: entries are identifiable by the substring ``cc-continuity``.
 
-``uninstall``: manifest-driven inverse — removes exactly our entries and
+``uninstall``: manifest-driven inverse - removes exactly our entries and
 blocks, restores the chained status line, keeps
 ``~/.claude-continuity/projects`` unless ``--purge``. Byte-for-byte
 restoration of unmodified user files is a Gate 7 criterion.
@@ -52,11 +52,13 @@ This machine runs cc-continuity. Long work is continued across sessions automati
   First line of your reply: "Continuing from cp-<NNN> (<new session name>).";
   before any tool call, then print the navigator panel from the handoff
   (Done/Next + spec ticks) as your first visible output; echo the handoff's
-  Transcript: line as the last plain line when present.
+  Transcript: line as the panel's last line formatted as **Transcript:**
+  plus the file:// URI wrapped in single backticks (URI byte-verbatim and
+  clickable), when present.
 - Never edit files under ~/.claude-continuity except the handoff.draft.md you are told to write.
-- If you are truly blocked on a human — a destructive or irreversible
+- If you are truly blocked on a human - a destructive or irreversible
   operation, an ambiguous requirement, or the same fix failing 3 times in
-  a row — run `cc-continuity signal needs-human "<short reason>"` and end
+  a row - run `cc-continuity signal needs-human "<short reason>"` and end
   your turn: a push goes to the user's phone and they remote in and reply
   in this session. Do not guess in those three cases.
 - When the session's goal is complete, run `cc-continuity signal done
@@ -70,7 +72,7 @@ claude() {
   # bypass only for explicit opt-out; everything else goes through
   # cc-continuity launch, which decides: pass-through (-p/--print/--version/
   # --help/known subcommands), tmux session (TTY), or DETACHED tmux session
-  # (non-TTY/background job — the session still gets a tmux pane, so
+  # (non-TTY/background job - the session still gets a tmux pane, so
   # auto-rotation and the animated progress pane always work)
   if [[ "${CC_CONTINUITY:-1}" == 0 || -n "$CC_CONTINUITY_NO_TMUX" ]]; then
     command claude "$@"; return
@@ -127,7 +129,7 @@ def validate_endpoint(url: str) -> str:
     if url.lower().startswith(("http://", "https://")):
         return url
     raise InstallError(
-        f"invalid ntfy endpoint {url!r} — expected a full http(s):// URL "
+        f"invalid ntfy endpoint {url!r} - expected a full http(s):// URL "
         "(e.g. https://ntfy.sh/<topic>) or 'off'")
 
 
@@ -137,7 +139,7 @@ def resolve_ntfy(explicit: str | None, *, is_tty: bool,
 
     ``explicit`` (the --ntfy flag) wins: ``off``/empty → disabled
     (``""``), else validated. Without the flag, a TTY prompts
-    ``ntfy endpoint? (e.g. https://ntfy.sh/<topic> — Enter = off)``;
+    ``ntfy endpoint? (e.g. https://ntfy.sh/<topic> - Enter = off)``;
     Enter → disabled, non-empty → validated. Non-TTY without the flag →
     ``None`` (existing config value untouched).
     """
@@ -149,7 +151,7 @@ def resolve_ntfy(explicit: str | None, *, is_tty: bool,
     if not is_tty:
         return None
     answer = (prompt("ntfy endpoint? (e.g. https://ntfy.sh/<topic> "
-                     "— Enter = off) ") or "").strip()
+                     "- Enter = off) ") or "").strip()
     return "" if not answer else validate_endpoint(answer)
 
 
@@ -167,7 +169,7 @@ def rc_target(home: Path, shell: str | None = None) -> Path:
     if name == "bash":
         return Path(home) / ".bashrc"
     raise InstallError(
-        f"login shell {name} is not supported — install zsh "
+        f"login shell {name} is not supported - install zsh "
         "(sudo apt install zsh && sudo chsh -s /bin/zsh) or switch to "
         "bash (sudo chsh -s /bin/bash)")
 
@@ -185,7 +187,7 @@ def check_prerequisites(home: Path,
     if sys.version_info < (3, 11):
         msg = f"python >= 3.11 (found {sys.version.split()[0]})"
         if hosting.kind() != "macos":
-            msg += (" — on Ubuntu 22.04 install python3.11+ (deadsnakes) "
+            msg += (" - on Ubuntu 22.04 install python3.11+ (deadsnakes) "
                     "or use Ubuntu 24.04, then run: "
                     "python3.11 -m cc_continuity.cli install")
         missing.append(msg)
@@ -225,11 +227,11 @@ def copy_app(app_root: Path) -> Path:
     pkg_dst = app_root / "cc_continuity"
     if pkg_src == pkg_dst.resolve():
         # Bare `cc-continuity install` run from the installed app dir: the
-        # source IS the destination — rmtree+copytree would delete the live
+        # source IS the destination - rmtree+copytree would delete the live
         # app (self-destruct). Refuse; install from the dev tree instead.
         raise InstallError(
             "refusing to install from the installed app dir "
-            f"({pkg_src}) — run install from the dev tree")
+            f"({pkg_src}) - run install from the dev tree")
     if pkg_dst.exists():
         shutil.rmtree(pkg_dst)
     shutil.copytree(pkg_src, pkg_dst,
@@ -268,7 +270,7 @@ def _carry_over_manifest(manifest: dict, prev: dict, win: int) -> None:
     second install over an already-merged file would record "nothing
     changed" (status_line_changed=False, env_prev = our own values,
     empty allow/dirs lists) and uninstall could no longer restore the
-    user's originals — breaking the Gate 7 byte-for-byte criterion.
+    user's originals - breaking the Gate 7 byte-for-byte criterion.
     A field is carried over only when the new merge saw our own value
     there (i.e. the user did not edit it between installs); a fresh user
     edit always wins over the old manifest.
@@ -298,7 +300,7 @@ def install(home: Path, *, window: int | None = None,
     Raises ``InstallError`` before any user file is modified when a
     prerequisite is missing or a file is unreadable.
 
-    ``ntfy``: resolved notify endpoint (``resolve_ntfy``) —
+    ``ntfy``: resolved notify endpoint (``resolve_ntfy``) -
     ``None`` leaves the existing value untouched, ``''`` disables.
     """
     home = Path(home)
@@ -368,7 +370,7 @@ def install(home: Path, *, window: int | None = None,
     # 3) user skills (PRD §17.5)
     skills.install_skills(claude_dir / "skills")
 
-    # 4) login-shell rc managed block (PRD §17.6, Appendix D) —
+    # 4) login-shell rc managed block (PRD §17.6, Appendix D) -
     #    symlink-aware; macOS: .zshrc (existing logic, unchanged);
     #    non-macOS: rc_target (bash/zsh) + rc_file manifest key
     from . import hosting  # lazy: hosting imports this module (T4 note)
@@ -428,7 +430,7 @@ def install(home: Path, *, window: int | None = None,
 
 # The three user-level generic curls (spec B6) are matched by signature,
 # replaced IN PLACE (never reordered), and the file is backed up once with
-# install()'s timestamped pattern. NOT wired into install() — a one-time,
+# install()'s timestamped pattern. NOT wired into install() - a one-time,
 # user-approved migration owned by its own entry point.
 _GENERIC_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("Claude is waiting for your approval", "notification"),
@@ -441,7 +443,7 @@ def migrate_generic_hooks(home: Path, *,
                           now: str | None = None) -> dict:
     """Rewrite the three generic ntfy curl hook commands to the
     ``cc-continuity notify`` CLI (spec G6/B6). One timestamped backup
-    (skipped entirely when nothing changes — idempotent second run returns
+    (skipped entirely when nothing changes - idempotent second run returns
     ``replaced == 0`` and no backup). Unknown hooks and everything else
     (order, other keys) are untouched. Returns
     ``{"backed_up": str | None, "replaced": int}``."""
@@ -607,9 +609,9 @@ def uninstall(home: Path, *, purge: bool = False) -> None:
     # 4) skills
     skills.uninstall_skills(home / ".claude" / "skills")
 
-    # 5) ~/.local/bin symlink — only when it points into our app/
+    # 5) ~/.local/bin symlink - only when it points into our app/
     #    (realpath on BOTH sides: a symlinked component in the home path,
-    #     e.g. macOS /tmp -> /private/tmp, would otherwise mismatch — F-G7-1)
+    #     e.g. macOS /tmp -> /private/tmp, would otherwise mismatch - F-G7-1)
     link = home / ".local" / "bin" / "cc-continuity"
     if link.is_symlink() and os.path.realpath(link).startswith(
             os.path.realpath(str(store / "app")) + os.sep):

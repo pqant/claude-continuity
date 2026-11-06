@@ -234,6 +234,11 @@ def test_panel_echoes_transcript_line():
     bt = thresholds.c4_text(new_name="b-2", old_name="b-1", status="OK",
                             details=[], handoff="x", handoff_path="/p/handoff.md",
                             inline_max=12000)
-    assert "Transcript:" in bt and "last plain line" in bt
-    assert "Transcript:" in thresholds.c8_text("cp-1", "/p/handoff.md")
+    # issue #13: bold label + backtick-wrapped URI replaces the plain line
+    assert "Transcript:" in bt and "**Transcript:**" in bt
+    assert "single backticks" in bt and "last plain line" not in bt
+    c8 = thresholds.c8_text("cp-1", "/p/handoff.md")
+    assert "Transcript:" in c8 and "**Transcript:**" in c8
     assert "Transcript:" in install.CLAUDE_MD_CONTENT
+    assert "**Transcript:**" in install.CLAUDE_MD_CONTENT
+    assert "single backticks" in install.CLAUDE_MD_CONTENT
