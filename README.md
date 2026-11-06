@@ -20,6 +20,33 @@ An optional **watchdog** daemon keeps long unattended runs recoverable
 when the model server (for example a local vLLM box) dies or freezes, and
 optional **ntfy** pushes let you watch from your phone.
 
+## What's new
+
+The five most recent updates, newest first. Each line links to its
+commit, so you can see what changed lately without digging through the
+log:
+
+- **2026-11-06** — Handoffs export the session transcript as a readable
+  HTML page (search, theme toggle) plus raw JSONL, and the successor
+  session echoes a clickable `Transcript:` link in its navigator panel
+  ([issue #8](https://github.com/pqant/claude-continuity/commit/a5a8b36)).
+- **2026-11-05** — Notification pushes got richer: project, host, model
+  and context ratio plus the session's objective, next step and what the
+  agent last said, with secrets scrubbed on the way out
+  ([issue #7](https://github.com/pqant/claude-continuity/commit/393d083)).
+- **2026-11-05** — The first output of a rotated session is now a
+  Done/Next navigator panel rendered from the handoff, so you always see
+  where the work picked up
+  ([issue #6](https://github.com/pqant/claude-continuity/commit/67f189b)).
+- **2026-11-03** — Rotation resume guarantee: the rotator retries until
+  the successor genuinely resumes (ack-driven keystrokes) instead of
+  giving up after two blind attempts
+  ([commit](https://github.com/pqant/claude-continuity/commit/4592b12)).
+- **2026-11-03** — Session index stability: a restart after a stalled
+  rotation reuses the orphaned successor and its number instead of
+  minting a new session index
+  ([commit](https://github.com/pqant/claude-continuity/commit/27f4d1a)).
+
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
