@@ -1,6 +1,7 @@
 """transcript.py: issue #8 - JSONL parsing, markdown rendering, HTML export."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from cc_continuity import transcript
@@ -92,3 +93,49 @@ def test_fallback_derive_and_miss(tmp_path):
     assert transcript.resolve_transcript_path({"transcript_path": str(tmp_path / "gone.jsonl")},
                                               root, "sid", home=tmp_path) == derived
     assert transcript.resolve_transcript_path(None, root, "nope", home=tmp_path) is None
+
+
+TS = "2026-11-05T19:26:03.123Z"
+
+
+def _fixture(tmp_path, n=2):
+    recs = [_rec("user", "hello", TS), _rec("assistant", "hi", "2026-11-05T23:59:00.000Z")]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(recs) + "\n", encoding="utf-8")
+    return p
+
+
+def _meta():
+    return {"name": "sess-1", "nnn": "1", "project": "proj", "branch": "main",
+            "head": "abc1234", "model": "m", "ratio": 0.5}
+
+
+def test_export_pair(tmp_path):
+    stem = transcript.export_session(_fixture(tmp_path), tmp_path / "out", _meta())
+    local = datetime.fromisoformat(TS).astimezone().strftime("%Y-%m-%d-%H%M")
+    assert stem == f"sess-1_{local}"
+    assert (tmp_path / "out" / f"{stem}.md").read_text(encoding="utf-8").startswith("# sess-1_")
+    assert "hello" in (tmp_path / "out" / f"{stem}.html").read_text(encoding="utf-8")
+
+
+def test_export_cap_and_footer(tmp_path):
+    p = tmp_path / "big.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for i in range(300):
+            f.write(_rec("user", "x" * 40000 + str(i), "2026-11-05T19:26:03.123Z") + "\n")
+    stem = transcript.export_session(p, tmp_path / "out", _meta())
+    html = (tmp_path / "out" / f"{stem}.html").read_text(encoding="utf-8")
+    assert "[truncated]" in html
+    md = (tmp_path / "out" / f"{stem}.md").read_text(encoding="utf-8")
+    assert "xxxx0" in md and "xxxx299" not in md  # hard cut at cap, whole lines only
+
+
+def test_export_failures_never_raise(tmp_path, cc_home, monkeypatch):
+    # cc_home: debug_log must write to the temp store, never the real
+    # ~/.claude-continuity/logs/errors.log (Ruling: brief fixture omitted it).
+    assert transcript.export_session(tmp_path / "missing.jsonl", tmp_path / "o1", _meta()) is None
+    def boom(path, data):
+        raise OSError("disk full")
+    monkeypatch.setattr(transcript.atomic, "write_bytes_fsync", boom)
+    assert transcript.export_session(_fixture(tmp_path), tmp_path / "o2", _meta()) is None
+    assert not (tmp_path / "o2").exists() or not list((tmp_path / "o2").iterdir())

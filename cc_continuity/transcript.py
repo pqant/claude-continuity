@@ -14,8 +14,11 @@ from __future__ import annotations
 import html
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
+
+from cc_continuity import atomic, paths
 
 #: One conversation turn: (role, text, ISO-8601 timestamp or None).
 Block = tuple[str, str, str | None]
@@ -282,3 +285,113 @@ def resolve_transcript_path(metric: dict | None, root: Path, sid: str | None,
     slug = re.sub(r"[^a-zA-Z0-9]", "-", str(root))
     derived = base / ".claude" / "projects" / slug / f"{sid}.jsonl"
     return derived if derived.is_file() else None
+
+
+def debug_log(detail: str) -> None:
+    """One ``errors.log`` line tagged ``transcript:``; never raises.
+
+    Best-effort by contract: finalize's outer guard (Task 6) and every
+    skip path inside this module log through here, so an export problem
+    is a log line, never an exception (P9-D7).
+    """
+    try:
+        with open(paths.logs_dir() / "errors.log", "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] transcript: {detail}\n")
+    except OSError:
+        pass
+
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    """Aware datetime for an ISO-8601 string, ``None`` when absent/bad."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def render_markdown(blocks: list[Block], meta: dict) -> str:
+    """Canonical Markdown export: ``# <stem>`` title, then one section
+    per block (``## User``/``## Assistant`` + local time + raw text)."""
+    out = [f"# {meta.get('stem') or 'session'}", ""]
+    for role, text, ts in blocks:
+        label = "User" if role == "user" else "Assistant"
+        clock = _ts_hms(ts)
+        out.append(f"## {label}" + (f" {clock}" if clock else ""))
+        out.append("")
+        out.append(text)
+        out.append("")
+    return "\n".join(out)
+
+
+def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
+                   *, cap_bytes: int = 5 * 1024 * 1024) -> str | None:
+    """Best-effort readable export of one session JSONL (B3/B4).
+
+    Reads at most ``cap_bytes`` (past the cap the trailing partial line is
+    dropped and a final ``[truncated]`` block is appended), then writes
+    ``<stem>.md`` and ``<stem>.html`` into ``dest_dir`` with fsync'd plain
+    writes and returns the stem. ``span``/``stem`` are derived from the
+    first/last block timestamps (local; ``stem`` falls back to now) and
+    added to a meta copy. Never raises: unreadable source, empty parse, or
+    any write failure logs one debug line, leaves no half-written pair,
+    and returns ``None``.
+    """
+    try:
+        try:
+            oversize = jsonl_path.stat().st_size > cap_bytes
+            with open(jsonl_path, "rb") as f:
+                raw = f.read(cap_bytes)
+        except OSError:
+            debug_log(f"export skipped: unreadable source {jsonl_path}")
+            return None
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        if oversize and lines:
+            lines.pop()  # trailing partial line cut by the cap
+        blocks = parse_conversation(lines)
+        if not blocks:
+            debug_log(f"export skipped: empty conversation {jsonl_path}")
+            return None
+        if oversize:
+            blocks = blocks + [("assistant", "[truncated]", None)]
+        first = last = None
+        for _, _, ts in blocks:
+            stamp = _parse_ts(ts)
+            if stamp:
+                first = first or stamp
+                last = stamp
+        name = meta.get("name") or "session"
+        if first is not None:
+            span = (f"{first.astimezone():%Y-%m-%d %H:%M} - "
+                    f"{last.astimezone():%Y-%m-%d %H:%M}")
+            stem = f"{name}_{first.astimezone():%Y-%m-%d-%H%M}"
+        else:
+            span = "n/a"
+            stem = f"{name}_{datetime.now().astimezone():%Y-%m-%d-%H%M}"
+        export_meta = dict(meta)
+        export_meta["stem"] = stem
+        export_meta["span"] = span
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        try:
+            md_path = dest_dir / f"{stem}.md"
+            atomic.write_bytes_fsync(md_path,
+                                     render_markdown(blocks, export_meta).encode("utf-8"))
+            written.append(md_path)
+            html_path = dest_dir / f"{stem}.html"
+            atomic.write_bytes_fsync(html_path,
+                                     render_html(blocks, export_meta).encode("utf-8"))
+            written.append(html_path)
+        except Exception:
+            for p in written:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            debug_log(f"export skipped: write failed for {stem}")
+            return None
+        return stem
+    except Exception:
+        debug_log(f"export skipped: unexpected error for {jsonl_path}")
+        return None

@@ -60,3 +60,15 @@ def atomic_write_json(path: str | Path, obj: object, indent: int = 2) -> None:
     """Write a JSON document atomically (2-space indent, trailing newline)."""
     text = json.dumps(obj, indent=indent, ensure_ascii=False) + "\n"
     atomic_write_text(path, text)
+
+
+def write_bytes_fsync(path: Path, data: bytes) -> None:
+    """Plain durable write: open wb, write, flush, fsync (no temp swap).
+
+    Mirrors ``checkpoint._write_file_fsync``; for brand-new files whose
+    crash handling (unlink on partial failure) belongs to the caller.
+    """
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
