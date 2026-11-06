@@ -15,6 +15,7 @@ import html
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 
 #: One conversation turn: (role, text, ISO-8601 timestamp or None).
 Block = tuple[str, str, str | None]
@@ -260,3 +261,24 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<button id="t">theme</button><span id="stats"></span></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'<script>{_JS}</script></body>')
+
+
+def resolve_transcript_path(metric: dict | None, root: Path, sid: str | None,
+                            *, home: Path | None = None) -> Path | None:
+    """Live transcript JSONL for a session: metric hit, derived fallback.
+
+    The statusline metric's ``transcript_path`` wins when it is a non-empty
+    str pointing at an existing file; otherwise derive
+    ``<home>/.claude/projects/<cwd-slug>/<sid>.jsonl``. ``None`` when
+    neither exists (B2: omit the line, never raise).
+    """
+    if isinstance(metric, dict):
+        p = metric.get("transcript_path")
+        if isinstance(p, str) and p and Path(p).is_file():
+            return Path(p)
+    if not sid:
+        return None
+    base = home if home is not None else Path.home()
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(root))
+    derived = base / ".claude" / "projects" / slug / f"{sid}.jsonl"
+    return derived if derived.is_file() else None

@@ -1,6 +1,7 @@
 """transcript.py: issue #8 - JSONL parsing, markdown rendering, HTML export."""
 
 import json
+from pathlib import Path
 
 from cc_continuity import transcript
 
@@ -67,3 +68,27 @@ def test_design_strings_and_ascii():
 def test_both_mode_filter_reset_order():
     d = _doc()
     assert d.index("b.classList.remove('hidden');") < d.index("if(filter)")
+
+
+def _mkjsonl(p):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}\n", encoding="utf-8")
+    return p
+
+
+def test_metric_hit_wins(tmp_path):
+    good = _mkjsonl(tmp_path / "live.jsonl")
+    got = transcript.resolve_transcript_path({"transcript_path": str(good)},
+                                             tmp_path / "proj", "sid", home=tmp_path)
+    assert got == good
+
+
+def test_fallback_derive_and_miss(tmp_path):
+    # Ruling: root is a neutral path of [a-zA-Z0-9/] only, so the fixture's
+    # naive replace("/", "-") expectation never depends on tmp_path's
+    # underscore-bearing randomized name (interface rule is re.sub).
+    root = Path("/tmp/proj")
+    derived = _mkjsonl(tmp_path / ".claude" / "projects" / str(root).replace("/", "-") / "sid.jsonl")
+    assert transcript.resolve_transcript_path({"transcript_path": str(tmp_path / "gone.jsonl")},
+                                              root, "sid", home=tmp_path) == derived
+    assert transcript.resolve_transcript_path(None, root, "nope", home=tmp_path) is None
