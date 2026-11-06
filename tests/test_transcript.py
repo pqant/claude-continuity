@@ -24,3 +24,18 @@ def test_order_roles_and_noise():
 def test_assistant_whitespace_collapsed():
     b = transcript.parse_conversation([_rec("assistant", "a\n\n\n\nb")])
     assert b[0][1] == "a\n\nb"
+
+
+def test_table_fenced_and_escaping():
+    md = "|a|b|\n|--|--|\n|1|b|\n\n<script>x</script>\n\n```\nprint(1)\n```\n\nplain **b** `c`"
+    out = transcript.md_to_html(md)
+    assert "<table>" in out and "<th>a</th>" in out and "<td>1</td>" in out
+    assert "&lt;script&gt;" in out and "<script>" not in out
+    assert "<pre>print(1)</pre>" in out
+    assert "<p>plain <b>b</b> <code>c</code></p>" in out
+
+
+def test_paragraph_grouping_and_lists():
+    out = transcript.md_to_html("l1\nl2\n\n- one\n- two\n### head")
+    assert out.count("<p>") == 1 and "l1 l2" in out
+    assert "<ul><li>one</li><li>two</li></ul>" in out and "<h4>head</h4>" in out
