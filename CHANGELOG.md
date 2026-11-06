@@ -4,6 +4,8 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
 ### Added
 
 - Windows support via WSL (WSL 1 and WSL 2): platform detection and a
