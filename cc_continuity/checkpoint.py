@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import (atomic, config, gitsnap, ledger, lock, naming, notify, paths,
-               redact, state)
+               redact, state, transcript)
 
 #: Appendix B, exact order and exact strings.
 TEMPLATE_HEADINGS: tuple[str, ...] = (
@@ -443,18 +443,52 @@ def _write_file_fsync(path: Path, data: bytes) -> None:
         os.fsync(f.fileno())
 
 
+def _transcript_meta(snapshot: dict, metric: dict | None) -> dict:
+    """Header metadata for the export pair (issue #8), from the snapshot."""
+    s, p = snapshot["session"], snapshot["project"]
+    return {
+        "name": s["name"],
+        "nnn": str(s["nnn"]),
+        "project": p["slug"] or "n/a",
+        "branch": p["branch"] or "n/a",
+        "head": (p["head"] or "")[:7] or "n/a",
+        "model": (metric or {}).get("model") or "n/a",
+        "ratio": s["ratio"],
+    }
+
+
+def _insert_transcript_line(handoff: str, uri: str) -> str:
+    """Insert ``Transcript: {uri}`` after the last meta line of the block
+    that starts with ``- session:`` (before its closing blank line). When
+    the block is absent, append it just after the title line (no-op safe).
+    """
+    lines = handoff.split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("- session:")), None)
+    if start is None:
+        lines.insert(1 if lines and lines[0].startswith("# ") else 0,
+                     f"Transcript: {uri}")
+    else:
+        j = start
+        while j + 1 < len(lines) and lines[j + 1].startswith("- "):
+            j += 1
+        lines.insert(j + 1, f"Transcript: {uri}")
+    return "\n".join(lines)
+
+
 def _verify_checkpoint_dir(tmp: Path, *, snapshot: dict, state_record: dict,
-                           root: Path, degraded: bool) -> None:
+                           root: Path, degraded: bool,
+                           extra_files: tuple[str, ...] = ()) -> None:
     """PRD §10.4 step 3 — re-read and verify. Raises CheckpointError."""
-    for name in ("handoff.md", "state.json", "snapshot.json",
-                 "ledger.jsonl", "SHA256SUMS"):
+    base = ("handoff.md", "state.json", "snapshot.json", "ledger.jsonl")
+    for name in (*base, *extra_files, "SHA256SUMS"):
         if not (tmp / name).is_file():
             raise CheckpointError(f"verify: missing {name}")
     sums: dict = {}
     for line in (tmp / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         digest, _, name = line.partition("  ")
         sums[name.strip()] = digest
-    expected = {"handoff.md", "state.json", "snapshot.json", "ledger.jsonl"}
+    expected = {*base, *extra_files}
     if set(sums) != expected:
         raise CheckpointError("verify: SHA256SUMS covers wrong file set")
     for name, digest in sums.items():
@@ -547,6 +581,22 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
         if tmp.exists():
             shutil.rmtree(tmp)
         tmp.mkdir()
+        # Issue #8 G1/B4: best-effort readable export into tmp BEFORE the
+        # handoff write, so both files move into ``checkpoint/`` atomically
+        # with it. Any failure here (P9-D7) = no files, no line, one log.
+        stem = None
+        try:
+            tpath = transcript.resolve_transcript_path(
+                metric, root, (metric or {}).get("session_id") or None)
+            if tpath is not None:
+                stem = transcript.export_session(
+                    tpath, tmp, _transcript_meta(snapshot, metric))
+        except Exception:
+            stem = None
+            transcript.debug_log("export aborted: finalize guard")
+        if stem:
+            handoff = _insert_transcript_line(
+                handoff, (pdir / "checkpoint" / f"{stem}.html").as_uri())
         state_copy = dict(record)
         state_copy["degraded"] = degraded
         _write_file_fsync(tmp / "handoff.md", handoff.encode("utf-8"))
@@ -560,9 +610,11 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
         _write_file_fsync(tmp / "ledger.jsonl",
                           ledger_file.read_bytes() if ledger_file.is_file()
                           else b"")
+        sum_names = ["handoff.md", "state.json", "snapshot.json", "ledger.jsonl"]
+        if stem:
+            sum_names += [f"{stem}.md", f"{stem}.html"]
         sum_lines = []
-        for name in ("handoff.md", "state.json", "snapshot.json",
-                     "ledger.jsonl"):
+        for name in sum_names:
             digest = hashlib.sha256((tmp / name).read_bytes()).hexdigest()
             sum_lines.append(f"{digest}  {name}")
         _write_file_fsync(tmp / "SHA256SUMS",
@@ -570,7 +622,8 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
         step(6)
         try:
             _verify_checkpoint_dir(tmp, snapshot=snapshot, state_record=record,
-                                   root=root, degraded=degraded)
+                                   root=root, degraded=degraded,
+                                   extra_files=tuple(sum_names[4:]))
         except CheckpointError:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
