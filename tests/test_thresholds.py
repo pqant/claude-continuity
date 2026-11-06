@@ -225,3 +225,15 @@ def test_c3_text_blocked_suffix():
     assert ('Add the line "BLOCKED on: ambiguous req" to the '
             '"Current Task and Exact Stopping Point" section.') in t
     assert "BLOCKED" not in thresholds.c3_text(0.75, 0.72, DRAFT)
+
+
+def test_panel_echoes_transcript_line():
+    # Ruling: plan named bootstrap_text; real API is c4_text (thresholds
+    # ledger), so the call uses keyword args.
+    from cc_continuity import install
+    bt = thresholds.c4_text(new_name="b-2", old_name="b-1", status="OK",
+                            details=[], handoff="x", handoff_path="/p/handoff.md",
+                            inline_max=12000)
+    assert "Transcript:" in bt and "last plain line" in bt
+    assert "Transcript:" in thresholds.c8_text("cp-1", "/p/handoff.md")
+    assert "Transcript:" in install.CLAUDE_MD_CONTENT

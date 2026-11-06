@@ -53,7 +53,8 @@ def test_c8_text_is_single_line_prd_verbatim():
         "completely, apply the VALIDATION result, then continue from "
         "Next Atomic Action. Do not repeat completed work. Before any tool "
         "call, print the navigator panel from the handoff (Done/Next + "
-        "spec ticks) as your first visible output.")
+        "spec ticks) as your first visible output. Echo the handoff's "
+        "Transcript: line as the panel's last plain line when present.")
 
 
 def test_c8_text_carries_navigator_directive():

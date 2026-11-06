@@ -227,7 +227,9 @@ def c4_text(*, new_name: str, old_name: str, status: str,
         "Next Atomic Action and Remaining Plan items; if the handoff "
         "carries a 'Spec:' line, read that file and tick its items "
         "(✓ done, ▶ in progress, ○ pending) with a '<k>/<n> done' count — "
-        "omit the section when the line is absent. Plain lines only, no "
+        "omit the section when the line is absent; if the handoff carries "
+        "a 'Transcript:' line, echo it verbatim as the last plain line of "
+        "the panel - omit when absent. Plain lines only, no "
         "box-drawing characters; write items in the handoff's 'Language:' "
         "language (fallback: English). Then begin work in the same reply.")
     lines.append("---")
@@ -250,4 +252,5 @@ def c8_text(cp_id: str, handoff_path: str) -> str:
             "apply the VALIDATION result, then continue from Next Atomic "
             "Action. Do not repeat completed work. Before any tool call, "
             "print the navigator panel from the handoff (Done/Next + "
-            "spec ticks) as your first visible output.")
+            "spec ticks) as your first visible output. Echo the handoff's "
+            "Transcript: line as the panel's last plain line when present.")
