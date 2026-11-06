@@ -66,6 +66,25 @@ def test_design_strings_and_ascii():
     assert re.search(r'<span class="ts">\d{2}:\d{2}:\d{2}</span>', d)  # tz-safe format pin
 
 
+def test_label_timestamp_separator_in_markup():
+    # Issue #12 (emit level): the timestamp used to render flush against
+    # the role label ("User11:23:08"); a literal separator between the
+    # label and the span is pinned, spacing is not left to CSS alone.
+    import re
+    d = _doc()
+    assert re.search(r'<h2 class="user">User +<span class="ts">\d{2}:\d{2}:\d{2}</span></h2>', d)
+
+
+def test_timestamp_shares_label_baseline():
+    # Issue #12 (CSS level): .ts floated inside a max-content h2 sat above
+    # the label instead of sharing its baseline; the pill becomes an
+    # inline-flex baseline container with an explicit gap and no floats.
+    d = _doc()
+    assert "display:inline-flex" in d and "align-items:baseline" in d and "gap:8px" in d
+    assert "float" not in d
+    assert ".ts:empty{display:none}" in d  # gap adds slack only when a timestamp exists
+
+
 def test_both_mode_filter_reset_order():
     d = _doc()
     assert d.index("b.classList.remove('hidden');") < d.index("if(filter)")

@@ -165,10 +165,11 @@ main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
 section.block{padding:6px 14px 12px;margin:10px 0;border-radius:10px}
 section.block.user{background:var(--userbg)}
 section.block.asst{margin-left:46px;border-bottom:1px solid var(--line)}
-h2{padding:3px 10px;border-radius:6px;font-size:13px;letter-spacing:.02em;margin:6px 0 8px;width:max-content}
+h2{padding:3px 10px;border-radius:6px;font-size:13px;letter-spacing:.02em;margin:6px 0 8px;width:max-content;display:inline-flex;align-items:baseline;gap:8px}
 h2.user{background:var(--user);color:var(--userfg)}
 h2.asst{background:var(--asst);color:var(--asstfg)}
-.ts{float:right;font-weight:normal;color:var(--muted);font-size:12px}
+.ts{font-weight:normal;color:var(--muted);font-size:12px}
+.ts:empty{display:none}
 p{margin:.45em 0}
 pre{background:var(--pre-bg);color:var(--pre-fg);padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.5}
 code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.92em}
@@ -242,7 +243,7 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         cls = "user" if role == "user" else "asst"
         label = "User" if role == "user" else "Assistant"
         sections.append(
-            f'<section class="block {cls}"><h2 class="{cls}">{label}'
+            f'<section class="block {cls}"><h2 class="{cls}">{label} '
             f'<span class="ts">{_ts_hms(ts)}</span></h2>'
             f'<div class="body">{md_to_html(text)}</div></section>')
     return (
