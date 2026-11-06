@@ -39,3 +39,31 @@ def test_paragraph_grouping_and_lists():
     out = transcript.md_to_html("l1\nl2\n\n- one\n- two\n### head")
     assert out.count("<p>") == 1 and "l1 l2" in out
     assert "<ul><li>one</li><li>two</li></ul>" in out and "<h4>head</h4>" in out
+
+
+META = {"name": "claude-continuity-166", "nnn": "166", "project": "claude-continuity",
+        "branch": "main", "head": "1abe3c0", "model": "local-qwen", "ratio": 0.642,
+        "stem": "claude-continuity-166_2026-11-05-1926", "span": "2026-11-05 19:26 - 23:59"}
+
+
+def _doc():
+    b = [("user", "hello", "2026-11-05T19:26:03.123Z"), ("assistant", "hi **there**", None)]
+    return transcript.render_html(b, META)
+
+
+def test_design_strings_and_ascii():
+    d = _doc()
+    assert d.isascii()
+    for label in ("Session Name", "Model", "Project", "Ratio at rotation", "Branch", "Session Time"):
+        assert label in d
+    assert 'id="q"' in d and "matching blocks only" in d and 'id="t"' in d and 'id="stats"' in d
+    assert '<h2 class="user">User' in d and '<h2 class="asst">Assistant' in d
+    assert '<h2 class="user">#' not in d and '<h2 class="asst">#' not in d
+    assert "<b>there</b>" in d and "auto" in d and "localStorage" in d
+    import re
+    assert re.search(r'<span class="ts">\d{2}:\d{2}:\d{2}</span>', d)  # tz-safe format pin
+
+
+def test_both_mode_filter_reset_order():
+    d = _doc()
+    assert d.index("b.classList.remove('hidden');") < d.index("if(filter)")
