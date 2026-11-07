@@ -676,7 +676,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     region = _input_box_lines() if (ansi and live) else None
     word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
-    # issue #11: same live-capture gate as the ultrathink word — a dead
+    # issue #11: same live-capture gate as the ultrathink word: a dead
     # pane must not strand an ASK marker.
     ask = bool(region) and bool(_ASK_RE.search("\n".join(region)))
     mode = config.progress_mode(cfg)
