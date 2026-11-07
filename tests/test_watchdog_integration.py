@@ -96,6 +96,35 @@ def _ntfy_inbox(server):
     return server.pushes
 
 
+DOWN_T = "🔌 cc-continuity: model server DOWN"
+BACK_T = "🔌 cc-continuity: model server back"
+REC_T = "✅ cc-continuity: turn recovered"
+
+
+def _died_title(t):
+    # exact production title pinned by prefix+suffix (matching the full
+    # string re-types the em dash glyph into this file's diff)
+    return (t.startswith("⟲ cc-continuity: turn died")
+            and t.endswith("recovering"))
+
+
+def _assert_inbox(server, expected):
+    # Fire-and-forget Popen pushes race at the fake server: CI load
+    # reorders arrival (observed 2026-11-07: BACK before DOWN). Pin
+    # WHICH pushes landed with which priority/body, never the order.
+    # expected: list of (title_or_predicate, priority, body_substr|None).
+    remaining = list(server.pushes)
+    assert len(remaining) == len(expected), [p[0] for p in remaining]
+    for want, prio, body_sub in expected:
+        match = want if callable(want) else (lambda t, w=want: t == w)
+        hit = next((p for p in remaining if match(p[0])), None)
+        assert hit is not None, f"missing push, got {[p[0] for p in remaining]}"
+        remaining.remove(hit)
+        assert hit[1] == prio, (hit[0], hit[1])
+        if body_sub:
+            assert body_sub in hit[2], hit[0]
+
+
 def _fake_tmux(tmp_path, pane_text="work output line\n❯ "):
     d = tmp_path / "e2etmux"
     d.mkdir()
@@ -181,10 +210,9 @@ def test_e2e_dead_turn_down_wait_up_nudge_enter_verified(cc_home, tmp_path,
     assert any("[cc-continuity watchdog]" in l for l in sent)
     assert ledger.read(sdir)[-1]["type"] == "watchdog_nudge"
     _wait(ntfy, 3)
-    assert [p[0] for p in _ntfy_inbox(ntfy)] == [
-        "🔌 cc-continuity: model server DOWN",
-        "🔌 cc-continuity: model server back",
-        "⟲ cc-continuity: turn died — recovering"]
+    _assert_inbox(ntfy, [(DOWN_T, "urgent", None),
+                         (BACK_T, "high", None),
+                         (_died_title, "high", None)])
 
     # 4: the Enter was lost — the enriched (multi-line) nudge sits
     #    unsubmitted in the input box (11:30): the ❯ glyph is on the
@@ -217,14 +245,11 @@ def test_e2e_dead_turn_down_wait_up_nudge_enter_verified(cc_home, tmp_path,
     l6 = watchdogd.tick(ctx)
     assert l6["sessions"][0]["outcome"] == "VERIFIED"
     _wait(ntfy, 4)
-    inbox = _ntfy_inbox(ntfy)
-    assert [p[0] for p in inbox] == [
-        "🔌 cc-continuity: model server DOWN",
-        "🔌 cc-continuity: model server back",
-        "⟲ cc-continuity: turn died — recovering",
-        "✅ cc-continuity: turn recovered"]
-    assert [p[1] for p in inbox] == ["urgent", "high", "high", "default"]
-    assert "user_prompt" in inbox[3][2]  # the body names the evidence
+    _assert_inbox(ntfy, [(DOWN_T, "urgent", None),
+                         (BACK_T, "high", None),
+                         (_died_title, "high", None),
+                         # the recovery body names the evidence
+                         (REC_T, "default", "user_prompt")])
     health.close()
     ntfy.close()
 
@@ -265,9 +290,8 @@ def test_e2e_restart_detection_no_dead_turn(cc_home, tmp_path, monkeypatch):
     l3 = watchdogd.tick(ctx)       # the restart recovery
     assert l3["events"][:1] == ["dgx_up"]
     _wait(ntfy, 2)
-    assert [p[0] for p in _ntfy_inbox(ntfy)] == [
-        "🔌 cc-continuity: model server DOWN",
-        "🔌 cc-continuity: model server back"]
+    _assert_inbox(ntfy, [(DOWN_T, "urgent", None),
+                         (BACK_T, "high", None)])
     # no live session → no pane touch at all (P10-D4/P10-D12)
     calls_text = calls.read_text(encoding="utf-8")
     assert "send-keys" not in calls_text
