@@ -408,7 +408,10 @@ def cmd_progress_pane(args: argparse.Namespace) -> int:
     on the next render.
     """
     win = args.window_id or progress_pane.resolve_window_id()
-    progress_pane.run_animator(window_id=win)
+    # focus dwell (user directive 2026-11-07): real iTerm2 frontmost tty
+    # probe; None off-iTerm2 (the watcher then disables dwell itself)
+    progress_pane.run_animator(window_id=win,
+                               _frontmost_tty=blink_watch._default_frontmost_tty)
     return 0
 
 
@@ -428,7 +431,8 @@ def cmd_blink_watch(args: argparse.Namespace) -> int:
     except Exception:
         cfg = {}
     blink_watch.watch(args.session_dir, pane_id=args.pane,
-                      window_id=args.window, cfg=cfg)
+                      window_id=args.window, cfg=cfg,
+                      _frontmost_tty=blink_watch._default_frontmost_tty)
     return 0
 
 

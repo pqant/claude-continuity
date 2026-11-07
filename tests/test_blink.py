@@ -475,3 +475,85 @@ def test_blinker_pane_ask_adds_to_wait_count():
     b.on_text(GATE, 0.0, pane_text=_DIALOG)   # 1 data marker + pane ask
     b.on_text(GATE, 0.5, pane_text=_DIALOG)
     assert r.renames() == ["WAIT[2]"]
+
+
+# --------------------------------------------------------------------------
+# FocusWatcher (user directive 2026-11-07)
+#
+# Every blink (needs-human, selection dialog, reply) falls silent once the
+# user has looked at the tab for a few consecutive ticks; answering is not
+# required. The suite must NEVER exec osascript/tmux: the frontmost and
+# clients seams default to None, which disables dwell entirely.
+
+
+def test_focus_watcher_dwell_suppresses_and_persists():
+    store = _store_dict()
+    w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2)
+    assert w.tick(0.0, "K") is False          # first focused tick
+    assert w.tick(1.0, "K") is True           # dwell reached
+    assert store("read") == "K"
+    assert w.tick(2.0, "K") is True           # read state holds
+    # a fresh instance (runner restart) still sees the stored key
+    w2 = blink.FocusWatcher(store)
+    assert w2.tick(3.0, "K") is True
+
+
+def test_focus_watcher_new_key_is_unread_again():
+    store = _store_dict()
+    w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2)
+    assert w.tick(0.0, "K1") is False         # focused 1
+    assert w.tick(1.0, "K1") is True          # read K1
+    assert w.tick(2.0, "K2") is False         # new question: re-blink
+    assert w.tick(3.0, "K2") is True          # dwell again for K2
+    assert store("read") == "K2"
+
+
+def test_focus_watcher_short_glance_never_suppresses():
+    store = _store_dict()
+    fronts = iter(["/dev/ttys001", "/dev/ttys001", None])
+    w = blink.FocusWatcher(store, frontmost=lambda: next(fronts),
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=3)
+    assert w.tick(0.0, "K") is False          # focused 1
+    assert w.tick(1.0, "K") is False          # focused 2
+    assert w.tick(2.0, "K") is False          # focus broke: dwell reset
+    assert store("read") is None
+
+
+def test_focus_watcher_empty_key_is_not_gated():
+    store = _store_dict()
+    w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1)
+    assert w.tick(0.0, "") is False           # nothing being waited on
+    assert w.tick(1.0, "") is False
+    assert store("read") is None
+
+
+def test_focus_watcher_dwell_disabled_without_seams():
+    store = _store_dict()
+    w = blink.FocusWatcher(store)             # no focus source at all
+    for k in range(5):
+        assert w.tick(float(k), "K") is False
+    assert store("read") is None
+
+
+def test_focus_watcher_on_read_fires_once_per_key():
+    store = _store_dict()
+    seen = []
+    w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1)
+    assert w.tick(0.0, "K", on_read=seen.append) is True
+    assert seen == ["K"]
+    assert w.tick(1.0, "K", on_read=seen.append) is True   # store hit
+    assert seen == ["K"]                      # no re-fire on the read hit
+
+
+def test_focus_watcher_swallows_broken_seams():
+    def boom():
+        raise RuntimeError("osascript denied")
+    store = _store_dict()
+    w = blink.FocusWatcher(store, frontmost=boom, clients=boom,
+                           dwell_ticks=1)
+    assert w.tick(0.0, "K") is False          # fail toward blinking
+    assert store("read") is None

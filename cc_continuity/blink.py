@@ -348,3 +348,83 @@ class Blinker:
                 self._restore()
         except Exception:
             pass
+
+
+class FocusWatcher:
+    """Focus-dwell suppression shared by the poller and the animator.
+
+    User directive 2026-11-07: any blink falls silent once the user has
+    looked at the tab for ``dwell_ticks`` consecutive ticks; answering is
+    not required. The caller ticks once per ~1 s with a composite key
+    describing the waiting situation (blocked reason, reply ts, region
+    text); a changed key (new needs-human reason, new dialog, new reply)
+    reads as unread again and the blink re-arms. The read state persists
+    in the caller's store (``read`` key, window-namespaced by the store)
+    so a runner restart does not re-blink a situation the user already
+    saw.
+
+    ``frontmost``/``clients`` default to None, which DISABLES dwell: the
+    test suite and any non-focusable context must never exec the real
+    osascript/tmux probes; a reply blink then self-fades (poller rule)
+    and blocking states keep blinking (builder call).
+    """
+
+    def __init__(self, store, *, frontmost=None, clients=None,
+                 dwell_ticks: int = 3):
+        self._store = store
+        self._frontmost = frontmost
+        self._clients = clients
+        self._dwell_ticks = dwell_ticks
+        self._dwell = 0
+        self._last_key = None
+
+    def tick(self, t: float, key: str, on_read=None) -> bool:
+        """One poll tick; True means the blink must be suppressed now.
+
+        ``t`` rides in with the caller's clock (one ``_now()`` per tick
+        stays the poller's single-clock rule); ``on_read(key)`` runs
+        exactly once when the dwell is reached (never on a stored hit),
+        letting the caller consume the ledger entry behind the blink.
+        """
+        if not key:
+            self._dwell = 0
+            self._last_key = None
+            return False
+        try:
+            if self._store("read") == key:
+                self._dwell = 0
+                return True
+        except Exception:
+            pass
+        if self._frontmost is None or self._clients is None:
+            self._dwell = 0
+            return False
+        try:
+            front = self._frontmost()
+            focused = front is not None and front in self._clients()
+        except Exception:
+            focused = False
+        if not focused:
+            self._dwell = 0
+            self._last_key = key
+            return False
+        if key != self._last_key:
+            # a fresh waiting situation always gets its blink first: the
+            # dwell measures continuous focus ON THE SAME key, otherwise
+            # a focused idler would never see a new reply or question
+            self._dwell = 0
+            self._last_key = key
+        self._dwell += 1
+        if self._dwell < self._dwell_ticks:
+            return False
+        self._dwell = 0
+        try:
+            self._store("read", key)
+        except Exception:
+            pass
+        if on_read is not None:
+            try:
+                on_read(key)
+            except Exception:
+                pass
+        return True

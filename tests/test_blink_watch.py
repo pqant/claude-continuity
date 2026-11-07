@@ -443,3 +443,54 @@ def test_watch_reply_self_fades_without_focus_capability(cc_home, monkeypatch):
     _run_watch(fake, now=700.0, fade=600.0)
     text, _ = fake.made[0].ticks[0]
     assert text == ""
+
+
+# ------------------------------------------------- focus dwell v2 re-arm
+#
+# User directive 2026-11-07: focus silences EVERY blink source, and a new
+# event (new needs-human reason, new dialog region, fresh reply ts) must
+# re-arm the blink even while the tab stays focused.
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_focus_probe(monkeypatch):
+    # Defense in depth: the suite must never exec osascript or tmux for
+    # the focus comparison (seam defaults are None; this pins them).
+    monkeypatch.setattr(blink_watch, "_default_frontmost_tty", lambda: None)
+    monkeypatch.setattr(blink_watch, "_default_client_ttys",
+                        lambda window_id, runner, bin_: set())
+
+
+def test_watch_needs_human_reblinks_on_new_reason(cc_home, monkeypatch):
+    reasons = iter(["deploy approval", "deploy approval", "merge conflict"])
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
+                        lambda d: next(reasons))
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: None)
+    fake = _FakeBlinkMod(captures=[None, None, None])
+    _run_watch(fake, ticks=3, dwell=2,
+               frontmost=lambda: "/dev/ttys001",
+               clients=lambda: {"/dev/ttys001"})
+    b = fake.made[0]
+    assert blink.MARKER_BLOCKED in b.ticks[0][0]    # first reason blinks
+    assert b.ticks[1] == ("", None)                 # dwell reached: silent
+    assert blink.MARKER_BLOCKED in b.ticks[2][0]    # new reason re-arms
+
+
+def test_watch_ask_region_reblinks_on_new_dialog(cc_home, monkeypatch):
+    region_b = ("❯ 1. (B) stay\n"
+                "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+                + "─" * 40)
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: None)
+    fake = _FakeBlinkMod(captures=[_DIALOG_REGION, _DIALOG_REGION,
+                                   _DIALOG_REGION, region_b])
+    _run_watch(fake, ticks=4, dwell=2,
+               frontmost=lambda: "/dev/ttys001",
+               clients=lambda: {"/dev/ttys001"})
+    b = fake.made[0]
+    assert b.ticks[0][1] == _DIALOG_REGION   # live dialog blinks while unread
+    assert b.ticks[1] == ("", None)          # dwell reached: silent
+    assert b.ticks[2] == ("", None)          # same region stays silent
+    assert b.ticks[3][1] == region_b         # new dialog: re-arms

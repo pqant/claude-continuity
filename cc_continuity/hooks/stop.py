@@ -23,8 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .. import (checkpoint, config, ledger, notify, paths, rotator, state,
-                statusline, thresholds)
+from .. import (blink_watch, checkpoint, config, ledger, notify, paths,
+                rotator, state, statusline, thresholds)
 from .common import HookContext, log_error
 
 AMCL_MESSAGE = "Checkpoint ready. Type /clear to continue automatically."
@@ -211,4 +211,13 @@ def handle(ctx: HookContext) -> dict | None:
             ledger.append(sdir, {"type": "reply_ready"})
         except OSError:
             pass
+    # poller self-heal (gap 2026-11-07: sessions started before the
+    # poller shipped never got a SessionStart spawn): every plain turn
+    # end re-checks the singleton. spawn's own guards (tmux env, blink
+    # config, mode 0 only, pidfile singleton) decide; failures are
+    # swallowed, the hook never blocks.
+    try:
+        blink_watch.spawn(sdir)
+    except Exception:
+        pass
     return None

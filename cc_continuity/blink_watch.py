@@ -120,32 +120,43 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
 
     Reply-ready blink (feature 2026-11-07): an unconsumed
     ``reply_ready`` ledger entry (Stop hook: turn ended waiting for the
-    user) blinks the tab WITHOUT needing status line renders. It clears
-    when the user focuses this window's tab for ``_dwell_ticks``
-    consecutive ticks (2-3 s "I've seen it"), or self-fades after
-    ``_reply_fade`` s in non-focusable contexts. Replying is not
-    required; a later main-session user prompt also consumes the entry.
+    user) blinks the tab WITHOUT needing status line renders. Replying
+    is not required; a later main-session user prompt also consumes the
+    entry.
+
+    Focus dwell (user directive 2026-11-07, v2): EVERY blink source
+    (needs_human, selection dialog, reply) falls silent once the user
+    looks at this window's tab for ``_dwell_ticks`` consecutive ticks
+    (2-3 s "I've seen it"); a changed situation (new reason, new dialog,
+    fresh reply) re-arms. The reply additionally self-fades after
+    ``_reply_fade`` s in non-focusable contexts; blocking states keep
+    blinking there (a genuine wait must not strand unseen).
     """
     blink_mod = _blink if _blink is not None else blink
     bin_ = (_bin_ if _bin_ is not None
             else os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux")
     state_fn = _state if _state is not None else _default_state
     reply_on = config.blink_reply(cfg)
-    frontmost_fn = (_frontmost_tty if _frontmost_tty is not None
-                    else _default_frontmost_tty)
+    store = _make_store(window_id)
     clients_fn = (_client_ttys if _client_ttys is not None
                   else (lambda: _default_client_ttys(window_id, _runner, bin_)))
     try:
         blinker = blink_mod.Blinker(window_id, cfg,
-                                    store=_make_store(window_id),
+                                    store=store,
                                     runner=_runner, bin_=bin_,
                                     tty_open=_tty_open)
+        # focus-dwell suppression (user directive 2026-11-07): every blink
+        # source falls silent once the user looks at the tab. The watcher
+        # itself performs no I/O: focus rides in on the injected seams and
+        # None (the default) disables dwell entirely.
+        watcher = blink.FocusWatcher(store, frontmost=_frontmost_tty,
+                                     clients=clients_fn,
+                                     dwell_ticks=_dwell_ticks)
     except Exception:
         return
     start = _now()
     fails = 0
     pane_text: str | None = None
-    dwell = 0
     i = 0
     try:
         while True:
@@ -179,32 +190,31 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                     reply = None
             if reply is not None and t - reply > _reply_fade:
                 reply = None  # unfocusable context: fade, never strand
-            if reply is not None:
-                try:
-                    front = frontmost_fn()
-                    clients = clients_fn()
-                except Exception:
-                    front, clients = None, set()
-                if front and front in clients:
-                    dwell += 1
-                    if dwell >= _dwell_ticks:
-                        try:
-                            ledger.mark_reply_read(session_dir)
-                        except Exception:
-                            pass
-                        dwell = 0
-                        reply = None
-                else:
-                    dwell = 0
-            else:
-                dwell = 0
             parts = []
             if blocked:
                 parts.append(blink_mod.MARKER_BLOCKED)
             if reply is not None:
                 parts.append(blink_mod.MARKER_REPLY)
             text = " ".join(parts)
-            blinker.on_text(text, t, pane_text=pane_text)
+            # composite key (FocusWatcher): blocked reason, reply ts and the
+            # pane region. A changed key (new needs-human reason, new
+            # dialog, fresh reply) reads as unread and re-arms the blink
+            # even while the tab stays focused; per-part repr keeps reason
+            # and region text from ever colliding across the join.
+            key = "|".join(repr(p) for p in
+                           (blocked,
+                            repr(reply) if reply is not None else "",
+                            pane_text) if p)
+            on_read = ((lambda _key: ledger.mark_reply_read(session_dir))
+                       if reply is not None else None)
+            try:
+                suppress = watcher.tick(t, key, on_read)
+            except Exception:
+                suppress = False
+            if suppress:
+                blinker.on_text("", t, pane_text=None)
+            else:
+                blinker.on_text(text, t, pane_text=pane_text)
             i += 1
             if _ticks is not None and i >= _ticks:
                 return

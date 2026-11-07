@@ -482,3 +482,35 @@ def test_rotation_states_do_not_queue_reply(cc_home, capsys, tmp_path):
     out = stdout_json(capsys)
     assert out["decision"] == "block"
     assert "reply_ready" not in _types(paths.session_dir(key, nnn))
+
+
+# ---------------- poller self-heal spawn (focus dwell v2, 2026-11-07)
+
+
+def test_plain_stop_spawns_blink_watch(cc_home, capsys, tmp_path,
+                                       monkeypatch):
+    # sessions started before the poller shipped never got a SessionStart
+    # spawn: every plain Stop re-checks the singleton (spawn's guards)
+    from cc_continuity import blink_watch
+    calls = []
+    monkeypatch.setattr(blink_watch, "spawn",
+                        lambda sdir: calls.append(str(sdir)))
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    calls.clear()  # SessionStart spawns too; this test pins the Stop path
+    run_hook("Stop", payload("Stop", repo, stop_hook_active=True))
+    assert calls == [str(paths.session_dir(key, nnn))]
+
+
+def test_rotation_stop_does_not_spawn_blink_watch(cc_home, capsys, tmp_path,
+                                                  monkeypatch):
+    # rotation states continue on their own; no user is being waited on
+    from cc_continuity import blink_watch
+    calls = []
+    monkeypatch.setattr(blink_watch, "spawn",
+                        lambda sdir: calls.append(str(sdir)))
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING")
+    calls.clear()  # SessionStart spawns too; this test pins the Stop path
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    assert calls == []

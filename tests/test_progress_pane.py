@@ -847,3 +847,28 @@ def test_animator_blinks_on_pane_capture_without_data_marker(cc_home):
     assert "WAIT" in r.renames()      # blinked on the capture alone
     assert len(captured) == 3         # i = 0, 4, 8 (~1 s at 20 fps)
     assert ttys_opened                # OSC bytes went to the client tty
+
+
+def test_animator_focus_dwell_silences_blinker_ticks(cc_home, monkeypatch):
+    # user directive 2026-11-07: once the tab has the user's focus for
+    # _dwell_ticks consecutive poll ticks, the blinker is fed nothing
+    # ("" + no pane_text) until the gate situation changes.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+
+    def runner(argv, **kw):
+        out = "/dev/ttys001" if argv[1] == "list-clients" else ""
+        return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
+
+    clock = iter([k * 0.05 for k in range(10)])
+    progress_pane.run_animator(
+        "12", _frames=3, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok  ⛔ BLOCKED",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _blink_poll=1, _runner=runner, _pane_capture=lambda: None,
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+    texts = fake.made[0].texts
+    # the clock rides twice per frame (frame stamp + drift re-read)
+    assert texts[0][0] == "◆ 61% ok  ⛔ BLOCKED"   # tick 1: still gated
+    assert texts[1] == ("", 0.1, None)    # dwell reached: silence same tick
+    assert texts[2] == ("", 0.2, None)    # read state holds across frames

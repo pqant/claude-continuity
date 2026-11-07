@@ -438,7 +438,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _mtime=None, _sleep=None, _live_check=None,
                  _check_every=40, _blink=None, _tty_open=None,
                  _runner=None, _pane_capture=None,
-                 _blink_poll=20) -> None:
+                 _blink_poll=20, _frontmost_tty=None,
+                 _dwell_ticks=3) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -539,6 +540,16 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     pane_capture = _pane_capture if _pane_capture is not None \
         else _sibling_region
     pane_text = None
+    # Focus dwell (user directive 2026-11-07): every blink source falls
+    # silent once the user looks at the tab; the read state persists in
+    # the pane record (blink-<window>-read). No seams means no dwell:
+    # the animator then behaves exactly like before (tests, no-iTerm2).
+    def _focus_clients():
+        return set(blink.list_client_ttys(runner_fn, bin_, window_id or ""))
+    watcher = blink.FocusWatcher(blink_store, frontmost=_frontmost_tty,
+                                 clients=_focus_clients,
+                                 dwell_ticks=_dwell_ticks)
+    suppressed = False
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -580,7 +591,21 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cap = None
                 if cap is not None:
                     pane_text = cap
-            blinker.on_text(cur_text, t, pane_text=pane_text)
+                # composite key over both gate sources: a changed segment
+                # text or dialog region re-arms the blink; the focus
+                # probes run only on this ~1 s cadence, never per frame
+                src = "|".join(repr(p) for p in (cur_text, pane_text) if p)
+                try:
+                    suppressed = watcher.tick(t, src)
+                except Exception:
+                    suppressed = False
+            if suppressed:
+                # hold the suppression across the frames between polls:
+                # re-feeding the gated text every frame would re-start
+                # the blink the tick before the next focus check
+                blinker.on_text("", t, pane_text=None)
+            else:
+                blinker.on_text(cur_text, t, pane_text=pane_text)
             if not skipped:
                 # \x1b[H homes to row 1 col 1 every frame: \r alone can't
                 # recover a pty cursor that a resize-race wrap dropped to

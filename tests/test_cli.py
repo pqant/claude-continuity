@@ -772,7 +772,10 @@ def test_cli_progress_pane_runs_animator(cc_home, monkeypatch):
         "cc_continuity.progress_pane.run_animator",
         lambda **kw: calls.append(kw))
     assert cli.main(["progress-pane"]) == 0
-    assert calls == [{"window_id": None}]  # no arg, no $TMUX_PANE
+    # focus dwell v2 (2026-11-07): the real iTerm2 frontmost probe is wired
+    assert calls[0]["window_id"] is None  # no arg, no $TMUX_PANE
+    assert (calls[0]["_frontmost_tty"]
+            is cli.blink_watch._default_frontmost_tty)
 
 
 def test_cli_progress_pane_passes_window_id(cc_home, monkeypatch):
@@ -781,7 +784,9 @@ def test_cli_progress_pane_passes_window_id(cc_home, monkeypatch):
         "cc_continuity.progress_pane.run_animator",
         lambda **kw: calls.append(kw))
     assert cli.main(["progress-pane", "@7"]) == 0
-    assert calls == [{"window_id": "@7"}]
+    assert calls[0]["window_id"] == "@7"
+    assert (calls[0]["_frontmost_tty"]
+            is cli.blink_watch._default_frontmost_tty)
 
 
 # --------------- blink-watch subcommand (mode-0 poller, live bug 11-07)
