@@ -1347,3 +1347,66 @@ def test_ask_regex_matches_only_real_prompts():
     assert statusline._ASK_RE.search("do you WANT to ALLOW editing this file?")
     assert not statusline._ASK_RE.search("did you allow the file")
     assert not statusline._ASK_RE.search("yes please")
+
+
+# ---------------- reply-ready suffix (reply blink v2, 2026-11-07)
+#
+# v1 gap found in live testing: the mode-1 pane animator reads ONLY the
+# per-window data file, and nothing ever wrote the REPLY marker there,
+# so a finished turn never blinked on the user's mode-1 sessions.
+
+
+def test_reply_suffix_plain_segment():
+    assert statusline.render_segment(0.5, None, True, ansi=False,
+                                     reply=True) == \
+        "◆ 50% Active Usage " + blink.MARKER_REPLY
+
+
+def test_reply_suffix_comes_after_ask():
+    # gate order: BLOCKED, ASK, REPLY (all must survive blink_gate
+    # substring matching).
+    assert statusline.render_segment(0.5, None, True, blocked="x",
+                                     ansi=False, ask=True, reply=True) == \
+        "◆ 50% Active Usage " + blink.MARKER_BLOCKED + " " + \
+        blink.MARKER_ASK + " " + blink.MARKER_REPLY
+
+
+def _registered_home(cc_home, tmp_path):
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    return SID, key, nnn
+
+
+def test_run_shows_reply_when_reply_ready_present(cc_home, tmp_path):
+    from cc_continuity import ledger
+    sid, key, nnn = _registered_home(cc_home, tmp_path)
+    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
+                          _cfg(statusline_ansi=False))
+    assert line.endswith(blink.MARKER_REPLY)
+
+
+def test_run_no_reply_when_blink_reply_disabled(cc_home, tmp_path):
+    from cc_continuity import ledger
+    sid, key, nnn = _registered_home(cc_home, tmp_path)
+    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
+                          _cfg(statusline_ansi=False, blink_reply=False))
+    assert blink.MARKER_REPLY not in line
+
+
+def test_run_mode1_writes_reply_to_data_file(cc_home, tmp_path, monkeypatch):
+    # THE user-visible channel: the mode-1 pane blinks on the data file
+    # alone, so the reply marker must ride into progress-data-<win>.json.
+    from cc_continuity import ledger
+    sid, key, nnn = _registered_home(cc_home, tmp_path)
+    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    monkeypatch.setattr(progress_pane, "ensure_progress_pane",
+                        _fake_ensure([]))
+    statusline.run(json.dumps(_payload(session_id=sid)).encode(),
+                   _cfg(progress_type=1))
+    data = json.loads(
+        (paths.runtime_dir() / "progress-data-@7.json").read_text(
+            encoding="utf-8"))
+    assert blink.MARKER_REPLY in data["text"]

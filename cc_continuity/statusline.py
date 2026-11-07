@@ -382,7 +382,8 @@ def render_segment(ratio: float | None, record: dict | None,
                    now: float | None = None,
                    shimmer: bool = False,
                    shimmer_pos: float | None = None,
-                   breathing: bool = False, ask: bool = False) -> str:
+                   breathing: bool = False, ask: bool = False,
+    reply: bool = False) -> str:
     """Render our ``◆ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``◆ off`` (disabled / session off), ``◆ …`` (no metric),
@@ -410,10 +411,16 @@ def render_segment(ratio: float | None, record: dict | None,
     legacy plain strings byte-for-byte.
     """
     now = time.time() if now is None else now
-    # Suffix order BLOCKED then ASK (both must survive substring matching
-    # in blink.blink_gate; the constants are blink's, never copied here).
+    # Suffix order BLOCKED, ASK, REPLY (all must survive substring
+    # matching in blink.blink_gate; the constants are blink's, never
+    # copied here). REPLY (feature 2026-11-07): an unconsumed
+    # reply_ready ledger entry, i.e. the AI finished a turn and waits
+    # for the user's eyes. In mode 1 the pane animator reads ONLY this
+    # file, so the marker MUST be composed here (v1 gap: the reply
+    # blink never reached the user's mode-1 sessions).
     blocked_text = ((f" {blink.MARKER_BLOCKED}" if blocked else "")
-                    + (f" {blink.MARKER_ASK}" if ask else "")) or None
+                    + (f" {blink.MARKER_ASK}" if ask else "")
+                    + (f" {blink.MARKER_REPLY}" if reply else "")) or None
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
             return "◆ off"
@@ -644,6 +651,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
 
     ratio = metric["ratio"] if metric is not None else None
     blocked = None
+    reply = False
     if record is not None:
         try:
             blocked = ledger.blocked_reason(
@@ -651,6 +659,13 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                                   int(record["nnn"])))
         except (OSError, ValueError):
             blocked = None
+        if config.blink_reply(cfg):
+            try:
+                reply = ledger.reply_pending(
+                    paths.session_dir(record["project_key"],
+                                      int(record["nnn"]))) is not None
+            except (OSError, ValueError):
+                reply = False
     ansi = bool(cfg.get("statusline_ansi", True))
     live = (enabled and ratio is not None
             and not (record is not None and record.get("off")))
@@ -709,11 +724,11 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             if ratio is not None:
                 progress_pane.write_progress_data(win, render_segment(
                     ratio, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask))
+                    ask=ask, reply=reply))
             elif enabled and not progress_pane.has_progress_data(win):
                 progress_pane.write_progress_data(win, render_segment(
                     0.0, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask))
+                    ask=ask, reply=reply))
             segment = ""
         elif (isinstance(result, dict)
               and result.get("reason") in ("no-window", "error")):
@@ -727,7 +742,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         else:
             segment = render_segment(ratio, record, enabled,
                                      blocked=blocked, ansi=ansi, now=now,
-                                     shimmer=False, ask=ask)
+                                     shimmer=False, ask=ask, reply=reply)
     elif mode == 2:
         # Phase 12: breathing — the whole segment brightens and dims in
         # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No
@@ -735,7 +750,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         sweep_pos = None
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, breathing=True,
-                                 ask=ask)
+                                 ask=ask, reply=reply)
     else:
         # mode 0 (default): byte-identical to today. Revision 10:
         # constant-speed sweep — the band advances SHIMMER_CELLS_PER_S
@@ -749,7 +764,8 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             _write_shimmer_state(now, sweep_pos)
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, shimmer=shimmer,
-                                 shimmer_pos=sweep_pos, ask=ask)
+                                 shimmer_pos=sweep_pos, ask=ask,
+                                 reply=reply)
     _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
