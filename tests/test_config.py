@@ -266,3 +266,18 @@ def test_redact_patterns_invalid_types_degrade_to_base():
         config.DEFAULTS["redact_patterns"]
     assert config.redact_patterns({"redact_patterns_extra": "nope"}) == \
         config.DEFAULTS["redact_patterns"]
+
+
+def test_blink_accessors_defaults():
+    assert config.blink_enabled({}) is True
+    assert config.blink_interval({}) == 0.5
+    assert config.blink_no_color({}) is False
+
+
+def test_blink_accessors_validation():
+    assert config.blink_enabled({"blink": False}) is False
+    assert config.blink_interval({"blink_interval": 1.0}) == 1.0
+    assert config.blink_interval({"blink_interval": 0.01}) == 0.1   # clamp low
+    assert config.blink_interval({"blink_interval": 99}) == 5.0     # clamp high
+    assert config.blink_interval({"blink_interval": "x"}) == 0.5    # invalid
+    assert config.blink_no_color({"blink_no_color": True}) is True

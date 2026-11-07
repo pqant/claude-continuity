@@ -224,6 +224,41 @@ def progress_mode(cfg: dict) -> int:
     return v if v in (0, 1, 2) else 0
 
 
+def blink_enabled(cfg: dict) -> bool:
+    """Whether the waiting blink is on (issue #11).
+
+    ``blink``: explicit false disables the tab/window blink entirely and
+    restores today's behavior. A missing key or any non-bool value
+    degrades to True (on whenever the tmux pane animator runs).
+    """
+    v = cfg.get("blink", True)
+    return v if isinstance(v, bool) else True
+
+
+def blink_interval(cfg: dict) -> float:
+    """Seconds per blink phase (issue #11).
+
+    ``blink_interval``: default 0.5 s. Values are clamped to [0.1, 5.0].
+    A missing key or any invalid value (non-numeric, bool) degrades to
+    0.5, so a bad edit can never freeze or hammer the animator.
+    """
+    v = cfg.get("blink_interval", 0.5)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0.5
+    return min(max(float(v), 0.1), 5.0)
+
+
+def blink_no_color(cfg: dict) -> bool:
+    """Whether the blink uses the red fallback (issue #11).
+
+    ``blink_no_color``: true switches the OFF phase from black to red
+    for profiles without a tab color of their own. A missing key or any
+    non-bool value degrades to False (black OFF phase).
+    """
+    v = cfg.get("blink_no_color", False)
+    return v if isinstance(v, bool) else False
+
+
 def session_end_push_suppress(cfg: dict) -> frozenset:
     """Validated Phase 30.1 declared-noise project keys.
 
