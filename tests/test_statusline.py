@@ -1230,3 +1230,46 @@ def test_extract_metric_model_absent(cc_home):
     p.pop("model", None)
     m = statusline.extract_metric(p, window_tokens=1000)
     assert "model" not in m
+
+
+# ------------------------------------------- issue #11: ⚠ ASK marker
+
+from cc_continuity import blink
+
+
+def test_ask_suffix_plain_segment():
+    assert statusline.render_segment(0.5, None, True, ansi=False,
+                                     ask=True) == \
+        "◆ 50% Active Usage " + blink.MARKER_ASK
+
+
+def test_ask_suffix_on_placeholder_segment():
+    assert statusline.render_segment(None, None, True, ansi=False,
+                                     ask=True) == "◆ … " + blink.MARKER_ASK
+
+
+def test_ask_suffix_comes_after_blocked():
+    # gate order: BLOCKED first, ASK last (both markers must survive for
+    # blink_gate substring matching).
+    assert statusline.render_segment(0.5, None, True, blocked="x",
+                                     ansi=False, ask=True) == \
+        "◆ 50% Active Usage " + blink.MARKER_BLOCKED + " " + blink.MARKER_ASK
+
+
+def test_no_ask_suffix_without_flag():
+    assert statusline.render_segment(0.5, None, True, blocked="x",
+                                     ansi=False) == \
+        "◆ 50% Active Usage " + blink.MARKER_BLOCKED
+
+
+def test_blocked_suffix_is_the_shared_constant():
+    # drift pin: writer and blink gate share one source of truth.
+    assert statusline.render_segment(None, None, True, blocked="x",
+                                     ansi=False) == "◆ … " + blink.MARKER_BLOCKED
+
+
+def test_ask_regex_matches_only_real_prompts():
+    assert statusline._ASK_RE.search("Do you want to allow `git push`?")
+    assert statusline._ASK_RE.search("do you WANT to ALLOW editing this file?")
+    assert not statusline._ASK_RE.search("did you allow the file")
+    assert not statusline._ASK_RE.search("yes please")

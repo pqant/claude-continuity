@@ -30,7 +30,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import atomic, config, ledger, naming, paths
+from . import atomic, blink, config, ledger, naming, paths
 
 #: Hooks treat a metric older than this as unknown (PRD §7, METRIC_STALE).
 STALE_SECONDS = 600
@@ -382,7 +382,7 @@ def render_segment(ratio: float | None, record: dict | None,
                    now: float | None = None,
                    shimmer: bool = False,
                    shimmer_pos: float | None = None,
-                   breathing: bool = False) -> str:
+                   breathing: bool = False, ask: bool = False) -> str:
     """Render our ``◆ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``◆ off`` (disabled / session off), ``◆ …`` (no metric),
@@ -394,6 +394,9 @@ def render_segment(ratio: float | None, record: dict | None,
     ``⛔ BLOCKED`` suffix (Phase 9, P9-P5): machine-side truth while a
     needs_human ledger entry is unconsumed — visible on any later attach
     (spec §7 risk note).
+    ``⚠ ASK`` suffix (issue #11): an unsubmitted permission prompt sits in
+    the captured input box (same live gate as the ultrathink word); the
+    blink gate in ``blink.py`` reacts to both suffixes (shared constants).
     Phase 11 (revision 4): with ``ansi`` (default, config
     ``statusline_ansi``) live segments render the ultrathink.sh
     per-character 24-bit rainbow (7 base hues cycled ``i % 7`` —
@@ -407,7 +410,10 @@ def render_segment(ratio: float | None, record: dict | None,
     legacy plain strings byte-for-byte.
     """
     now = time.time() if now is None else now
-    blocked_text = f" ⛔ BLOCKED" if blocked else None
+    # Suffix order BLOCKED then ASK (both must survive substring matching
+    # in blink.blink_gate; the constants are blink's, never copied here).
+    blocked_text = ((f" {blink.MARKER_BLOCKED}" if blocked else "")
+                    + (f" {blink.MARKER_ASK}" if ask else "")) or None
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
             return "◆ off"
@@ -460,6 +466,10 @@ def render_segment(ratio: float | None, record: dict | None,
 
 #: Word-boundary, case-insensitive — ultrathink.sh's ``/\bultrathink\b/gi``.
 ULTRATHINK_RE = re.compile(r"\bultrathink\b", re.IGNORECASE)
+
+# Permission-prompt wording (issue #11): exact phrase only, so ordinary
+# chat containing "allow"/"yes" can never strand the ASK marker.
+_ASK_RE = re.compile(r"Do you want to allow", re.IGNORECASE)
 
 #: CC's input box bottom border is a line of these (verified live, 014).
 _INPUT_BORDER = "─"
@@ -666,6 +676,9 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     region = _input_box_lines() if (ansi and live) else None
     word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
+    # issue #11: same live-capture gate as the ultrathink word — a dead
+    # pane must not strand an ASK marker.
+    ask = bool(region) and bool(_ASK_RE.search("\n".join(region)))
     mode = config.progress_mode(cfg)
     if mode == 1:
         # Phase 12 fix (user bug A): in mode 1 the PANE is the ONLY
@@ -704,10 +717,12 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             # rewritten by a no-metric render (no downgrade, no re-flash).
             if ratio is not None:
                 progress_pane.write_progress_data(win, render_segment(
-                    ratio, record, enabled, blocked=blocked, ansi=False))
+                    ratio, record, enabled, blocked=blocked, ansi=False,
+                    ask=ask))
             elif enabled and not progress_pane.has_progress_data(win):
                 progress_pane.write_progress_data(win, render_segment(
-                    0.0, record, enabled, blocked=blocked, ansi=False))
+                    0.0, record, enabled, blocked=blocked, ansi=False,
+                    ask=ask))
             segment = ""
         elif (isinstance(result, dict)
               and result.get("reason") in ("no-window", "error")):
@@ -721,14 +736,15 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         else:
             segment = render_segment(ratio, record, enabled,
                                      blocked=blocked, ansi=ansi, now=now,
-                                     shimmer=False)
+                                     shimmer=False, ask=ask)
     elif mode == 2:
         # Phase 12: breathing — the whole segment brightens and dims in
         # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No
         # sweep, so no shimmer-state write.
         sweep_pos = None
         segment = render_segment(ratio, record, enabled, blocked=blocked,
-                                 ansi=ansi, now=now, breathing=True)
+                                 ansi=ansi, now=now, breathing=True,
+                                 ask=ask)
     else:
         # mode 0 (default): byte-identical to today. Revision 10:
         # constant-speed sweep — the band advances SHIMMER_CELLS_PER_S
@@ -742,7 +758,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             _write_shimmer_state(now, sweep_pos)
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, shimmer=shimmer,
-                                 shimmer_pos=sweep_pos)
+                                 shimmer_pos=sweep_pos, ask=ask)
     _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)
