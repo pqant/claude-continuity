@@ -29,8 +29,8 @@ from __future__ import annotations
 import math
 import time
 
-from .. import (bootstrap, checkpoint, ledger, lock, naming, notify, paths,
-                project, state, statusline)
+from .. import (blink_watch, bootstrap, checkpoint, ledger, lock, naming,
+                notify, paths, project, state, statusline)
 from .common import (HookContext, log_error, log_event, notify_claimed,
                      session_start_output)
 
@@ -44,6 +44,30 @@ def _step(source: str, step: str, t0: float, **fields) -> None:
     extra = "".join(f" {k}={v}" for k, v in fields.items())
     ms = int((time.monotonic() - t0) * 1000)
     log_event(f"session_start source={source} step={step}{extra} ms={ms}")
+
+
+def _spawn_watch(ctx: HookContext, *, key: str | None = None,
+                 nnn: int | None = None) -> None:
+    """Fire-and-forget the mode-0 waiting-blink poller (live bug
+    2026-11-07: AskUserQuestion sat blocked 46 minutes; CC never invoked
+    the status line, so the blink never fired). Spawned here, NOT from
+    Notification/Stop (a blocking question blocks the turn; Stop fires
+    too late). Never raises: a failed spawn loses the blink, never the
+    hook.
+    """
+    try:
+        if key is not None and nnn is not None:
+            session_dir = paths.session_dir(key, int(nnn))
+        else:
+            rec = ctx.session or statusline.find_session_by_id(
+                ctx.payload.get("session_id"))
+            if rec is None:
+                return
+            session_dir = paths.session_dir(rec["project_key"],
+                                            int(rec["nnn"]))
+        blink_watch.spawn(session_dir)
+    except Exception:
+        pass
 
 
 def handle(ctx: HookContext) -> dict | None:
@@ -61,6 +85,7 @@ def handle(ctx: HookContext) -> dict | None:
             # Re-attach only: no registration, no state change, no output.
             bootstrap.record_tmux_session(ctx.session["project_key"],
                                           int(ctx.session["nnn"]))
+            _spawn_watch(ctx)
             return None
         # Phase 27: a resumed conversation with NO matching record runs
         # unmonitored — CC's native auto-resume (lastSessionId) abandons
@@ -77,6 +102,7 @@ def handle(ctx: HookContext) -> dict | None:
             root = project.resolve_root(cwd)
             key = project.project_key_for_root(root)
             _register(ctx, session_id, source=source)
+            _spawn_watch(ctx)
             return _pending_notice(ctx, key)
         except Exception:
             log_error(f"SessionStart({source}): registration failed for "
@@ -120,10 +146,12 @@ def handle(ctx: HookContext) -> dict | None:
                 bootstrap.write_started(session_id)
                 notify_claimed(ctx.cfg, key, res)
                 bootstrap.record_tmux_session(key, res["new_nnn"])
+                _spawn_watch(ctx, key=key, nnn=res["new_nnn"])
                 _step("startup", "output-ready", t0)
                 return session_start_output(res["bootstrap_text"])
             _register(ctx, session_id)
         out = _pending_notice(ctx, key)
+        _spawn_watch(ctx)
         _step("startup", "output-ready" if out is not None else "exit", t0)
         return out
     except Exception:
@@ -171,11 +199,13 @@ def _clear(ctx: HookContext) -> dict | None:
             bootstrap.write_started(session_id)
             notify_claimed(ctx.cfg, key, res)
             bootstrap.record_tmux_session(key, res["new_nnn"])
+            _spawn_watch(ctx, key=key, nnn=res["new_nnn"])
             _step("clear", "output-ready", t0)
             return session_start_output(res["bootstrap_text"])
         if ctx.session is None:
             _register(ctx, session_id)
         out = _pending_notice(ctx, key)
+        _spawn_watch(ctx)
         _step("clear", "output-ready" if out is not None else "exit", t0)
         return out
     except Exception:

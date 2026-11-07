@@ -20,9 +20,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import (__version__, bootstrap, checkpoint, config, ledger, naming,
-               paths, project, progress_pane, state, statusline,
-               thresholds, validate)
+from . import (__version__, blink_watch, bootstrap, checkpoint, config,
+               ledger, naming, paths, project, progress_pane, state,
+               statusline, thresholds, validate)
 from .hooks import (common, pre_compact, pre_tool_use, session_end,
                     session_start, stop, task, tool_use, user_prompt)
 
@@ -189,6 +189,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the mode-1 20 fps progress line (Phase 12)")
     p_pane.add_argument("window_id", nargs="?", default=None,
                         help="tmux window id (default: resolve $TMUX_PANE)")
+
+    p_bw = sub.add_parser(
+        "blink-watch",
+        help="run the mode-0 session-resident waiting-blink poller "
+             "(spawned by the SessionStart hook, live bug 2026-11-07)")
+    p_bw.add_argument("--pane", required=True,
+                      help="tmux pane id of the CC pane ($TMUX_PANE)")
+    p_bw.add_argument("--window", required=True,
+                      help="tmux window id of the CC pane (@N)")
+    p_bw.add_argument("--session-dir", required=True,
+                      help="session dir (state.json + ledger.jsonl)")
 
     p_pp = sub.add_parser(
         "power-plug",
@@ -398,6 +409,26 @@ def cmd_progress_pane(args: argparse.Namespace) -> int:
     """
     win = args.window_id or progress_pane.resolve_window_id()
     progress_pane.run_animator(window_id=win)
+    return 0
+
+
+def cmd_blink_watch(args: argparse.Namespace) -> int:
+    """Run the mode-0 session-resident waiting-blink poller.
+
+    Spawned (detached) by the SessionStart hook via ``blink_watch.spawn``,
+    never by hand. It drives one Blinker from the pane's input-box
+    region and the ledger's unconsumed needs_human reason, because CC
+    does not invoke the status line while it waits on AskUserQuestion
+    (live bug 2026-11-07: 46 unanswered minutes without a blink). Quits
+    silently when the session leaves the live state, the pane dies, or
+    after 12 h.
+    """
+    try:
+        cfg = config.load_config()
+    except Exception:
+        cfg = {}
+    blink_watch.watch(args.session_dir, pane_id=args.pane,
+                      window_id=args.window, cfg=cfg)
     return 0
 
 
@@ -1193,6 +1224,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_statusline(args)
     if args.command == "progress-pane":
         return cmd_progress_pane(args)
+    if args.command == "blink-watch":
+        return cmd_blink_watch(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "hook":

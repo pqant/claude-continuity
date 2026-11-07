@@ -14,6 +14,7 @@ next statusline render recreates it.
 
 import json
 import re
+import subprocess
 import time
 
 import pytest
@@ -699,8 +700,8 @@ class _BlinkProbe:
         self.texts = []
         self.exits = 0
 
-    def on_text(self, text, now):
-        self.texts.append((text, now))
+    def on_text(self, text, now, pane_text=None):
+        self.texts.append((text, now, pane_text))
 
     def on_exit(self):
         self.exits += 1
@@ -716,7 +717,8 @@ class _FakeBlinkMod:
         return b
 
 
-def test_animator_feeds_blinker_every_tick(cc_home):
+def test_animator_feeds_blinker_every_tick(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)  # no real-pane poll
     fake = _FakeBlinkMod()
     clock = iter([0.0, 0.05, 0.1, 0.15, 0.2, 0.25])
     progress_pane.run_animator(
@@ -725,15 +727,18 @@ def test_animator_feeds_blinker_every_tick(cc_home):
         _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake)
     b = fake.made[0]
     assert b.window_id == "12"
-    assert b.texts == [("◆ 61% ok  ⛔ BLOCKED", 0.0),
-                       ("◆ 61% ok  ⛔ BLOCKED", 0.1),
-                       ("◆ 61% ok  ⛔ BLOCKED", 0.2)]
+    # the pane_text slot stays None here: no self-poll seams are injected
+    # and the fake blinker carries no ``enabled`` truth to poll for.
+    assert b.texts == [("◆ 61% ok  ⛔ BLOCKED", 0.0, None),
+                       ("◆ 61% ok  ⛔ BLOCKED", 0.1, None),
+                       ("◆ 61% ok  ⛔ BLOCKED", 0.2, None)]
     assert b.exits == 1
 
 
-def test_animator_evaluates_gate_even_on_skipped_frames(cc_home):
+def test_animator_evaluates_gate_even_on_skipped_frames(cc_home, monkeypatch):
     # the width-jump guard skips PAINTING, never the blink gate: a resize
     # must not stall the phase clock.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     fake = _FakeBlinkMod()
     cols = iter([80, 80, 1])
     clock = iter([0.0, 0.05, 0.1, 0.15, 0.2, 0.25])
@@ -746,7 +751,8 @@ def test_animator_evaluates_gate_even_on_skipped_frames(cc_home):
     assert len(fake.made[0].texts) == 3  # but it still ticked the blinker
 
 
-def test_animator_closes_blinker_when_pane_gone(cc_home):
+def test_animator_closes_blinker_when_pane_gone(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     fake = _FakeBlinkMod()
     progress_pane.run_animator(
         "12", _write=lambda b: None, _now=lambda: 0.0,
@@ -756,7 +762,8 @@ def test_animator_closes_blinker_when_pane_gone(cc_home):
     assert fake.made[0].exits == 1    # the orphan-guard return is covered
 
 
-def test_animator_closes_blinker_on_write_failure(cc_home):
+def test_animator_closes_blinker_on_write_failure(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     fake = _FakeBlinkMod()
     written = []
     def w(frame):
@@ -770,7 +777,8 @@ def test_animator_closes_blinker_on_write_failure(cc_home):
     assert fake.made[0].exits == 1    # the I/O-failure exit is covered
 
 
-def test_animator_blink_store_is_window_namespaced(cc_home):
+def test_animator_blink_store_is_window_namespaced(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     fake = _FakeBlinkMod()
     progress_pane.run_animator(
         "12", _frames=1, _write=lambda b: None, _now=lambda: 0.0,
@@ -781,3 +789,61 @@ def test_animator_blink_store_is_window_namespaced(cc_home):
     assert b.store("blink_name") == "orig"
     rec = progress_pane._read_pane_record()
     assert rec.get("blink-12-blink_name") == "orig"
+
+
+def test_animator_blinks_on_pane_capture_without_data_marker(cc_home):
+    # live bug 2026-11-07: AskUserQuestion sat open and CC never invoked
+    # the status line, so the data file stayed marker-free. The self-poll
+    # captures the sibling pane; the selection footer inside the input
+    # box region drives the blink on its own. Real blink module, fake
+    # runner/tty seams (test_blink.py's ScriptRunner pattern).
+    outs = ["orig", "/dev/ttys001"]  # window name, then client ttys
+
+    class Runner:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, argv, **kw):
+            self.calls.append(argv)
+            out = (outs.pop(0) if outs else "").encode()
+            return subprocess.CompletedProcess(argv, 0, out, b"")
+
+        def renames(self):
+            return [a[4] for a in self.calls if a[1] == "rename-window"]
+
+    r = Runner()
+    captured = []
+
+    def pane_capture():
+        captured.append(1)
+        return ("❯ 1. (A) go\n"
+                "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+                + "─" * 40)
+
+    class Tty:
+        def __init__(self):
+            self.data = b""
+
+        def write(self, chunk):
+            self.data += chunk
+
+        def close(self):
+            pass
+
+    ttys_opened = []
+
+    def tty_open(path, mode="wb", **kw):
+        t = Tty()
+        ttys_opened.append(t)
+        return t
+
+    clock = iter([k / 20.0 for k in range(200)])
+    progress_pane.run_animator(
+        "12", _frames=12, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None,
+        _pane_capture=pane_capture, _blink_poll=4,
+        _runner=r, _tty_open=tty_open)
+    assert "WAIT" in r.renames()      # blinked on the capture alone
+    assert len(captured) == 3         # i = 0, 4, 8 (~1 s at 20 fps)
+    assert ttys_opened                # OSC bytes went to the client tty

@@ -10,6 +10,7 @@ never on ``progress_pane`` or ``statusline``, so a blink failure can
 never drag the animator down.
 """
 
+import re
 import subprocess
 import time
 
@@ -26,6 +27,50 @@ BLACK_FILL = (0, 0, 0)
 MARKER_BLOCKED = "⛔ BLOCKED"
 MARKER_ASK = "⚠ ASK"
 GATE_MARKERS = (MARKER_BLOCKED, MARKER_ASK)
+
+# "User input needed" detection from raw pane text (live bug 2026-11-07:
+# AskUserQuestion sat unanswered for 46 min without a blink). Permission
+# prompts match the exact wording only, so ordinary chat containing
+# "allow"/"yes" can never strand the marker; selection prompts (permission
+# AND AskUserQuestion) are pinned by the footer phrase PAIR on ONE line
+# (the dot never crosses newlines), which agent output cannot reproduce in
+# the input-box region.
+ASK_RE_PERMISSION = re.compile(r"Do you want to allow", re.IGNORECASE)
+ASK_RE_SELECTION = re.compile(r"Enter to select.*Esc to cancel")
+
+#: CC's input box bottom border is a line of these (verified live, 014).
+INPUT_BORDER = "─"
+
+
+def ask_visible(text: str | None) -> bool:
+    """True while the pane shows a permission or selection prompt."""
+    if not text:
+        return False
+    return bool(ASK_RE_PERMISSION.search(text)
+                or ASK_RE_SELECTION.search(text))
+
+
+def input_box_region_from_lines(lines: list[str]) -> list[str] | None:
+    """The input-box/dialog region: last ``❯``-prefixed line through the
+    next line consisting solely of the border glyph (None when no ``❯``).
+
+    Scrollback is never part of the region, so a quoted footer above the
+    box cannot strand ASK; while a selection prompt is open the option
+    cursor is the ``❯`` line and the footer sits inside the region.
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("❯"):
+            start = i
+    if start is None:
+        return None
+    region = []
+    for line in lines[start:]:
+        region.append(line)
+        stripped = line.strip()
+        if stripped and set(stripped) == {INPUT_BORDER}:
+            break
+    return region
 
 
 def osc6_fill(rgb: tuple[int, int, int]) -> bytes:
@@ -84,6 +129,21 @@ def get_window_name(runner, bin_: str, target: str) -> str | None:
 def rename_window(runner, bin_: str, target: str, name: str) -> bool:
     """Rename the window at ``target``; False on any tmux failure."""
     return _tmux(runner, bin_, ["rename-window", "-t", target, name]) is not None
+
+
+def capture_pane(runner, bin_: str, target: str | None = None) -> str | None:
+    """Visible pane text via ``capture-pane -p``; None on any failure.
+
+    No target captures the pane this process lives in (``$TMUX_PANE``
+    default); a target captures a sibling (the animator self-poll and
+    the session-resident poller read the CC pane this way). Feed the
+    result to ``ask_visible`` only through ``input_box_region_from_lines``
+    so scrollback can never false-positive.
+    """
+    argv = ["capture-pane", "-p"]
+    if target is not None:
+        argv += ["-t", target]
+    return _tmux(runner, bin_, argv)
 
 
 def write_tty(path: str, data: bytes, *, _open=open) -> bool:
@@ -206,11 +266,10 @@ class Blinker:
             self._log(f"blink skip window={self.window_id} "
                       f"reason=no attached clients")
 
-    def _wait_name(self, text: str | None) -> str:
-        n = sum(text.count(m) for m in GATE_MARKERS) if text else 0
-        return "WAIT" if n <= 1 else f"WAIT[{n}]"
+    def _wait_name(self, count: int) -> str:
+        return "WAIT" if count <= 1 else f"WAIT[{count}]"
 
-    def _apply(self, text: str | None) -> None:
+    def _apply(self, count: int) -> None:
         if self._phase_own:
             rename_window(self._runner, self._bin_, self.window_id,
                           self._original)
@@ -218,7 +277,7 @@ class Blinker:
                 write_tty(tty, OSC6_RESET, _open=self._tty_open)
         else:
             rename_window(self._runner, self._bin_, self.window_id,
-                          self._wait_name(text))
+                          self._wait_name(count))
             for tty in self._ttys:
                 write_tty(tty, self._fill, _open=self._tty_open)
 
@@ -243,12 +302,24 @@ class Blinker:
 
     # -- animator surface -------------------------------------------------
 
-    def on_text(self, text: str | None, now: float) -> None:
-        """One animator tick: gate check, phase flip on the interval."""
+    def on_text(self, text: str | None, now: float,
+                pane_text: str | None = None) -> None:
+        """One animator tick: gate check, phase flip on the interval.
+
+        ``pane_text`` is the caller's optional raw pane capture (the
+        sibling pane in the animator, the CC pane in the watcher): a live
+        selection prompt counts as a gate source even when the progress
+        data file carries no marker: the status line is not invoked while
+        CC waits on a question, so the file would stay stale (live bug
+        2026-11-07).
+        """
         if not self.enabled:
             return
         try:
-            gated = blink_gate(text)
+            count = sum((text or "").count(m) for m in GATE_MARKERS)
+            if pane_text is not None and ask_visible(pane_text):
+                count += 1
+            gated = count > 0
             if gated and not self._blinking:
                 self._start(now)
                 return
@@ -260,7 +331,7 @@ class Blinker:
             if now - self._last_toggle >= self._interval:
                 self._last_toggle = now
                 self._phase_own = not self._phase_own
-                self._apply(text)
+                self._apply(count)
         except Exception:
             pass
 

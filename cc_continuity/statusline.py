@@ -467,12 +467,11 @@ def render_segment(ratio: float | None, record: dict | None,
 #: Word-boundary, case-insensitive — ultrathink.sh's ``/\bultrathink\b/gi``.
 ULTRATHINK_RE = re.compile(r"\bultrathink\b", re.IGNORECASE)
 
-# Permission-prompt wording (issue #11): exact phrase only, so ordinary
-# chat containing "allow"/"yes" can never strand the ASK marker.
-_ASK_RE = re.compile(r"Do you want to allow", re.IGNORECASE)
-
-#: CC's input box bottom border is a line of these (verified live, 014).
-_INPUT_BORDER = "─"
+# Permission-prompt wording (issue #11): alias of blink's single source,
+# never a private copy (drift-pinned in the tests). Selection prompts
+# (AskUserQuestion AND permission footers) are detected by
+# ``blink.ask_visible`` over the captured region, not by this regex.
+_ASK_RE = blink.ASK_RE_PERMISSION
 
 
 def _tmux_bin() -> str:
@@ -499,19 +498,10 @@ def _input_box_lines(timeout: float = 1.0) -> list[str] | None:
     if proc.returncode != 0:
         return None
     lines = proc.stdout.decode("utf-8", "replace").splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("❯"):
-            start = i
-    if start is None:
-        return None
-    region = []
-    for line in lines[start:]:
-        region.append(line)
-        stripped = line.strip()
-        if stripped and set(stripped) == {_INPUT_BORDER}:
-            break
-    return region
+    # Single source of truth (issue #11 follow-up): the region rule lives
+    # in blink.py so the status line writer and the blink/poller gate can
+    # never drift apart.
+    return blink.input_box_region_from_lines(lines)
 
 
 def prompt_has_ultrathink(timeout: float = 1.0) -> bool:
@@ -677,8 +667,9 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
     # issue #11: same live-capture gate as the ultrathink word: a dead
-    # pane must not strand an ASK marker.
-    ask = bool(region) and bool(_ASK_RE.search("\n".join(region)))
+    # pane must not strand an ASK marker. blink.ask_visible covers both
+    # permission wording and selection footers (AskUserQuestion).
+    ask = bool(region) and blink.ask_visible("\n".join(region))
     mode = config.progress_mode(cfg)
     if mode == 1:
         # Phase 12 fix (user bug A): in mode 1 the PANE is the ONLY

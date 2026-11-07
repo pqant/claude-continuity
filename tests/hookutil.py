@@ -86,11 +86,30 @@ class InlineEmitSub:
         return type("P", (), {"returncode": 0})()
 
 
+from cc_continuity import blink_watch as _blink_watch_mod
+_REAL_BLINK_SPAWN = _blink_watch_mod.spawn
+
+
 def run_hook(event: str, p: dict) -> int:
-    """Run one hook event end-to-end (common skeleton + handler registry)."""
+    """Run one hook event end-to-end (common skeleton + handler registry).
+
+    The SessionStart handler now spawns the waiting-blink poller, which
+    reads the REAL $TMUX; in the suite that would touch the developer's
+    own tmux server (and CI's absence) and even Popen a live poller.
+    Stub it to a no-op UNLESS the test already installed its own
+    capture (which is not the pristine module function).
+    """
     from cc_continuity.hooks import common
 
-    return common.run_event(event, json.dumps(p), cli.HOOK_HANDLERS)
+    stubbed = False
+    if _blink_watch_mod.spawn is _REAL_BLINK_SPAWN:
+        _blink_watch_mod.spawn = lambda session_dir: None
+        stubbed = True
+    try:
+        return common.run_event(event, json.dumps(p), cli.HOOK_HANDLERS)
+    finally:
+        if stubbed:
+            _blink_watch_mod.spawn = _REAL_BLINK_SPAWN
 
 
 def project_key_for(repo: Path) -> str:

@@ -784,6 +784,30 @@ def test_cli_progress_pane_passes_window_id(cc_home, monkeypatch):
     assert calls == [{"window_id": "@7"}]
 
 
+# --------------- blink-watch subcommand (mode-0 poller, live bug 11-07)
+
+
+def test_blink_watch_subparser_smoke():
+    ns = cli.build_parser().parse_args(
+        ["blink-watch", "--pane", "%7", "--window", "@7",
+         "--session-dir", "/s"])
+    assert ns.command == "blink-watch"
+    assert (ns.pane, ns.window, ns.session_dir) == ("%7", "@7", "/s")
+
+
+def test_cli_blink_watch_runs_watch(cc_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "cc_continuity.blink_watch.watch",
+        lambda sd, **kw: calls.append((sd, kw)))
+    assert cli.main(["blink-watch", "--pane", "%7", "--window", "@7",
+                     "--session-dir", "/s"]) == 0
+    sd, kw = calls[0]
+    assert sd == "/s"
+    assert (kw["pane_id"], kw["window_id"]) == ("%7", "@7")
+    assert isinstance(kw["cfg"], dict)
+
+
 # ------------------------------------------------------- notify CLI (issue #7)
 
 

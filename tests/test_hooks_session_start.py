@@ -780,3 +780,52 @@ def test_restart_does_not_reuse_fresh_bootstrap(cc_home, capsys, tmp_path):
                                             session_id="sid-too-young",
                                             source="startup")) == 0
     assert _project_record(repo)["counter"] == 3
+
+
+# ---------- blink_watch spawn wiring (live bug 2026-11-07)
+
+
+def _spawn_capture(monkeypatch):
+    from cc_continuity.hooks import session_start
+    spawns = []
+    monkeypatch.setattr(session_start.blink_watch, "spawn",
+                        lambda sd: spawns.append(str(sd)))
+    return spawns
+
+
+def test_startup_spawns_blink_watch(cc_home, tmp_path, monkeypatch):
+    spawns = _spawn_capture(monkeypatch)
+    repo = make_repo(tmp_path)
+    assert run_hook("SessionStart", fixture_payload("SessionStart", repo)) == 0
+    assert spawns == [str(paths.session_dir(project_key_for(repo), 1))]
+
+
+def test_compact_does_not_spawn(cc_home, tmp_path, monkeypatch):
+    spawns = _spawn_capture(monkeypatch)
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    del spawns[:]  # the startup spawn is expected; compact must add none
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "compact"
+    assert run_hook("SessionStart", p) == 0
+    assert spawns == []
+
+
+def test_resume_reattach_spawns_blink_watch(cc_home, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    spawns = _spawn_capture(monkeypatch)
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "resume"
+    assert run_hook("SessionStart", p) == 0
+    assert spawns == [str(paths.session_dir(key, nnn))]
+
+
+def test_resume_registration_spawns_blink_watch(cc_home, tmp_path,
+                                                monkeypatch):
+    repo = make_repo(tmp_path)
+    spawns = _spawn_capture(monkeypatch)
+    p = fixture_payload("SessionStart", repo, session_id=SID)
+    p["source"] = "resume"
+    assert run_hook("SessionStart", p) == 0
+    assert spawns == [str(paths.session_dir(project_key_for(repo), 1))]

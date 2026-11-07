@@ -845,6 +845,80 @@ def test_prompt_has_ultrathink_tmux_failure(cc_home, tmp_path, monkeypatch,
     assert statusline.prompt_has_ultrathink() is False
 
 
+# ------------- issue #11 follow-up: AskUserQuestion ASK marker (2026-11-07)
+#
+# Live bug: AskUserQuestion sat unanswered for 46 minutes and the tab
+# never blinked. The ASK gate matched ONLY the permission wording "Do
+# you want to allow"; the selection footer went undetected. Detection
+# now lives in blink.py (single source of truth); statusline composes
+# ask from _input_box_lines + blink.ask_visible. The dialog lines below
+# are verbatim from the captured real pane (scrollback noise replaced).
+
+_PANE_DIALOG = (
+    "user: run the measurement job (no re-roll)\n"
+    "❯ 1. (A) competitor-reimplementation\n"
+    "      Row labeled 'competitor-reimplementation' like P1.\n"
+    "  2. (B) our-method-with-FSR-delta\n"
+    "      Row labeled 'our method + FSR scoring delta'.\n"
+    "  3. Type something.\n"
+    "  4. Chat about this\n"
+    "\n"
+    "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+    f"{_BORDER}\n"
+    "footer line\n"
+)
+
+# An agent quoting the footer in chat ABOVE the box (what happened in
+# the real session) must not strand ASK: the region starts at the LAST
+# ❯ line, so the quoted line sits outside it.
+_PANE_QUOTED_FOOTER = (
+    "agent: the dialog footer says Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+    "❯ \n"
+    f"{_BORDER}\n"
+)
+
+
+def test_input_box_lines_includes_dialog_footer(cc_home, fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_DIALOG)
+    region = statusline._input_box_lines()
+    assert region is not None
+    assert region[0] == "❯ 1. (A) competitor-reimplementation"
+    assert "Enter to select · ↑/↓ to navigate · Esc to cancel" in region
+
+
+def test_input_box_lines_excludes_quoted_footer_above(cc_home,
+                                                      fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_QUOTED_FOOTER)
+    region = statusline._input_box_lines()
+    assert region == ["❯ ", _BORDER]
+
+
+def test_ask_regex_is_blinks_permission_regex():
+    # drift pin: statusline keeps _ASK_RE as an alias of blink's single
+    # source, never a private copy (test_ask_regex above stays valid).
+    assert statusline._ASK_RE is blink.ASK_RE_PERMISSION
+
+
+def test_run_marks_ask_on_selection_dialog(cc_home, fake_tmux_pane):
+    # the live bug, run level: AskUserQuestion open in the input box
+    # (no "Do you want to allow" anywhere) must put ASK on the segment.
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_DIALOG)
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert blink.MARKER_ASK in line
+    assert blink.MARKER_BLOCKED not in line
+
+
+def test_run_no_ask_when_footer_quoted_in_scrollback(cc_home,
+                                                     fake_tmux_pane):
+    pane, log = fake_tmux_pane
+    _set_pane(pane, _PANE_QUOTED_FOOTER)
+    line = statusline.run(json.dumps(_payload()).encode(), _cfg())
+    assert blink.MARKER_ASK not in line
+
+
 def test_run_shimmers_when_prompt_has_ultrathink(cc_home, monkeypatch,
                                                  fake_tmux_pane):
     pane, log = fake_tmux_pane  # default pane carries the keyword

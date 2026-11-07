@@ -74,6 +74,17 @@ def test_rename_window_argv_and_result():
     assert blink.rename_window(_failing_runner, "tmux", "@3", "WAIT") is False
 
 
+def test_capture_pane_current_and_targeted():
+    # no target: the pane this process lives in ($TMUX_PANE default);
+    # with target: a sibling pane (the poller / animator capture path).
+    runner, calls = _runner_factory(["a\nb\n", "c\n"])
+    assert blink.capture_pane(runner, "tmux") == "a\nb"
+    assert calls[0] == ["tmux", "capture-pane", "-p"]
+    assert blink.capture_pane(runner, "tmux", target="@7") == "c"
+    assert calls[1] == ["tmux", "capture-pane", "-p", "-t", "@7"]
+    assert blink.capture_pane(_failing_runner, "tmux") is None
+
+
 def test_write_tty_writes_bytes_and_swallows_oserror():
     class FakeFile:
         def __init__(self):
@@ -347,3 +358,118 @@ def test_failed_clear_keeps_stored_name_for_later_sweep():
     assert store("blink_name") == "orig"
     b.on_text("◆ ok", 0.1)       # restore rename fails (tmux stall)
     assert store("blink_name") == "orig"
+
+
+# ------------------------- AskUserQuestion / selection prompt (issue #11 follow-up)
+#
+# Live bug 2026-11-07 (connector-177): the AskUserQuestion dialog sat open
+# for 46 minutes and the tab never blinked. Two independent gaps: the ASK
+# regex matched ONLY the permission wording "Do you want to allow", and the
+# status line (the sole marker writer) is never invoked while CC waits on a
+# question. Detection must therefore also work from a raw pane capture:
+# the selection footer is the stable phrase pair; question text and option
+# labels are arbitrary. The fixture below is today's real dialog.
+
+_BORDER = "─" * 40
+_DIALOG_LINES = [
+    "  Measurement job is closed, no re-roll.",
+    "❯ 1. (A) competitor-reimplementation",
+    "      Row labeled 'competitor-reimplementation' like P1.",
+    "  2. (B) our-method-with-FSR-delta",
+    "      Row labeled 'our method + FSR scoring delta'.",
+    "  3. Type something.",
+    "  4. Chat about this",
+    "",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    _BORDER,
+]
+_DIALOG = "\n".join(_DIALOG_LINES)
+_PERMISSION_LINES = [
+    "Do you want to allow this Bash command?",
+    "❯ 1. Yes",
+    "  2. No, and tell Claude what to do differently",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    _BORDER,
+]
+
+
+def test_ask_visible_true_on_question_dialog():
+    assert blink.ask_visible(_DIALOG) is True
+
+
+def test_ask_visible_true_on_permission_prompt():
+    assert blink.ask_visible("Do you want to allow `git push`?") is True
+    assert blink.ask_visible("do you WANT to ALLOW editing this file?") is True
+
+
+def test_ask_visible_false_on_ordinary_chat():
+    assert blink.ask_visible("did you allow the file?") is False
+    assert blink.ask_visible("yes please, go ahead") is False
+
+
+def test_ask_visible_footer_requires_both_phrases_same_line():
+    assert blink.ask_visible("Enter to select") is False
+    assert blink.ask_visible("Esc to cancel") is False
+    # one phrase per line does NOT match (the dot never crosses newlines)
+    assert blink.ask_visible("Enter to select\nEsc to cancel") is False
+
+
+def test_ask_visible_none_and_empty():
+    assert blink.ask_visible(None) is False
+    assert blink.ask_visible("") is False
+
+
+def test_input_box_region_from_option_row_through_border():
+    lines = ["scrollback above"] + _DIALOG_LINES + ["junk below"]
+    region = blink.input_box_region_from_lines(lines)
+    assert region is not None
+    assert region[0] == "❯ 1. (A) competitor-reimplementation"
+    assert "Enter to select · ↑/↓ to navigate · Esc to cancel" in region
+    assert "junk below" not in region
+    assert "scrollback above" not in region
+
+
+def test_input_box_region_excludes_quoted_footer_above():
+    # an agent quoting the footer in chat above the box (what happened in
+    # this very session) must not strand an ASK: the region starts at the
+    # LAST ❯ line.
+    lines = ["Enter to select · ↑/↓ to navigate · Esc to cancel",
+             "❯ ", _BORDER]
+    region = blink.input_box_region_from_lines(lines)
+    assert region == ["❯ ", _BORDER]
+    assert blink.ask_visible("\n".join(region)) is False
+
+
+def test_input_box_region_none_without_prompt_marker():
+    assert blink.input_box_region_from_lines(["plain text", _BORDER]) is None
+
+
+def test_blinker_starts_on_pane_dialog_without_data_marker():
+    r = ScriptRunner(["conn-tab", "/dev/ttys001"])
+    tty = FakeTTY()
+    b = _blinker(r, tty, store=_store_dict())
+    b.on_text("◆ 29% Active Usage", 0.0, pane_text=_DIALOG)
+    b.on_text("◆ 29% Active Usage", 0.5, pane_text=_DIALOG)
+    assert r.renames() == ["WAIT"]
+    assert tty.bytes_for("/dev/ttys001") == blink.osc6_fill(blink.BLACK_FILL)
+
+
+def test_blinker_pane_falling_edge_restores():
+    store = _store_dict()
+    r, tty = ScriptRunner(["conn-tab", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, store=store)
+    b.on_text("◆ 29% Active Usage", 0.0, pane_text=_DIALOG)
+    b.on_text("◆ 29% Active Usage", 0.5, pane_text=_DIALOG)  # dark
+    b.on_text("◆ 29% Active Usage", 0.6, pane_text="")       # answered
+    assert r.renames() == ["WAIT", "conn-tab"]
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.osc6_fill(blink.BLACK_FILL) + blink.OSC6_RESET)
+    assert store("blink_name") is None
+
+
+def test_blinker_pane_ask_adds_to_wait_count():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0, pane_text=_DIALOG)   # 1 data marker + pane ask
+    b.on_text(GATE, 0.5, pane_text=_DIALOG)
+    assert r.renames() == ["WAIT[2]"]

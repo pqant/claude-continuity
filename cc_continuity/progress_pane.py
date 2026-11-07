@@ -437,7 +437,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _write=None, _now=None, _size=None, _text=None,
                  _mtime=None, _sleep=None, _live_check=None,
                  _check_every=40, _blink=None, _tty_open=None,
-                 _runner=None) -> None:
+                 _runner=None, _pane_capture=None,
+                 _blink_poll=20) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -504,6 +505,40 @@ def run_animator(window_id: str | None = None, *, _frames=None,
         window_id or "", cfg, store=blink_store,
         runner=(_runner if _runner is not None else subprocess.run),
         tty_open=(_tty_open if _tty_open is not None else open))
+
+    # Pane self-poll (live bug 2026-11-07): while CC waits on a
+    # selection prompt (AskUserQuestion) it never invokes the status
+    # line, so the data file can stay marker-free. Every _blink_poll
+    # frames (~1 s at 20 fps) capture the SIBLING pane (the CC pane)
+    # and cache its input-box region for the blinker gate; a failed
+    # capture keeps the last cache (tmux stalls happen, and a flaky
+    # None would flicker the blink off).
+    runner_fn = _runner if _runner is not None else subprocess.run
+    bin_ = os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux"
+
+    def _sibling_region():
+        me = os.environ.get("TMUX_PANE")
+        if not me:
+            return None
+        out = _tmux_call(runner_fn, bin_,
+                         ["list-panes", "-t", window_id,
+                          "-F", "#{pane_id}"])
+        if out is None:
+            return None
+        for pid in out.splitlines():
+            pid = pid.strip()
+            if pid and pid != me:
+                cap = blink_mod.capture_pane(runner_fn, bin_, target=pid)
+                if cap is None:
+                    return None
+                region = blink_mod.input_box_region_from_lines(
+                    cap.splitlines())
+                return None if region is None else "\n".join(region)
+        return None
+
+    pane_capture = _pane_capture if _pane_capture is not None \
+        else _sibling_region
+    pane_text = None
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -537,8 +572,15 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 cur_mtime = mt
             t = now()
             # outside the skipped guard: a skipped paint must not stall
-            # the blink phase clock.
-            blinker.on_text(cur_text, t)
+            # the blink phase clock (nor the self-poll cadence).
+            if getattr(blinker, "enabled", True) and i % _blink_poll == 0:
+                try:
+                    cap = pane_capture()
+                except Exception:
+                    cap = None
+                if cap is not None:
+                    pane_text = cap
+            blinker.on_text(cur_text, t, pane_text=pane_text)
             if not skipped:
                 # \x1b[H homes to row 1 col 1 every frame: \r alone can't
                 # recover a pty cursor that a resize-race wrap dropped to
