@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 
 from . import atomic, blink, config, paths
@@ -430,6 +431,36 @@ def _window_pane_count(window_id: str | None) -> int | None:
 # --------------------------------------------------------------- run_animator
 
 
+def _default_build_stamp() -> tuple:
+    """mtimes of the modules this animator actually executes (issue #19).
+
+    The animator loads its code once at spawn; a ``cc-continuity install``
+    that swaps the app dir under a live pane never reaches it (live
+    evidence: hours on a pre-fix build with zero focus lines in
+    blink.log). Watching the sources we RUN (this module, the blinker and
+    the shared statusline palette) is the stamp; a change means the code
+    on disk moved ahead of this process. Raises OSError mid-install
+    (files being swapped): the caller skips that round.
+    """
+    out = []
+    for name in (__name__, "cc_continuity.blink",
+                 "cc_continuity.statusline"):
+        out.append(os.stat(sys.modules[name].__file__).st_mtime_ns)
+    return tuple(out)
+
+
+def _default_restart() -> None:
+    """Re-exec this process with its own command line (issue #19).
+
+    The new app-dir build loads on exec and the pane's fds (0/1/2 on the
+    pane's tty) survive execv: no respawn through the tmux server, no
+    tty mix-up. Never returns on success; callers fall back to the
+    self-heal path if exec raises. Restore must already be done: a
+    replaced process cannot clean up after itself.
+    """
+    os.execv(sys.executable, [sys.executable] + list(sys.argv))
+
+
 _BLINK_MISSING = object()
 
 
@@ -439,7 +470,9 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _check_every=40, _blink=None, _tty_open=None,
                  _runner=None, _pane_capture=None,
                  _blink_poll=20, _frontmost_tty=None,
-                 _dwell_ticks=3, _focus_log=blink._debug_line) -> None:
+                 _dwell_ticks=3, _focus_log=blink._debug_line,
+                 _build_stamp=None, _build_poll=20,
+                 _restart=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -458,7 +491,10 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     resolving ``$TMUX_PANE`` and, failing that, animates the placeholder.
     The sleep is drift-compensated (0.05 s target minus the frame's own
     cost). ANY I/O failure ends the loop (returns) — the pane dies and the
-    status line self-heal recreates it. Frames with degenerate resize
+    status line self-heal recreates it. When the code on disk moves ahead
+    of this process (an install swapped the app dir under the live pane,
+    issue #19) the animator restores cleanly and re-execs itself in the
+    same pane, so a long-lived pane never animates on a stale build. Frames with degenerate resize
     widths are skipped (width-jump guard: narrower than ``_WIDTH_GUARD``,
     or a read that teleports more than ``_WIDTH_JUMP`` cols from the
     previous read width) — a resize never paints a single-character
@@ -551,6 +587,21 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                                  dwell_ticks=_dwell_ticks,
                                  label=window_id or "",
                                  log=_focus_log)
+    # Stale-build guard (issue #19): see ``_default_build_stamp``. Every
+    # _build_poll frames (~1 s at 20 fps) the sources we run are re-statted;
+    # a change breaks out through the SHARED exit path (restore runs once
+    # in the finally) and re-execs the process in place. A stat failure
+    # (mid-install) is not a signal: the round is skipped and the next
+    # good read re-baselines.
+    stamp_fn = (_build_stamp if _build_stamp is not None
+                else _default_build_stamp)
+    restart_fn = (_restart if _restart is not None
+                  else _default_restart)
+    try:
+        base_stamp = stamp_fn()
+    except Exception:
+        base_stamp = None
+    restarting = False
     suppressed = False
     try:
         cur_text = text_fn()
@@ -639,11 +690,31 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     return
             if _frames is not None and i >= _frames:
                 return
+            if _build_poll and i % _build_poll == 0:
+                try:
+                    cur = stamp_fn()
+                except Exception:
+                    cur = None
+                if cur is not None:
+                    if base_stamp is None:
+                        base_stamp = cur   # re-baseline after a gap
+                    elif cur != base_stamp:
+                        restarting = True
+                        break
             t2 = now()
             sleep(max(0.0, 0.05 - (t2 - t)))
     except Exception:
         return
     finally:
-        # every exit path (frame bound, orphan guard, any I/O failure)
-        # restores the window name and tab color.
+        # every exit path (frame bound, orphan guard, build change, any
+        # I/O failure) restores the window name and tab color.
         blinker.on_exit()
+    if restarting:
+        # restore already ran (finally); the exec goes LAST: a replaced
+        # process cannot clean up after itself. If exec fails the pane
+        # simply dies and the status line self-heal recreates it.
+        try:
+            restart_fn()
+        except Exception:
+            pass
+        return

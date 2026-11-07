@@ -13,8 +13,10 @@ next statusline render recreates it.
 """
 
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 
 import pytest
@@ -930,3 +932,92 @@ def test_animator_focus_dwell_survives_dialog_text_churn(cc_home,
     assert "ASK" in texts_seen[0][0]          # tick 1: still gated
     assert texts_seen[1] == ("", 0.1, None)   # dwell despite typing
     assert texts_seen[2] == ("", 0.2, None)
+
+
+# ---------------- stale-build self-restart (issue #19, 2026-11-07)
+#
+# Live incident: a long-lived pane animator kept running the pre-fix
+# build for hours after ``cc-continuity install`` swapped the app dir;
+# the animator's code is loaded once at spawn, so nothing written to
+# disk ever reached it (blink.log carried zero focus lines while the
+# focus-dwell fix already lived in the app dir). The animator now
+# watches its own source modules: on a change it restores cleanly
+# (shared exit path) and re-execs itself in the same pane.
+
+
+def test_animator_self_restarts_when_build_changes(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    stamps = iter([(1,), (1,), (2,)])   # baseline, frame 1, frame 2
+    restarts = []
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=6, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _build_stamp=lambda: next(stamps), _build_poll=1,
+        _restart=lambda: restarts.append(1))
+    assert restarts == [1]
+    assert fake.made[0].exits == 1      # the shared restore ran once
+    assert len(written) == 2            # no painting after the trigger
+
+
+def test_animator_keeps_running_when_build_unchanged(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+
+    def boom():
+        raise AssertionError("restart requested without a build change")
+
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=3, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _build_stamp=lambda: (7,), _build_poll=1, _restart=boom)
+    assert len(written) == 3
+    assert fake.made[0].exits == 1
+
+
+def test_animator_survives_build_stamp_gap_during_install(cc_home,
+                                                          monkeypatch):
+    # mid-install a stat can transiently fail: skip that round and
+    # re-baseline once the files are readable again; the gap itself
+    # must never be read as a build change
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+
+    def stamp():
+        if stamp.calls < 2:             # baseline + first check: gone
+            stamp.calls += 1
+            raise OSError("swapping")
+        return (5,)
+    stamp.calls = 0
+    restarts = []
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=3, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _build_stamp=stamp, _build_poll=1,
+        _restart=lambda: restarts.append(1))
+    assert restarts == []
+    assert len(written) == 3
+
+
+def test_default_build_stamp_covers_animator_sources():
+    st = progress_pane._default_build_stamp()
+    assert isinstance(st, tuple) and len(st) == 3
+    assert all(isinstance(x, int) for x in st)
+    assert st == progress_pane._default_build_stamp()   # stable read
+
+
+def test_default_restart_reexecs_in_place(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda p, a: calls.append((p, a)))
+    monkeypatch.setattr(sys, "argv",
+                        ["/x/cc-continuity", "progress-pane", "@7"])
+    progress_pane._default_restart()
+    assert calls == [(sys.executable,
+                      [sys.executable, "/x/cc-continuity",
+                       "progress-pane", "@7"])]
