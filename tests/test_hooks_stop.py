@@ -514,3 +514,48 @@ def test_rotation_stop_does_not_spawn_blink_watch(cc_home, capsys, tmp_path,
     out = stdout_json(capsys)
     assert out["decision"] == "block"
     assert calls == []
+
+
+# ---------------- background work suppresses the reply blink (2026-11-07)
+#
+# Live incident: a session ended a turn while its background watch loop
+# was still running ("1 shell still running"). Stop fired anyway, so the
+# tab blinked "waiting for you" while the user watched work continue. The
+# Stop payload carries background_tasks and session_crons precisely to
+# tell "done" from "paused waiting to be woken" (docs, CC >= 2.1.145).
+
+
+def test_plain_stop_background_tasks_no_marker(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload(
+        "Stop", repo,
+        background_tasks=[{"id": "b1", "type": "shell",
+                           "status": "running", "command": "watch -n 5 true"}]))
+    assert "reply_ready" not in _types(paths.session_dir(key, nnn))
+
+
+def test_plain_stop_session_crons_no_marker(cc_home, capsys, tmp_path):
+    # a scheduled wakeup restarts the session on its own too
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload(
+        "Stop", repo,
+        session_crons=[{"id": "c1", "schedule": "*/5 * * * *",
+                        "recurring": True, "prompt": "check the build"}]))
+    assert "reply_ready" not in _types(paths.session_dir(key, nnn))
+
+
+def test_plain_stop_empty_background_arrays_still_marks(cc_home, capsys,
+                                                        tmp_path):
+    # registry reachable and empty: a genuine turn end still blinks
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo,
+                             background_tasks=[], session_crons=[]))
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))
+
+
+def test_plain_stop_missing_background_fields_still_marks(cc_home, capsys,
+                                                          tmp_path):
+    # older CC (or unreachable registry): unknown fails open toward blink
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo))
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))
