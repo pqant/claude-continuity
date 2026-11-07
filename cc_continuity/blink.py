@@ -5,9 +5,15 @@ proven on iTerm2 3.7.6 and Terminal.app), the gate markers the blink
 reacts to, and the tmux/tty helpers the ``Blinker`` state machine uses.
 
 Import direction rule: ``progress_pane`` and ``statusline`` import from
-here; this module imports nothing from them (nor from any other package
-module) so a blink failure can never drag the animator down.
+here; this module only leans on leaf modules (``config``, ``paths``) and
+never on ``progress_pane`` or ``statusline``, so a blink failure can
+never drag the animator down.
 """
+
+import subprocess
+import time
+
+from . import config, paths
 
 OSC6_RESET = b"\x1b]6;1;bg;*;default\x07"
 
@@ -99,4 +105,164 @@ def write_tty(path: str, data: bytes, *, _open=open) -> bool:
         try:
             fh.close()
         except OSError:
+            pass
+
+
+def _debug_line(msg: str) -> None:
+    """Append one diagnostic line to the blink log (never raises).
+
+    The package has no stdlib logging module; the rotator/watchdogd
+    file-line pattern is its convention, and the pane stdout is occupied
+    by animation frames. One file keeps a non-blinking tab diagnosable.
+    """
+    try:
+        log_path = paths.logs_dir() / "blink.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+class Blinker:
+    """Waiting-blink state machine driven by the animator's frame tick.
+
+    ``on_text(text, now)`` arrives every animator frame with the current
+    progress text and clock; ``on_exit()`` runs when the animator
+    returns. The clock rides in on the call so tests fake it per tick.
+    Every tmux/tty path swallows failures: the blink is decoration and
+    must never break the progress animation.
+    """
+
+    def __init__(self, window_id: str, cfg: dict, *, store,
+                 runner=subprocess.run, bin_: str = "tmux", tty_open=open,
+                 log=None):
+        self.window_id = window_id
+        self._store = store
+        self._runner = runner
+        self._bin_ = bin_
+        self._tty_open = tty_open
+        self._log = log if log is not None else _debug_line
+        self.enabled = config.blink_enabled(cfg)
+        self._interval = config.blink_interval(cfg)
+        self._fill = osc6_fill(
+            RED_FILL if config.blink_no_color(cfg) else BLACK_FILL)
+        self._blinking = False
+        self._phase_own = True    # True: own color + original name showing
+        self._last_toggle = 0.0
+        self._original = None
+        self._ttys: list[str] = []
+        self._restored_logged = False
+        if self.enabled:
+            self._startup_sweep()
+
+    # -- internals ------------------------------------------------------
+
+    def _startup_sweep(self) -> None:
+        """Self-heal a blink stranded by a crashed animator (once per start)."""
+        try:
+            stored = self._store("blink_name")
+            if not stored:
+                return
+            current = get_window_name(self._runner, self._bin_, self.window_id)
+            if current and current.startswith("WAIT"):
+                rename_window(self._runner, self._bin_, self.window_id, stored)
+                for tty in list_client_ttys(self._runner, self._bin_,
+                                            self.window_id):
+                    write_tty(tty, OSC6_RESET, _open=self._tty_open)
+                self._store("blink_name", None)
+                self._log(f"blink sweep window={self.window_id} "
+                          f"restored stranded '{current}'")
+        except Exception:
+            pass
+
+    def _start(self, now: float) -> None:
+        name = get_window_name(self._runner, self._bin_, self.window_id)
+        if name is None:
+            self._log(f"blink skip window={self.window_id} "
+                      f"reason=window name unreadable")
+            return
+        self._original = name
+        self._store("blink_name", name)
+        # Resolved per blink START (never cached across blinks): clients
+        # attach and detach between waits.
+        self._ttys = list_client_ttys(self._runner, self._bin_,
+                                      self.window_id)
+        self._blinking = True
+        self._phase_own = True
+        self._last_toggle = now
+        self._restored_logged = False
+        if self._ttys:
+            self._log(f"blink start window={self.window_id} "
+                      f"ttys={len(self._ttys)}")
+        else:
+            self._log(f"blink skip window={self.window_id} "
+                      f"reason=no attached clients")
+
+    def _wait_name(self, text: str | None) -> str:
+        n = sum(text.count(m) for m in GATE_MARKERS) if text else 0
+        return "WAIT" if n <= 1 else f"WAIT[{n}]"
+
+    def _apply(self, text: str | None) -> None:
+        if self._phase_own:
+            rename_window(self._runner, self._bin_, self.window_id,
+                          self._original)
+            for tty in self._ttys:
+                write_tty(tty, OSC6_RESET, _open=self._tty_open)
+        else:
+            rename_window(self._runner, self._bin_, self.window_id,
+                          self._wait_name(text))
+            for tty in self._ttys:
+                write_tty(tty, self._fill, _open=self._tty_open)
+
+    def _restore(self) -> None:
+        if self._original is not None:
+            rename_window(self._runner, self._bin_, self.window_id,
+                          self._original)
+            for tty in self._ttys:
+                write_tty(tty, OSC6_RESET, _open=self._tty_open)
+            self._store("blink_name", None)
+        self._blinking = False
+        if self._original is not None and not self._restored_logged:
+            self._log(f"blink restore window={self.window_id}")
+            self._restored_logged = True
+
+    # -- animator surface -------------------------------------------------
+
+    def on_text(self, text: str | None, now: float) -> None:
+        """One animator tick: gate check, phase flip on the interval."""
+        if not self.enabled:
+            return
+        try:
+            gated = blink_gate(text)
+            if gated and not self._blinking:
+                self._start(now)
+                return
+            if not self._blinking:
+                return
+            if not gated:
+                self._restore()
+                return
+            if now - self._last_toggle >= self._interval:
+                self._last_toggle = now
+                self._phase_own = not self._phase_own
+                self._apply(text)
+        except Exception:
+            pass
+
+    def on_exit(self) -> None:
+        """Animator is leaving: restore name and tab color (idempotent)."""
+        if not self.enabled:
+            return
+        try:
+            if self._blinking:
+                self._restore()
+            elif self._original is not None:
+                # Belt and braces: re-assert the restore; both operations
+                # are idempotent (*;default is accepted repeatedly).
+                rename_window(self._runner, self._bin_, self.window_id,
+                              self._original)
+                for tty in self._ttys:
+                    write_tty(tty, OSC6_RESET, _open=self._tty_open)
+        except Exception:
             pass

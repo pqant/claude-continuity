@@ -97,3 +97,198 @@ def test_write_tty_writes_bytes_and_swallows_oserror():
     def raiser(path, mode="rb", **kw):
         raise OSError("device gone")
     assert blink.write_tty("/dev/ttys099", b"x", _open=raiser) is False
+
+
+# ------------------------------------------------------------------ Blinker
+
+
+class ScriptRunner:
+    """Argv-capturing tmux runner replaying queued stdout lines."""
+
+    def __init__(self, outs):
+        self.outs = list(outs)
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        out = self.outs.pop(0) if self.outs else ""
+        return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
+
+    def renames(self):
+        return [c[4] for c in self.calls if "rename-window" in c]
+
+
+class _Sink:
+    def __init__(self):
+        self.data = b""
+
+    def write(self, chunk):
+        self.data += chunk
+
+    def close(self):
+        pass
+
+
+class FakeTTY:
+    def __init__(self):
+        self.files = {}
+
+    def __call__(self, path, mode="rb", **kw):
+        return self.files.setdefault(path, _Sink())
+
+    def bytes_for(self, path):
+        sink = self.files.get(path)
+        return sink.data if sink else b""
+
+
+def _store_dict():
+    d = {}
+    missing = object()
+
+    def store(key, value=missing):
+        if value is missing:
+            return d.get(key)
+        if value is None:
+            d.pop(key, None)
+        else:
+            d[key] = value
+        return d.get(key)
+    return store
+
+
+GATE = "◆ 61% ok  ⛔ BLOCKED"
+NO_LOG = lambda msg: None  # noqa: E731  (tests never touch the real log)
+
+
+def _blinker(r, tty, store=None, cfg=None):
+    return blink.Blinker("@3", cfg or {}, store=store or _store_dict(),
+                         runner=r, bin_="tmux", tty_open=tty, log=NO_LOG)
+
+
+def test_blinker_disabled_touches_nothing():
+    r, tty = ScriptRunner([]), FakeTTY()
+    b = _blinker(r, tty, cfg={"blink": False})
+    for t in (0.0, 0.5, 1.0):
+        b.on_text(GATE, t)
+    b.on_exit()
+    assert r.calls == []
+    assert tty.files == {}
+
+
+def test_rising_edge_captures_and_stores_name():
+    store, r, tty = _store_dict(), ScriptRunner(["demo-window", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, store=store)
+    b.on_text(GATE, 0.0)
+    assert r.calls[0] == ["tmux", "display-message", "-p", "-t", "@3",
+                          "#{window_name}"]
+    assert r.calls[1] == ["tmux", "list-clients", "-t", "@3",
+                          "-F", "#{client_tty}"]
+    assert store("blink_name") == "demo-window"
+    assert r.renames() == []  # the flip itself waits for the first interval
+
+
+def test_phase_flip_cadence():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, cfg={"blink_interval": 0.5})
+    # k/20.0: 0.05 s ticks whose 0.5 s boundaries land exactly (a 0.05
+    # accumulator drifts below the >= comparison by tick 30).
+    for k in range(31):
+        b.on_text(GATE, k / 20.0)
+    # t=0.5 goes dark (WAIT + black fill), t=1.0 back to own (orig + reset),
+    # t=1.5 dark again: exactly the 0.5 s per-phase cadence.
+    assert r.renames() == ["WAIT", "orig", "WAIT"]
+    fill = blink.osc6_fill(blink.BLACK_FILL)
+    assert tty.bytes_for("/dev/ttys001") == fill + blink.OSC6_RESET + fill
+
+
+def test_no_color_uses_red_fill():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, cfg={"blink_no_color": True})
+    b.on_text(GATE, 0.0)
+    b.on_text(GATE, 0.5)
+    assert tty.bytes_for("/dev/ttys001") == blink.osc6_fill(blink.RED_FILL)
+
+
+def test_multi_waiting_panes_count_in_name():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    text = "line one  ⛔ BLOCKED\nline two  ⛔ BLOCKED"
+    b.on_text(text, 0.0)
+    b.on_text(text, 0.5)
+    assert r.renames() == ["WAIT[2]"]
+
+
+def test_falling_edge_restores_once_to_seen_ttys():
+    store = _store_dict()
+    r, tty = ScriptRunner(["orig", "/dev/ttys001\n/dev/ttys002"]), FakeTTY()
+    b = _blinker(r, tty, store=store)
+    b.on_text(GATE, 0.0)
+    b.on_text(GATE, 0.5)          # dark phase painted on both clients
+    b.on_text("◆ 61% ok", 0.55)   # user answered: gate gone
+    assert r.renames() == ["WAIT", "orig"]
+    for path in ("/dev/ttys001", "/dev/ttys002"):
+        assert tty.bytes_for(path) == (blink.osc6_fill(blink.BLACK_FILL)
+                                       + blink.OSC6_RESET)
+    assert store("blink_name") is None
+
+
+def test_detached_zero_writes_renames_still_issued():
+    r, tty = ScriptRunner(["orig", ""]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0)
+    b.on_text(GATE, 0.5)
+    assert r.renames() == ["WAIT"]   # harmless without a viewer
+    assert tty.files == {}           # but not one byte to any tty
+
+
+def test_startup_sweep_restores_stranded_wait_once():
+    store = _store_dict()
+    store("blink_name", "orig")
+    # one queued stdout per runner call: display-message, rename-window,
+    # list-clients.
+    r, tty = ScriptRunner(["WAIT[2]", "", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, store=store)
+    assert ["tmux", "rename-window", "-t", "@3", "orig"] in r.calls
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC6_RESET  # unconditional
+    assert store("blink_name") is None
+    n = len(r.calls)
+    b.on_text("◆ ok", 1.0)
+    assert len(r.calls) == n  # the sweep fired once, at construction
+
+
+def test_startup_sweep_leaves_a_user_name_alone():
+    store = _store_dict()
+    store("blink_name", "orig")
+    r, tty = ScriptRunner(["user-renamed"]), FakeTTY()
+    _blinker(r, tty, store=store)
+    assert r.renames() == []          # current name is not WAIT: hands off
+    assert store("blink_name") == "orig"
+
+
+def test_on_exit_restores_and_is_idempotent():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0)
+    b.on_text(GATE, 0.5)
+    b.on_exit()
+    assert r.renames() == ["WAIT", "orig"]
+    assert tty.bytes_for("/dev/ttys001").endswith(blink.OSC6_RESET)
+    b.on_exit()  # idempotent second call must not raise or go wild
+
+
+def test_on_exit_never_blinked_is_a_noop():
+    r, tty = ScriptRunner([]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_exit()
+    assert r.calls == []
+    assert tty.files == {}
+
+
+def test_blinker_never_raises_on_broken_plumbing():
+    def raising(argv, **kw):
+        raise OSError("tmux gone")
+    b = blink.Blinker("@3", {}, store=_store_dict(), runner=raising,
+                      bin_="tmux", tty_open=FakeTTY(), log=NO_LOG)
+    b.on_text(GATE, 0.0)   # name unreadable: skip, no raise
+    b.on_text(GATE, 0.5)
+    b.on_exit()

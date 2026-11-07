@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import time
 
-from . import atomic, paths
+from . import atomic, blink, config, paths
 from .statusline import _RAINBOW, _SHIMMER
 
 #: Window ids are tmux-generated (``@12``); restrict what we splice into
@@ -430,10 +430,14 @@ def _window_pane_count(window_id: str | None) -> int | None:
 # --------------------------------------------------------------- run_animator
 
 
+_BLINK_MISSING = object()
+
+
 def run_animator(window_id: str | None = None, *, _frames=None,
                  _write=None, _now=None, _size=None, _text=None,
                  _mtime=None, _sleep=None, _live_check=None,
-                 _check_every=40) -> None:
+                 _check_every=40, _blink=None, _tty_open=None,
+                 _runner=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -472,6 +476,34 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 else (lambda: _progress_data_mtime(window_id)))
     live_check = (_live_check if _live_check is not None
                   else (lambda: _window_pane_count(window_id)))
+    # Waiting blink (issue #11): one tick-driven state machine beside the
+    # shimmer. It swallows every failure internally; a broken tmux/tty
+    # path must never take the progress animation down with it.
+    blink_mod = _blink if _blink is not None else blink
+    try:
+        cfg = config.load_config()
+    except Exception:
+        cfg = {"blink": False}
+
+    def blink_store(key, value=_BLINK_MISSING):
+        try:
+            rec = _read_pane_record()
+            full = f"blink-{window_id}-{key}"
+            if value is _BLINK_MISSING:
+                return rec.get(full)
+            if value is None:
+                rec.pop(full, None)
+            else:
+                rec[full] = value
+            _write_pane_record(rec)
+        except Exception:
+            return None
+        return None
+
+    blinker = blink_mod.Blinker(
+        window_id or "", cfg, store=blink_store,
+        runner=(_runner if _runner is not None else subprocess.run),
+        tty_open=(_tty_open if _tty_open is not None else open))
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -504,6 +536,9 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cur_text = text_fn()
                 cur_mtime = mt
             t = now()
+            # outside the skipped guard: a skipped paint must not stall
+            # the blink phase clock.
+            blinker.on_text(cur_text, t)
             if not skipped:
                 # \x1b[H homes to row 1 col 1 every frame: \r alone can't
                 # recover a pty cursor that a resize-race wrap dropped to
@@ -532,3 +567,7 @@ def run_animator(window_id: str | None = None, *, _frames=None,
             sleep(max(0.0, 0.05 - (t2 - t)))
     except Exception:
         return
+    finally:
+        # every exit path (frame bound, orphan guard, any I/O failure)
+        # restores the window name and tab color.
+        blinker.on_exit()

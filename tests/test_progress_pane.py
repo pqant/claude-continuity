@@ -684,3 +684,100 @@ def test_progress_data_isolated_per_server(cc_home, monkeypatch):
     # file, not server 1111's data
     monkeypatch.setenv("TMUX", "/tmp/srv,2222,0")
     assert progress_pane._read_progress_text("12") == "◆ …"
+
+
+# ------------------------------------------------------- blinker wiring
+
+class _BlinkProbe:
+    """Fake Blinker recording every animator interaction."""
+
+    def __init__(self, window_id, cfg, *, store, runner, bin_="tmux",
+                 tty_open=open, log=None):
+        self.window_id = window_id
+        self.cfg = cfg
+        self.store = store
+        self.texts = []
+        self.exits = 0
+
+    def on_text(self, text, now):
+        self.texts.append((text, now))
+
+    def on_exit(self):
+        self.exits += 1
+
+
+class _FakeBlinkMod:
+    def __init__(self):
+        self.made = []
+
+    def Blinker(self, *args, **kw):
+        b = _BlinkProbe(*args, **kw)
+        self.made.append(b)
+        return b
+
+
+def test_animator_feeds_blinker_every_tick(cc_home):
+    fake = _FakeBlinkMod()
+    clock = iter([0.0, 0.05, 0.1, 0.15, 0.2, 0.25])
+    progress_pane.run_animator(
+        "12", _frames=3, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok  ⛔ BLOCKED",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake)
+    b = fake.made[0]
+    assert b.window_id == "12"
+    assert b.texts == [("◆ 61% ok  ⛔ BLOCKED", 0.0),
+                       ("◆ 61% ok  ⛔ BLOCKED", 0.1),
+                       ("◆ 61% ok  ⛔ BLOCKED", 0.2)]
+    assert b.exits == 1
+
+
+def test_animator_evaluates_gate_even_on_skipped_frames(cc_home):
+    # the width-jump guard skips PAINTING, never the blink gate: a resize
+    # must not stall the phase clock.
+    fake = _FakeBlinkMod()
+    cols = iter([80, 80, 1])
+    clock = iter([0.0, 0.05, 0.1, 0.15, 0.2, 0.25])
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=3, _write=written.append, _now=lambda: next(clock),
+        _size=lambda: _size_obj(next(cols)), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake)
+    assert len(written) == 2          # the degenerate frame was skipped
+    assert len(fake.made[0].texts) == 3  # but it still ticked the blinker
+
+
+def test_animator_closes_blinker_when_pane_gone(cc_home):
+    fake = _FakeBlinkMod()
+    progress_pane.run_animator(
+        "12", _write=lambda b: None, _now=lambda: 0.0,
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _live_check=lambda: 1,
+        _check_every=1, _blink=fake)
+    assert fake.made[0].exits == 1    # the orphan-guard return is covered
+
+
+def test_animator_closes_blinker_on_write_failure(cc_home):
+    fake = _FakeBlinkMod()
+    written = []
+    def w(frame):
+        written.append(frame)
+        if len(written) == 2:
+            raise OSError("pane gone")
+    progress_pane.run_animator(
+        "12", _write=w, _now=lambda: 0.0, _size=lambda: _size_obj(80),
+        _text=lambda: "◆ 61% ok", _mtime=lambda: 1, _sleep=lambda s: None,
+        _blink=fake)
+    assert fake.made[0].exits == 1    # the I/O-failure exit is covered
+
+
+def test_animator_blink_store_is_window_namespaced(cc_home):
+    fake = _FakeBlinkMod()
+    progress_pane.run_animator(
+        "12", _frames=1, _write=lambda b: None, _now=lambda: 0.0,
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake)
+    b = fake.made[0]
+    b.store("blink_name", "orig")
+    assert b.store("blink_name") == "orig"
+    rec = progress_pane._read_pane_record()
+    assert rec.get("blink-12-blink_name") == "orig"
