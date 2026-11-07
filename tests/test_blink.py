@@ -489,20 +489,22 @@ def test_blinker_pane_ask_adds_to_wait_count():
 def test_focus_watcher_dwell_suppresses_and_persists():
     store = _store_dict()
     w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
-                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2)
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2,
+                           log=None)
     assert w.tick(0.0, "K") is False          # first focused tick
     assert w.tick(1.0, "K") is True           # dwell reached
     assert store("read") == "K"
     assert w.tick(2.0, "K") is True           # read state holds
     # a fresh instance (runner restart) still sees the stored key
-    w2 = blink.FocusWatcher(store)
+    w2 = blink.FocusWatcher(store, log=None)
     assert w2.tick(3.0, "K") is True
 
 
 def test_focus_watcher_new_key_is_unread_again():
     store = _store_dict()
     w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
-                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2)
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2,
+                           log=None)
     assert w.tick(0.0, "K1") is False         # focused 1
     assert w.tick(1.0, "K1") is True          # read K1
     assert w.tick(2.0, "K2") is False         # new question: re-blink
@@ -514,7 +516,8 @@ def test_focus_watcher_short_glance_never_suppresses():
     store = _store_dict()
     fronts = iter(["/dev/ttys001", "/dev/ttys001", None])
     w = blink.FocusWatcher(store, frontmost=lambda: next(fronts),
-                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=3)
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=3,
+                           log=None)
     assert w.tick(0.0, "K") is False          # focused 1
     assert w.tick(1.0, "K") is False          # focused 2
     assert w.tick(2.0, "K") is False          # focus broke: dwell reset
@@ -524,7 +527,8 @@ def test_focus_watcher_short_glance_never_suppresses():
 def test_focus_watcher_empty_key_is_not_gated():
     store = _store_dict()
     w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
-                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1)
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1,
+                           log=None)
     assert w.tick(0.0, "") is False           # nothing being waited on
     assert w.tick(1.0, "") is False
     assert store("read") is None
@@ -532,7 +536,7 @@ def test_focus_watcher_empty_key_is_not_gated():
 
 def test_focus_watcher_dwell_disabled_without_seams():
     store = _store_dict()
-    w = blink.FocusWatcher(store)             # no focus source at all
+    w = blink.FocusWatcher(store, log=None)   # no focus source at all
     for k in range(5):
         assert w.tick(float(k), "K") is False
     assert store("read") is None
@@ -542,7 +546,8 @@ def test_focus_watcher_on_read_fires_once_per_key():
     store = _store_dict()
     seen = []
     w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
-                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1)
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=1,
+                           log=None)
     assert w.tick(0.0, "K", on_read=seen.append) is True
     assert seen == ["K"]
     assert w.tick(1.0, "K", on_read=seen.append) is True   # store hit
@@ -554,6 +559,72 @@ def test_focus_watcher_swallows_broken_seams():
         raise RuntimeError("osascript denied")
     store = _store_dict()
     w = blink.FocusWatcher(store, frontmost=boom, clients=boom,
-                           dwell_ticks=1)
+                           dwell_ticks=1, log=None)
     assert w.tick(0.0, "K") is False          # fail toward blinking
     assert store("read") is None
+
+
+# ---------------- FocusWatcher decision logging (dwell debug, 2026-11-07)
+#
+# The live "blink never fell silent while the user watched" incident was
+# blind: the dwell decision path logged nothing. Edge-triggered lines in
+# blink.log must show WHERE the decision dies (probe, focus, rearm,
+# suppress) without spamming one line per poll.
+
+
+class _DictStore:
+    _MISS = object()
+
+    def __init__(self):
+        self.d = {}
+
+    def __call__(self, key, value=_MISS):
+        if value is self._MISS:
+            return self.d.get(key)
+        self.d[key] = value
+
+
+def test_focus_watcher_logs_probe_and_suppress_edges():
+    lines = []
+    st = _DictStore()
+    w = blink.FocusWatcher(st, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"},
+                           dwell_ticks=2, label="@5", log=lines.append)
+    assert w.tick(1.0, "KEY") is False        # dwell 1
+    assert w.tick(2.0, "KEY") is True         # dwell 2: suppress
+    assert w.tick(3.0, "KEY") is True         # stored read hit
+    assert sum(1 for l in lines if "probe-focus" in l) == 1
+    assert sum(1 for l in lines if "suppress " in l and "'KEY'" in l) == 1
+    assert sum(1 for l in lines if "suppress-stored" in l) == 1
+    assert all("@5" in l for l in lines)
+
+
+def test_focus_watcher_logs_probe_none_once_and_refocus():
+    lines = []
+    st = _DictStore()
+    front = iter([None, None, None, "/dev/ttys001"])
+    w = blink.FocusWatcher(st, frontmost=lambda: next(front),
+                           clients=lambda: {"/dev/ttys001"},
+                           dwell_ticks=1, label="@9", log=lines.append)
+    assert w.tick(1.0, "K") is False          # probe none
+    assert w.tick(2.0, "K") is False          # still none: no new line
+    assert w.tick(3.0, "K") is False          # still none
+    assert sum(1 for l in lines if "probe-none" in l) == 1
+    assert w.tick(4.0, "K") is True           # focused: dwell 1 -> suppress
+    assert any("probe-focus" in l for l in lines)
+
+
+def test_focus_watcher_logs_rearm_on_key_change():
+    lines = []
+    st = _DictStore()
+    w = blink.FocusWatcher(st, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"},
+                           dwell_ticks=5, label="@1", log=lines.append)
+    assert w.tick(1.0, "K1") is False
+    assert w.tick(2.0, "K2") is False         # key change while focused
+    assert any("rearm" in l and "'K2'" in l for l in lines)
+    # dwell restarted on K2: suppress at tick 6 (2..6)
+    assert w.tick(3.0, "K2") is False
+    assert w.tick(4.0, "K2") is False
+    assert w.tick(5.0, "K2") is False
+    assert w.tick(6.0, "K2") is True

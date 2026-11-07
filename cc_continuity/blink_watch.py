@@ -109,7 +109,8 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
           _now=time.time, _sleep=time.sleep, _ticks=None, _blink=None,
           _state=None, _consec_fails: int = 6,
           _frontmost_tty=None, _client_ttys=None,
-          _dwell_ticks: int = 3, _reply_fade: float = 600.0) -> None:
+          _dwell_ticks: int = 3, _reply_fade: float = 600.0,
+          _focus_log=blink._debug_line) -> None:
     """Poll one session's pane until a quit condition; never raises.
 
     One capture per tick (~1 s): the region rule keeps scrollback out,
@@ -151,7 +152,9 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
         # None (the default) disables dwell entirely.
         watcher = blink.FocusWatcher(store, frontmost=_frontmost_tty,
                                      clients=clients_fn,
-                                     dwell_ticks=_dwell_ticks)
+                                     dwell_ticks=_dwell_ticks,
+                                     label=window_id or "",
+                                     log=_focus_log)
     except Exception:
         return
     start = _now()

@@ -370,13 +370,28 @@ class FocusWatcher:
     """
 
     def __init__(self, store, *, frontmost=None, clients=None,
-                 dwell_ticks: int = 3):
+                 dwell_ticks: int = 3, label: str | None = None,
+                 log=_debug_line):
         self._store = store
         self._frontmost = frontmost
         self._clients = clients
         self._dwell_ticks = dwell_ticks
         self._dwell = 0
         self._last_key = None
+        # Decision diagnostics (2026-11-07 live incident: a blink stayed
+        # lit while the user watched and nothing in blink.log said why).
+        # Edge-triggered only: one line per STATE change, never per poll.
+        self._label = f" {label}" if label else ""
+        self._log = log
+        self._outcome = None
+
+    def _note(self, event: str, key: str, extra: str = "") -> None:
+        if self._log is None:
+            return
+        try:
+            self._log(f"focus {event}{self._label} key={key[:60]!r}{extra}")
+        except Exception:
+            pass
 
     def tick(self, t: float, key: str, on_read=None) -> bool:
         """One poll tick; True means the blink must be suppressed now.
@@ -391,19 +406,34 @@ class FocusWatcher:
             self._last_key = None
             return False
         try:
-            if self._store("read") == key:
-                self._dwell = 0
-                return True
+            stored = self._store("read")
         except Exception:
-            pass
+            stored = None
+        if stored == key:
+            if self._outcome != "read":
+                self._note("suppress-stored", key)
+                self._outcome = "read"
+            self._dwell = 0
+            return True
         if self._frontmost is None or self._clients is None:
             self._dwell = 0
             return False
+        front = None
+        focused = False
+        outcome = "error"
         try:
             front = self._frontmost()
-            focused = front is not None and front in self._clients()
+            if front is None:
+                outcome = "none"
+            else:
+                focused = front in self._clients()
+                outcome = "focus" if focused else "idle"
         except Exception:
-            focused = False
+            outcome = "error"
+        if outcome != self._outcome:
+            self._note(f"probe-{outcome}", key,
+                       f" front={front!r}" if front is not None else "")
+            self._outcome = outcome
         if not focused:
             self._dwell = 0
             self._last_key = key
@@ -413,11 +443,13 @@ class FocusWatcher:
             # dwell measures continuous focus ON THE SAME key, otherwise
             # a focused idler would never see a new reply or question
             self._dwell = 0
+            self._note("rearm", key)
             self._last_key = key
         self._dwell += 1
         if self._dwell < self._dwell_ticks:
             return False
         self._dwell = 0
+        self._note("suppress", key, f" front={front!r}")
         try:
             self._store("read", key)
         except Exception:

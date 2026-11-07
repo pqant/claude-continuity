@@ -439,7 +439,7 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _check_every=40, _blink=None, _tty_open=None,
                  _runner=None, _pane_capture=None,
                  _blink_poll=20, _frontmost_tty=None,
-                 _dwell_ticks=3) -> None:
+                 _dwell_ticks=3, _focus_log=blink._debug_line) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -548,7 +548,9 @@ def run_animator(window_id: str | None = None, *, _frames=None,
         return set(blink.list_client_ttys(runner_fn, bin_, window_id or ""))
     watcher = blink.FocusWatcher(blink_store, frontmost=_frontmost_tty,
                                  clients=_focus_clients,
-                                 dwell_ticks=_dwell_ticks)
+                                 dwell_ticks=_dwell_ticks,
+                                 label=window_id or "",
+                                 log=_focus_log)
     suppressed = False
     try:
         cur_text = text_fn()

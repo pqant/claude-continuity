@@ -866,7 +866,8 @@ def test_animator_focus_dwell_silences_blinker_ticks(cc_home, monkeypatch):
         _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok  ⛔ BLOCKED",
         _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
         _blink_poll=1, _runner=runner, _pane_capture=lambda: None,
-        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2,
+        _focus_log=None)
     texts = fake.made[0].texts
     # the clock rides twice per frame (frame stamp + drift re-read)
     assert texts[0][0] == "◆ 61% ok  ⛔ BLOCKED"   # tick 1: still gated
@@ -901,7 +902,8 @@ def test_animator_focus_dwell_survives_segment_text_churn(cc_home,
         _size=lambda: _size_obj(80), _text=lambda: next(texts),
         _mtime=lambda: next(mtimes), _sleep=lambda s: None, _blink=fake,
         _blink_poll=1, _runner=_churn_runner, _pane_capture=lambda: None,
-        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2,
+        _focus_log=None)
     texts_seen = fake.made[0].texts
     assert "REPLY" in texts_seen[0][0]        # tick 1: still gated
     assert texts_seen[1] == ("", 0.1, None)   # dwell despite churn
@@ -922,7 +924,8 @@ def test_animator_focus_dwell_survives_dialog_text_churn(cc_home,
         _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
         _blink_poll=1, _runner=_churn_runner,
         _pane_capture=lambda: next(regions),
-        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2,
+        _focus_log=None)
     texts_seen = fake.made[0].texts
     assert "ASK" in texts_seen[0][0]          # tick 1: still gated
     assert texts_seen[1] == ("", 0.1, None)   # dwell despite typing

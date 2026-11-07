@@ -366,7 +366,7 @@ def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
         _sleep=_sleep_noop, _ticks=ticks, _state=lambda d: "ACTIVE",
         _frontmost_tty=(frontmost if frontmost is not None else (lambda: None)),
         _client_ttys=clients if callable(clients) else (lambda: set(clients)),
-        _dwell_ticks=dwell, _reply_fade=fade)
+        _dwell_ticks=dwell, _reply_fade=fade, _focus_log=None)
 
 
 def test_watch_reply_ready_blinks_without_block(cc_home, monkeypatch):
