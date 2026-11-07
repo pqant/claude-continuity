@@ -65,3 +65,30 @@ def blocked_reason(session_dir: str | Path) -> str | None:
         elif t == "user_prompt" and not entry.get("agent_id"):
             blocked = None
     return blocked
+
+
+def reply_pending(session_dir: str | Path) -> float | None:
+    """Ts of the latest UNCONSUMED ``reply_ready`` entry, or None.
+
+    Written by the Stop hook when a turn ends waiting for the user;
+    the tab blinks until read. A later main-session ``user_prompt``
+    (no ``agent_id``) or a ``reply_read`` entry (the poller's focus
+    dwell) consumes it; subagent prompts do not. Never raises.
+    """
+    try:
+        entries = read(session_dir)
+    except (OSError, ValueError):
+        return None
+    pending = None
+    for entry in entries:
+        t = entry.get("type")
+        if t == "reply_ready":
+            pending = entry.get("ts")
+        elif (t == "user_prompt" and not entry.get("agent_id")) or t == "reply_read":
+            pending = None
+    return pending
+
+
+def mark_reply_read(session_dir: str | Path) -> None:
+    """Append the focus-dwell consumption event for ``reply_ready``."""
+    append(session_dir, {"type": "reply_read"})

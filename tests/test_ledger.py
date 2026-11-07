@@ -81,3 +81,46 @@ def test_blocked_reason_survives_corrupt_ledger(tmp_path):
     sdir.mkdir()
     (sdir / "ledger.jsonl").write_text("{not json\n", encoding="utf-8")
     assert ledger.blocked_reason(sdir) is None
+
+
+# ---------------------------------------------------------------- reply_ready
+
+
+def _rdir(tmp_path):
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    return sdir
+
+
+def test_reply_pending_none_when_empty(tmp_path):
+    assert ledger.reply_pending(_rdir(tmp_path)) is None
+
+
+def test_reply_pending_reports_ts_after_reply_ready(tmp_path):
+    sdir = _rdir(tmp_path)
+    ent = ledger.append(sdir, {"type": "reply_ready", "ts": 55.0})
+    assert ledger.reply_pending(sdir) == ent["ts"] == 55.0
+
+
+def test_reply_consumed_by_reply_read(tmp_path):
+    sdir = _rdir(tmp_path)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 55.0})
+    ledger.mark_reply_read(sdir)
+    assert ledger.reply_pending(sdir) is None
+
+
+def test_reply_consumed_by_main_user_prompt_not_subagent(tmp_path):
+    sdir = _rdir(tmp_path)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 55.0})
+    ledger.append(sdir, {"type": "user_prompt", "agent_id": "a1"})
+    assert ledger.reply_pending(sdir) == 55.0   # subagent prompt does not consume
+    ledger.append(sdir, {"type": "user_prompt", "text": "hi"})
+    assert ledger.reply_pending(sdir) is None
+
+
+def test_reply_latest_turn_wins(tmp_path):
+    sdir = _rdir(tmp_path)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 1.0})
+    ledger.mark_reply_read(sdir)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 2.0})
+    assert ledger.reply_pending(sdir) == 2.0

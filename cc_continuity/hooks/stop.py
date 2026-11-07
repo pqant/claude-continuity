@@ -23,8 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .. import (checkpoint, ledger, notify, paths, rotator, state, statusline,
-                thresholds)
+from .. import (checkpoint, config, ledger, notify, paths, rotator, state,
+                statusline, thresholds)
 from .common import HookContext, log_error
 
 AMCL_MESSAGE = "Checkpoint ready. Type /clear to continue automatically."
@@ -203,4 +203,12 @@ def handle(ctx: HookContext) -> dict | None:
         # Orphan recovery (PRD §18 "retry on next Stop"): spawn again — the
         # rotation lock guarantees at most one live rotator.
         return _rotate_or_amcl(ctx, key, nnn, "ROTATING")
+    # Normal turn end: this session now waits for the user's eyes. The
+    # poller/animator blink the tab until the pane is focused (focus
+    # dwell consumes the entry); unattended dev loops never blink.
+    if config.blink_reply(cfg) and not cfg.get("unattended"):
+        try:
+            ledger.append(sdir, {"type": "reply_ready"})
+        except OSError:
+            pass
     return None

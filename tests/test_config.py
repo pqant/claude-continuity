@@ -281,3 +281,9 @@ def test_blink_accessors_validation():
     assert config.blink_interval({"blink_interval": 99}) == 5.0     # clamp high
     assert config.blink_interval({"blink_interval": "x"}) == 0.5    # invalid
     assert config.blink_no_color({"blink_no_color": True}) is True
+
+
+def test_blink_reply_default_and_off():
+    assert config.blink_reply({}) is True
+    assert config.blink_reply({"blink_reply": False}) is False
+    assert config.blink_reply({"blink_reply": "nonsense"}) is True

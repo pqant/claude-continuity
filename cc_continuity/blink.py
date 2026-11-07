@@ -26,7 +26,8 @@ BLACK_FILL = (0, 0, 0)
 # writer and the gate can never drift apart silently.
 MARKER_BLOCKED = "⛔ BLOCKED"
 MARKER_ASK = "⚠ ASK"
-GATE_MARKERS = (MARKER_BLOCKED, MARKER_ASK)
+MARKER_REPLY = "🕐 REPLY"
+GATE_MARKERS = (MARKER_BLOCKED, MARKER_ASK, MARKER_REPLY)
 
 # "User input needed" detection from raw pane text (live bug 2026-11-07:
 # AskUserQuestion sat unanswered for 46 min without a blink). Permission

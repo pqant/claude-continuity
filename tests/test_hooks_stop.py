@@ -60,9 +60,12 @@ def test_active_stop_only_updates_fields(cc_home, capsys, tmp_path):
     rec = state.load_state(key, nnn)
     assert rec["turn_active"] is False
     assert rec["last_stop_ts"] > 0
-    entry = ledger.read(paths.session_dir(key, nnn))[-1]
+    entries = ledger.read(paths.session_dir(key, nnn))
+    entry = [e for e in entries if e["type"] == "stop"][-1]
     assert entry["type"] == "stop"
     assert entry["stop_hook_active"] is True  # recorded, but NOT used (D6)
+    # feature 2026-11-07: plain turn end queues the reply blink
+    assert entries[-1]["type"] == "reply_ready"
 
 
 def test_pending_stop_walks_to_handoff_and_blocks_c2(cc_home, capsys, tmp_path):
@@ -447,3 +450,35 @@ def test_stop_spawn_failure_pushes_row8(cc_home, tmp_path, monkeypatch):
     # spawn failure still falls back to assisted AMCL (P9-D7: push never
     # breaks the loop)
     assert state.load_state(key, nnn)["state"] == "AWAITING_MANUAL_CLEAR"
+
+
+# ---------------- reply-ready blink marker (feature 2026-11-07)
+
+
+def _types(sdir):
+    return [e["type"] for e in ledger.read(sdir)]
+
+
+def test_plain_stop_blink_reply_disabled_no_marker(cc_home, capsys, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"blink_reply": False}),
+                                         encoding="utf-8")
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo, stop_hook_active=True))
+    assert "reply_ready" not in _types(paths.session_dir(key, nnn))
+
+
+def test_plain_stop_unattended_no_marker(cc_home, capsys, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"unattended": True}),
+                                         encoding="utf-8")
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo, stop_hook_active=True))
+    assert "reply_ready" not in _types(paths.session_dir(key, nnn))
+
+
+def test_rotation_states_do_not_queue_reply(cc_home, capsys, tmp_path):
+    # the session continues on its own there; no user is being waited on
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    assert "reply_ready" not in _types(paths.session_dir(key, nnn))

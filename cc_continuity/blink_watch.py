@@ -6,9 +6,11 @@ animator, and CC does not invoke the status line while it waits on a
 question, so the per-window data file stayed marker-free. This poller
 runs beside the session (spawned from SessionStart, independent of
 Notification/Stop hooks: a blocking question never lets those fire in
-time) and drives one Blinker from two sources: the pane's input-box
-region (selection prompts) and the ledger's unconsumed ``needs_human``
-reason (so ``signal needs-human`` blinks without a status line call).
+time) and drives one Blinker from three sources: the pane's input-box
+region (selection prompts), the ledger's unconsumed ``needs_human``
+reason (so ``signal needs-human`` blinks without a status line call),
+and the Stop hook's ``reply_ready`` entry (turn ended waiting for the
+user; cleared by focus dwell or the reply fade).
 
 Exit conditions (all silent): the session state leaves the live set
 (rotation takes over), the capture fails ``_consec_fails`` times in a
@@ -76,10 +78,38 @@ def _default_state(session_dir) -> str | None:
     return rec.get("state") if isinstance(rec, dict) else None
 
 
+def _default_client_ttys(window_id: str, _runner, bin_) -> set:
+    """Client ttys attached to this window (focus-comparison set)."""
+    return set(blink.list_client_ttys(_runner, bin_, window_id))
+
+
+def _default_frontmost_tty():
+    """iTerm2's frontmost session tty (AppleScript); None off-iTerm2.
+
+    tmux never sees an iTerm2 tab click; the frontmost session's tty is
+    the only reliable "the user is looking at this tab" signal. A
+    non-iTerm2 context yields None, so the reply blink self-fades after
+    ``_reply_fade`` seconds instead of hanging on never-arriving focus.
+    """
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "iTerm2" to get tty of current session '
+             'of current window'],
+            capture_output=True, text=True, timeout=2.0)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
           _runner=subprocess.run, _bin_=None, _tty_open=open,
           _now=time.time, _sleep=time.sleep, _ticks=None, _blink=None,
-          _state=None, _consec_fails: int = 6) -> None:
+          _state=None, _consec_fails: int = 6,
+          _frontmost_tty=None, _client_ttys=None,
+          _dwell_ticks: int = 3, _reply_fade: float = 600.0) -> None:
     """Poll one session's pane until a quit condition; never raises.
 
     One capture per tick (~1 s): the region rule keeps scrollback out,
@@ -87,11 +117,24 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
     A failed capture keeps the last region cache (tmux stalls happen
     mid-wait); ``_consec_fails`` consecutive failures mean the pane is
     gone and the poller quits.
+
+    Reply-ready blink (feature 2026-11-07): an unconsumed
+    ``reply_ready`` ledger entry (Stop hook: turn ended waiting for the
+    user) blinks the tab WITHOUT needing status line renders. It clears
+    when the user focuses this window's tab for ``_dwell_ticks``
+    consecutive ticks (2-3 s "I've seen it"), or self-fades after
+    ``_reply_fade`` s in non-focusable contexts. Replying is not
+    required; a later main-session user prompt also consumes the entry.
     """
     blink_mod = _blink if _blink is not None else blink
     bin_ = (_bin_ if _bin_ is not None
             else os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux")
     state_fn = _state if _state is not None else _default_state
+    reply_on = config.blink_reply(cfg)
+    frontmost_fn = (_frontmost_tty if _frontmost_tty is not None
+                    else _default_frontmost_tty)
+    clients_fn = (_client_ttys if _client_ttys is not None
+                  else (lambda: _default_client_ttys(window_id, _runner, bin_)))
     try:
         blinker = blink_mod.Blinker(window_id, cfg,
                                     store=_make_store(window_id),
@@ -102,6 +145,7 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
     start = _now()
     fails = 0
     pane_text: str | None = None
+    dwell = 0
     i = 0
     try:
         while True:
@@ -127,7 +171,39 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                 blocked = ledger.blocked_reason(session_dir)
             except Exception:
                 blocked = None
-            text = blink_mod.MARKER_BLOCKED if blocked else ""
+            reply = None
+            if reply_on:
+                try:
+                    reply = ledger.reply_pending(session_dir)
+                except Exception:
+                    reply = None
+            if reply is not None and t - reply > _reply_fade:
+                reply = None  # unfocusable context: fade, never strand
+            if reply is not None:
+                try:
+                    front = frontmost_fn()
+                    clients = clients_fn()
+                except Exception:
+                    front, clients = None, set()
+                if front and front in clients:
+                    dwell += 1
+                    if dwell >= _dwell_ticks:
+                        try:
+                            ledger.mark_reply_read(session_dir)
+                        except Exception:
+                            pass
+                        dwell = 0
+                        reply = None
+                else:
+                    dwell = 0
+            else:
+                dwell = 0
+            parts = []
+            if blocked:
+                parts.append(blink_mod.MARKER_BLOCKED)
+            if reply is not None:
+                parts.append(blink_mod.MARKER_REPLY)
+            text = " ".join(parts)
             blinker.on_text(text, t, pane_text=pane_text)
             i += 1
             if _ticks is not None and i >= _ticks:

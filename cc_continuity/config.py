@@ -235,6 +235,19 @@ def blink_enabled(cfg: dict) -> bool:
     return v if isinstance(v, bool) else True
 
 
+def blink_reply(cfg: dict) -> bool:
+    """Whether a finished turn blinks the tab until the user focuses it
+    (reply-ready blink, feature request 2026-11-07).
+
+    ``blink_reply``: explicit false disables the turn-end blink only
+    (needs-human and selection prompts keep blinking). A missing key or
+    any non-bool value degrades to True. Unattended runs
+    (``unattended: true``) never write the reply marker regardless.
+    """
+    v = cfg.get("blink_reply", True)
+    return v if isinstance(v, bool) else True
+
+
 def blink_interval(cfg: dict) -> float:
     """Seconds per blink phase (issue #11).
 

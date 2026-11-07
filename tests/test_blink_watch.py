@@ -93,6 +93,7 @@ class _FakeBlinkMod:
     """blink-shaped module: recording Blinker, scripted captures."""
 
     MARKER_BLOCKED = blink.MARKER_BLOCKED
+    MARKER_REPLY = blink.MARKER_REPLY
 
     def __init__(self, captures=()):
         self._captures = list(captures)
@@ -347,3 +348,98 @@ def test_spawn_never_raises_on_runner_failure(cc_home, monkeypatch):
     assert blink_watch.spawn("/sess", _runner=boom, _popen=Popen,
                              _kill=lambda p, s: None,
                              _alive=lambda p: False) is None
+
+
+# ---------------------------------------------------------------- reply blink
+#
+# Feature 2026-11-07: turn end (Stop hook writes reply_ready) blinks the
+# tab until the user focuses it; the poller needs no status line render.
+
+
+def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
+               clients=frozenset(), dwell=3, fade=600.0):
+    blink_watch.watch(
+        "/sess", pane_id="%7", window_id="@7", cfg=cfg or {}, _blink=fake,
+        _runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0,
+                                                               b"", b""),
+        _bin_="tmux", _tty_open=_tty_open, _now=lambda: now,
+        _sleep=_sleep_noop, _ticks=ticks, _state=lambda d: "ACTIVE",
+        _frontmost_tty=(frontmost if frontmost is not None else (lambda: None)),
+        _client_ttys=clients if callable(clients) else (lambda: set(clients)),
+        _dwell_ticks=dwell, _reply_fade=fade)
+
+
+def test_watch_reply_ready_blinks_without_block(cc_home, monkeypatch):
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake)
+    text, _ = fake.made[0].ticks[0]
+    assert blink.MARKER_REPLY in text
+    assert blink.MARKER_BLOCKED not in text
+
+
+def test_watch_reply_blocked_and_reply_both_gates(cc_home, monkeypatch):
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
+                        lambda d: "deploy approval")
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake)
+    text, _ = fake.made[0].ticks[0]
+    assert blink.MARKER_BLOCKED in text and blink.MARKER_REPLY in text
+
+
+def test_watch_reply_disabled_by_config(cc_home, monkeypatch):
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, cfg={"blink_reply": False})
+    text, _ = fake.made[0].ticks[0]
+    assert text == ""
+
+
+def test_watch_focus_dwell_consumes_reply(cc_home, monkeypatch):
+    pending = [100.0]
+    consumed = []
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending",
+                        lambda d: pending[0])
+    monkeypatch.setattr(blink_watch.ledger, "mark_reply_read",
+                        lambda d: (consumed.append(1), pending.__setitem__(0, None)))
+    fake = _FakeBlinkMod(captures=[None, None, None])
+    _run_watch(fake, ticks=3, dwell=2,
+               frontmost=lambda: "/dev/ttys001",
+               clients=lambda: {"/dev/ttys001"})
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]
+    assert texts[1] == ""          # dwell reached: consumed, restore same tick
+    assert texts[2] == ""          # no re-blink, no reply needed
+    assert consumed == [1]
+
+
+def test_watch_short_focus_continues_blink(cc_home, monkeypatch):
+    pending = [100.0]
+    consumed = []
+    fronts = iter(["/dev/ttys001", None, "/dev/ttys001"])
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending",
+                        lambda d: pending[0])
+    monkeypatch.setattr(blink_watch.ledger, "mark_reply_read",
+                        lambda d: consumed.append(1))
+    fake = _FakeBlinkMod(captures=[None, None, None])
+    _run_watch(fake, ticks=3, dwell=3,
+               frontmost=lambda: next(fronts),
+               clients=lambda: {"/dev/ttys001"})
+    assert all(blink.MARKER_REPLY in t for t, _ in fake.made[0].ticks)
+    assert consumed == []         # 1s glance: dwell reset, still waiting
+
+
+def test_watch_reply_self_fades_without_focus_capability(cc_home, monkeypatch):
+    # ts 0.0 vs clock 700.0 with a 600 s fade: never focusable (no
+    # iTerm2), so the blink must not strand on an absent user.
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 0.0)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, now=700.0, fade=600.0)
+    text, _ = fake.made[0].ticks[0]
+    assert text == ""

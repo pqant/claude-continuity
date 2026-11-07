@@ -43,7 +43,9 @@ def test_blink_gate_only_listed_markers():
 def test_gate_marker_constants_are_the_source_of_truth():
     assert blink.MARKER_BLOCKED == "⛔ BLOCKED"
     assert blink.MARKER_ASK == "⚠ ASK"
-    assert blink.GATE_MARKERS == (blink.MARKER_BLOCKED, blink.MARKER_ASK)
+    assert blink.MARKER_REPLY == "🕐 REPLY"
+    assert blink.GATE_MARKERS == (blink.MARKER_BLOCKED, blink.MARKER_ASK,
+                                  blink.MARKER_REPLY)
 
 
 def test_list_client_ttys_splits_lines_and_drops_not_a_tty():
