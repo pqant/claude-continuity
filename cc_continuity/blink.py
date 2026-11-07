@@ -153,8 +153,11 @@ class Blinker:
         self._original = None
         self._ttys: list[str] = []
         self._restored_logged = False
-        if self.enabled:
-            self._startup_sweep()
+        # the sweep is deliberately NOT gated on enabled: a blink stranded
+        # by a crash must heal even if blink was turned off since. With an
+        # empty store it is a zero-call no-op, so "disabled restores
+        # today's behavior exactly" still holds.
+        self._startup_sweep()
 
     # -- internals ------------------------------------------------------
 
@@ -166,13 +169,17 @@ class Blinker:
                 return
             current = get_window_name(self._runner, self._bin_, self.window_id)
             if current and current.startswith("WAIT"):
-                rename_window(self._runner, self._bin_, self.window_id, stored)
+                restored = rename_window(self._runner, self._bin_,
+                                         self.window_id, stored)
                 for tty in list_client_ttys(self._runner, self._bin_,
                                             self.window_id):
                     write_tty(tty, OSC6_RESET, _open=self._tty_open)
-                self._store("blink_name", None)
-                self._log(f"blink sweep window={self.window_id} "
-                          f"restored stranded '{current}'")
+                if restored:
+                    # keep the stored name on failure: the next animator
+                    # start sweeps again
+                    self._store("blink_name", None)
+                    self._log(f"blink sweep window={self.window_id} "
+                              f"restored stranded '{current}'")
         except Exception:
             pass
 
@@ -217,15 +224,22 @@ class Blinker:
 
     def _restore(self) -> None:
         if self._original is not None:
-            rename_window(self._runner, self._bin_, self.window_id,
-                          self._original)
+            restored = rename_window(self._runner, self._bin_,
+                                     self.window_id, self._original)
             for tty in self._ttys:
                 write_tty(tty, OSC6_RESET, _open=self._tty_open)
-            self._store("blink_name", None)
+            if restored:
+                # Ownership released: a window rename the user makes
+                # afterwards must survive animator exit. A FAILED rename
+                # keeps both the name and the stored value: the store is
+                # the only handle the startup sweep needs to heal the
+                # stranded WAIT later.
+                self._store("blink_name", None)
+                self._original = None
+                if not self._restored_logged:
+                    self._log(f"blink restore window={self.window_id}")
+                    self._restored_logged = True
         self._blinking = False
-        if self._original is not None and not self._restored_logged:
-            self._log(f"blink restore window={self.window_id}")
-            self._restored_logged = True
 
     # -- animator surface -------------------------------------------------
 
@@ -255,14 +269,10 @@ class Blinker:
         if not self.enabled:
             return
         try:
-            if self._blinking:
+            if self._blinking or self._original is not None:
+                # covers the mid-blink exit AND the retry of a falling-edge
+                # rename that tmux refused; _restore releases ownership on
+                # success, so repeat calls are no-ops
                 self._restore()
-            elif self._original is not None:
-                # Belt and braces: re-assert the restore; both operations
-                # are idempotent (*;default is accepted repeatedly).
-                rename_window(self._runner, self._bin_, self.window_id,
-                              self._original)
-                for tty in self._ttys:
-                    write_tty(tty, OSC6_RESET, _open=self._tty_open)
         except Exception:
             pass

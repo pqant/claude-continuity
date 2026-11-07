@@ -292,3 +292,58 @@ def test_blinker_never_raises_on_broken_plumbing():
     b.on_text(GATE, 0.0)   # name unreadable: skip, no raise
     b.on_text(GATE, 0.5)
     b.on_exit()
+
+
+def test_startup_sweep_runs_even_when_disabled():
+    # spec: the stale self-heal is NOT conditioned on the blink config - a
+    # stranded WAIT must heal even if the user turned blink off after the
+    # crash. An empty store makes the sweep a zero-call no-op, so "disabled
+    # restores today exactly" still holds.
+    store = _store_dict()
+    store("blink_name", "orig")
+    r, tty = ScriptRunner(["WAIT[2]", "", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, store=store, cfg={"blink": False})
+    assert ["tmux", "rename-window", "-t", "@3", "orig"] in r.calls
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC6_RESET
+    assert store("blink_name") is None
+    n = len(r.calls)
+    b.on_text(GATE, 1.0)   # disabled: the state machine stays inert
+    b.on_exit()
+    assert len(r.calls) == n
+
+
+def test_user_rename_after_clean_clear_survives_exit():
+    # clean restore releases ownership: a rename the user made afterwards
+    # must not be clobbered when the animator exits.
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0)
+    b.on_text(GATE, 0.5)
+    b.on_text("◆ 61% ok", 0.55)   # gate gone, restore rename OK
+    b.on_exit()
+    assert r.renames() == ["WAIT", "orig"]
+
+
+def test_failed_clear_keeps_stored_name_for_later_sweep():
+    # a falling-edge rename that tmux refused must keep blink_name stored:
+    # that is the ONLY handle the startup sweep needs to heal the WAIT.
+    store = _store_dict()
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(list(argv))
+        if "rename-window" in argv and argv[4] == "orig":
+            return subprocess.CompletedProcess(argv, 1, b"", b"tmux stall")
+        out = b""
+        if "display-message" in argv:
+            out = b"orig"
+        if "list-clients" in argv:
+            out = b"/dev/ttys001"
+        return subprocess.CompletedProcess(argv, 0, out, b"")
+
+    b = blink.Blinker("@3", {}, store=store, runner=runner, bin_="tmux",
+                      tty_open=FakeTTY(), log=NO_LOG)
+    b.on_text(GATE, 0.0)
+    assert store("blink_name") == "orig"
+    b.on_text("◆ ok", 0.1)       # restore rename fails (tmux stall)
+    assert store("blink_name") == "orig"
