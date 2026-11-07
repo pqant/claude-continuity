@@ -4,6 +4,25 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-07
+
+### Added
+
+- Visual "waiting for you" blink: while a session waits for user input,
+  its iTerm2/Terminal.app tab blinks on its own (ON = the tab's own
+  profile color, OFF = black; `blink_no_color: true` switches OFF to a
+  red fallback) and the tmux window name alternates `WAIT` (or
+  `WAIT[N]` for N waiting panes) with the original name at 0.5 s per
+  phase. Color bytes ride OSC 6 written directly to each attached tmux
+  client tty, so tmux never swallows them. A crash mid-blink self-heals
+  on the next animator start: no tab stays painted and no window stays
+  named WAIT. Gated by one config switch, `blink` (default on when tmux
+  is detected), plus `blink_interval` and `blink_no_color`; disabling
+  restores the previous behavior exactly.
+- Status line ASK marker for unsubmitted permission prompts: a window
+  blocked on a permission question is labeled distinctly from other
+  waiting states in the status line and the progress pane.
+
 ## [0.2.0] - 2026-11-06
 
 ### Added
