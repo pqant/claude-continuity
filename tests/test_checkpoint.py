@@ -4,6 +4,7 @@ crash-safe finalization, degraded checkpoint."""
 import hashlib
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -766,17 +767,56 @@ def test_finalize_non_git_dir(cc_home, tmp_path):
 # ----------------------------------------------------- real kill -9 smoke
 
 
-def test_kill_during_checkpoint_never_leaves_partial_state(cc_home, tmp_path):
+def _await_pipe_ready(r_fd, proc, step, timeout=30.0):
+    # Read READY from the child's handshake pipe with a deadline; an
+    # early child exit closes the pipe (empty read) and raises at once,
+    # the caller's finally still reaps the child.
+    poller = select.poll()
+    poller.register(r_fd, select.POLLIN)
+    got = b""
+    deadline = time.monotonic() + timeout
+    while b"READY" not in got:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"child never reached step {step} (rc={proc.poll()})")
+        if poller.poll(max(1, int(remaining * 1000))):
+            chunk = os.read(r_fd, 64)
+            if not chunk:
+                raise AssertionError(
+                    f"child exited before READY at step {step} "
+                    f"(rc={proc.poll()})")
+            got += chunk
+
+
+@pytest.mark.parametrize("step", (5, 8))
+def test_kill_during_checkpoint_never_leaves_partial_state(cc_home, tmp_path,
+                                                            step):
+    # Deterministic mid-run SIGKILL (replaces sleep(0.15)+kill, the 3.13
+    # CI flake): the child runs the real CLI and parks in the test-only
+    # fault seam right before finalize step `step` after writing READY to
+    # an inherited pipe. The parent kills at that pinned moment, so both
+    # sides of the rename (tmp population / renamed but uncommitted) are
+    # hit by construction instead of by timing luck.
     repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    r_fd, w_fd = os.pipe()
     env = {**os.environ, "CC_CONTINUITY_SESSION": SID,
-           "PYTHONPATH": str(REPO_ROOT)}
+           "PYTHONPATH": str(REPO_ROOT),
+           "CC_CONTINUITY_TEST_FAULT_AT": str(step),
+           "CC_CONTINUITY_TEST_HANDSHAKE_FD": str(w_fd)}
     proc = subprocess.Popen(
         [sys.executable, "-m", "cc_continuity", "checkpoint"],
-        cwd=repo, env=env,
+        cwd=repo, env=env, pass_fds=(w_fd,),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.15)                    # mid-run; timing is inherently racy
-    proc.kill()
-    proc.wait()
+    os.close(w_fd)
+    try:
+        _await_pipe_ready(r_fd, proc, step)
+    finally:
+        os.close(r_fd)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    assert proc.returncode < 0          # died from the SIGKILL
     sdir = paths.session_dir(key, nnn)
     cp = sdir / "checkpoint"
     if cp.exists():                     # if present it must be FULLY valid
@@ -794,6 +834,14 @@ def test_kill_during_checkpoint_never_leaves_partial_state(cc_home, tmp_path):
     # NOTE: a kill in the microsecond window between the state write and the
     # pointer write leaves (VERIFIED, ptr=None) — a permitted PRD-order
     # outcome, deliberately not asserted against here.
+    # Deterministic pins for the pinned kill point (random timing could
+    # never guarantee these):
+    assert st == "CHECKPOINT_WRITING"   # parked before the VERIFIED write
+    assert ptr is None
+    if step == 5:                        # tmp population not started yet
+        assert not cp.exists()
+    else:                                # step 8: renamed, not committed
+        assert cp.exists()               # fully validated above
 
 
 def test_finalize_verified_pushes_row4(cc_home, tmp_path, monkeypatch):

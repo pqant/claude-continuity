@@ -473,6 +473,32 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if status == "OK" else 1
 
 
+def _kill_handshake_fault():
+    """Test-only deterministic kill seam (checkpoint kill e2e test).
+
+    When ``CC_CONTINUITY_TEST_FAULT_AT`` and ``CC_CONTINUITY_TEST_HANDSHAKE_FD``
+    are both set, the finalize ``fault`` callback parks the child at the
+    requested step after writing READY to the inherited pipe fd, so the
+    parent can SIGKILL at a known mid-run point instead of sleeping and
+    guessing. Both unset on every production path: returns None.
+    """
+    step = os.environ.get("CC_CONTINUITY_TEST_FAULT_AT")
+    fd = os.environ.get("CC_CONTINUITY_TEST_HANDSHAKE_FD")
+    if step is None or fd is None:
+        return None
+    target, fdnum = int(step), int(fd)
+
+    def _fault(i: int) -> None:
+        if i != target:
+            return
+        os.write(fdnum, b"READY\n")
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+        os._exit(3)                      # orphan guard if parent forgot
+    return _fault
+
+
 def cmd_checkpoint(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     root = project.resolve_root(Path.cwd())
@@ -487,7 +513,8 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
             return 1
     try:
         cp_id, degraded = checkpoint.finalize(key, record["nnn"], cfg=cfg,
-                                              root=root, metric=metric)
+                                              root=root, metric=metric,
+                                              fault=_kill_handshake_fault())
     except (checkpoint.CheckpointError, state.StateNotFoundError) as e:
         print(f"cc-continuity checkpoint: {e}", file=sys.stderr)
         return 1
