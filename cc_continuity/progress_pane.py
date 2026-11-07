@@ -591,10 +591,17 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cap = None
                 if cap is not None:
                     pane_text = cap
-                # composite key over both gate sources: a changed segment
-                # text or dialog region re-arms the blink; the focus
-                # probes run only on this ~1 s cadence, never per frame
-                src = "|".join(repr(p) for p in (cur_text, pane_text) if p)
+                # gate-stable key over both gate sources: what re-arms
+                # the blink is WHICH markers are painted and whether a
+                # dialog is present, never the raw text. Raw text would
+                # let percent churn or the user's own keystrokes (echoed
+                # in the captured region) reset the dwell forever while
+                # the user stares at the tab they already acknowledged.
+                # The focus probes run only on this ~1 s cadence.
+                gate = tuple(m in (cur_text or "")
+                             for m in blink.GATE_MARKERS)
+                src = "|".join(repr(p) for p in (gate,
+                                                 pane_text is not None) if p)
                 try:
                     suppressed = watcher.tick(t, src)
                 except Exception:

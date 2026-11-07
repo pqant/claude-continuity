@@ -872,3 +872,58 @@ def test_animator_focus_dwell_silences_blinker_ticks(cc_home, monkeypatch):
     assert texts[0][0] == "◆ 61% ok  ⛔ BLOCKED"   # tick 1: still gated
     assert texts[1] == ("", 0.1, None)    # dwell reached: silence same tick
     assert texts[2] == ("", 0.2, None)    # read state holds across frames
+
+
+# ---------------- stable gate key under text churn (focus dwell v2 fix)
+#
+# The watcher key must describe the GATE, not the raw text: while the
+# user looks at the tab and types an answer, the pane region and the
+# ratio text change every poll. Raw text in the key would reset the
+# dwell forever (the user watches a blink they already acknowledged).
+
+
+def _churn_runner(argv, **kw):
+    out = "/dev/ttys001" if argv[1] == "list-clients" else ""
+    return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
+
+
+def test_animator_focus_dwell_survives_segment_text_churn(cc_home,
+                                                          monkeypatch):
+    # ratio/percent text changes each poll, marker constant: dwell still
+    # reaches and the blinker falls silent (key must be gate-stable)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    texts = iter([f"◆ {p}% ok  \U0001f550 REPLY" for p in range(10)])
+    mtimes = iter(range(1, 30))
+    clock = iter([k * 0.05 for k in range(10)])
+    progress_pane.run_animator(
+        "12", _frames=3, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: next(texts),
+        _mtime=lambda: next(mtimes), _sleep=lambda s: None, _blink=fake,
+        _blink_poll=1, _runner=_churn_runner, _pane_capture=lambda: None,
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+    texts_seen = fake.made[0].texts
+    assert "REPLY" in texts_seen[0][0]        # tick 1: still gated
+    assert texts_seen[1] == ("", 0.1, None)   # dwell despite churn
+    assert texts_seen[2] == ("", 0.2, None)
+
+
+def test_animator_focus_dwell_survives_dialog_text_churn(cc_home,
+                                                         monkeypatch):
+    # static segment text, typing echoes change the captured dialog
+    # region each poll: the gate (a dialog is present) did not change
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    regions = iter(f"option {i}\n" for i in range(10))
+    clock = iter([k * 0.05 for k in range(10)])
+    progress_pane.run_animator(
+        "12", _frames=3, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 42% ok  ⚠ ASK",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _blink_poll=1, _runner=_churn_runner,
+        _pane_capture=lambda: next(regions),
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=2)
+    texts_seen = fake.made[0].texts
+    assert "ASK" in texts_seen[0][0]          # tick 1: still gated
+    assert texts_seen[1] == ("", 0.1, None)   # dwell despite typing
+    assert texts_seen[2] == ("", 0.2, None)
