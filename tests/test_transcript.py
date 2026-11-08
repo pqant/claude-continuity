@@ -158,3 +158,107 @@ def test_export_failures_never_raise(tmp_path, cc_home, monkeypatch):
     monkeypatch.setattr(transcript.atomic, "write_bytes_fsync", boom)
     assert transcript.export_session(_fixture(tmp_path), tmp_path / "o2", _meta()) is None
     assert not (tmp_path / "o2").exists() or not list((tmp_path / "o2").iterdir())
+
+
+# --- issue #16: session switcher (per-project sessions.js manifest) ---
+
+def _proj_tree(tmp_path, nnn_stems):
+    """Fake project dir holding sessions/<nnn>/checkpoint/<stem>.html files."""
+    proj = tmp_path / "projects" / "proj-abc12345"
+    for nnn, stem in nnn_stems:
+        d = proj / "sessions" / nnn / "checkpoint"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{stem}.html").write_text("<html></html>", encoding="utf-8")
+    return proj
+
+
+def test_collect_sessions_newest_first(tmp_path):
+    proj = _proj_tree(tmp_path, [("166", "claude-continuity-166_2026-11-08-1000"),
+                                 ("167", "claude-continuity-167_2026-11-08-1815")])
+    e = transcript.collect_sessions(proj)
+    assert [x["href"] for x in e] == ["sessions/167/checkpoint/claude-continuity-167_2026-11-08-1815.html",
+                                      "sessions/166/checkpoint/claude-continuity-166_2026-11-08-1000.html"]
+    assert e[0]["label"] == "claude-continuity-167 - 08 Nov 18:15"
+    assert all(x["href"].isascii() and x["label"].isascii() for x in e)
+
+
+def test_collect_sessions_ignores_noise_and_falls_back_to_mtime(tmp_path):
+    proj = _proj_tree(tmp_path, [("001", "sess_a")])  # stem without a date part
+    (proj / "sessions" / "001" / "checkpoint" / "handoff.md").write_text("x", encoding="utf-8")
+    (proj / "sessions" / "002" / "checkpoint").mkdir(parents=True)  # no export yet
+    e = transcript.collect_sessions(proj)
+    assert len(e) == 1
+    assert e[0]["href"] == "sessions/001/checkpoint/sess_a.html"
+    assert e[0]["label"] == "sess_a"  # bad stem: label falls back to the stem
+
+
+def test_render_manifest_shape(tmp_path):
+    entries = [{"href": "sessions/001/checkpoint/a.html", "label": "a - 01 Jan 02:03"}]
+    s = transcript.render_manifest(entries)
+    assert s.startswith("window.CC_SESSIONS=") and s.isascii()
+    assert json.loads(s[s.index("["):s.rindex("]") + 1]) == entries
+
+
+def test_update_sessions_manifest_writes_project_file(tmp_path):
+    proj = _proj_tree(tmp_path, [("166", "s-166_2026-11-08-1000"),
+                                 ("167", "s-167_2026-11-08-1815")])
+    transcript.update_sessions_manifest(proj / "sessions" / "166" / "checkpoint")
+    js = (proj / "sessions.js").read_text(encoding="utf-8")
+    assert js.startswith("window.CC_SESSIONS=")
+    assert "sessions/167/checkpoint/s-167_2026-11-08-1815.html" in js
+    assert "sessions/166/checkpoint/s-166_2026-11-08-1000.html" in js
+
+
+def test_update_sessions_manifest_wrong_shape_is_noop(tmp_path, cc_home):
+    # cc_home: the skip path logs through debug_log, never the real store.
+    out = tmp_path / "out"
+    out.mkdir()
+    transcript.update_sessions_manifest(out)  # not <proj>/sessions/<nnn>/checkpoint
+    assert not list(tmp_path.rglob("sessions.js"))
+
+
+def test_render_html_switcher_when_wired():
+    meta = dict(META, manifest_src="../../sessions.js",
+                self_href="sessions/166/checkpoint/x.html")
+    d = transcript.render_html([("user", "hi", None)], meta)
+    assert '<select id="s"' in d and 'data-cur="sessions/166/checkpoint/x.html"' in d
+    assert 'src="../../sessions.js"' in d
+    assert d.isascii()
+
+
+def test_render_html_no_switcher_when_unwired():
+    d = _doc()  # META has no manifest keys (legacy call shape)
+    assert 'id="s"' not in d and "sessions.js" not in d
+
+
+def test_export_session_writes_manifest(tmp_path):
+    proj = tmp_path / "proj"
+    dest = proj / "sessions" / "001" / "checkpoint"
+    stem = transcript.export_session(_fixture(tmp_path), dest, _meta())
+    assert stem
+    js = (proj / "sessions.js").read_text(encoding="utf-8")
+    assert f"sessions/001/checkpoint/{stem}.html" in js
+
+
+def test_export_relative_depth_matches_checkpoint_dirs(tmp_path):
+    # Browser-verified integration rule: the page lives at
+    # sessions/<NNN>/checkpoint/x.html (three levels under the project),
+    # so the manifest must resolve with ../../../ from the checkpoint dir.
+    proj = tmp_path / "proj"
+    dest = proj / "sessions" / "007" / "checkpoint"
+    stem = transcript.export_session(_fixture(tmp_path), dest, _meta())
+    page = (dest / f"{stem}.html").read_text(encoding="utf-8")
+    assert 'src="../../../sessions.js"' in page
+    assert 'data-up="../../../"' in page
+    assert 'data-cur="sessions/007/checkpoint/' in page
+    # and the resolved target must actually exist
+    assert (dest / "../../../sessions.js").resolve() == (proj / "sessions.js").resolve()
+
+
+def test_export_session_survives_manifest_failure(tmp_path, cc_home, monkeypatch):
+    def boom(dest_dir):
+        raise RuntimeError("simulated manifest loss")
+    monkeypatch.setattr(transcript, "update_sessions_manifest", boom)
+    dest = tmp_path / "proj" / "sessions" / "001" / "checkpoint"
+    assert transcript.export_session(_fixture(tmp_path), dest, _meta())
+    assert list(dest.glob("*.html"))

@@ -160,6 +160,8 @@ input[type=search]{flex:1;max-width:520px;padding:7px 12px;border:1px solid var(
 label{font-size:13px;color:var(--muted);white-space:nowrap}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:13px}
 button:hover{border-color:var(--muted)}
+select{padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:13px;max-width:340px}
+select:disabled{opacity:.55}
 #stats{font-size:12px;color:var(--muted);min-width:140px}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
 section.block{padding:6px 14px 12px;margin:10px 0;border-radius:10px}
@@ -210,6 +212,105 @@ bt.onclick=()=>{i=(i+1)%3;root.dataset.theme=modes[i];localStorage.setItem('th',
 """
 
 
+#: Manual month names for switcher labels: ``strftime("%b")`` follows the
+#: machine locale and could emit a non-English month (hygiene requires
+#: ASCII/English template strings).
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_STEM_DT_RE = re.compile(r"_(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})$")
+
+#: Switcher client script: populate the ``#s`` select from the manifest
+#: global (newest first, first ten plus the current page when it falls
+#: outside), switch by navigating the SAME viewer template over file://
+#: (XHR is blocked there; the loaded page re-runs search/theme itself).
+_SWITCH_JS = r"""
+(function(){var sel=document.getElementById('s');if(!sel)return;
+var all=(window.CC_SESSIONS||[]),cur=sel.getAttribute('data-cur')||'',up=sel.getAttribute('data-up')||'';
+function find(a,h){for(var i=0;i<a.length;i++){if(a[i].href===h)return a[i];}return null;}
+var top=all.slice(0,10);
+if(cur&&!find(top,cur)){top.push(find(all,cur)||{href:cur,label:'(current session)'});}
+for(var k=0;k<top.length;k++){var o=document.createElement('option');
+o.value=top[k].href;o.textContent=top[k].label;sel.appendChild(o);}
+if(cur)sel.value=cur;
+sel.disabled=all.length<2;
+sel.onchange=function(){if(this.value)location.href=up+this.value;};})();
+"""
+
+
+def _session_entry(html_path: Path, project_dir: Path) -> dict:
+    """One manifest entry; ``_k`` is the private sort key (datetime)."""
+    stem = html_path.stem
+    m = _STEM_DT_RE.search(stem)
+    dt = None
+    if m:
+        try:
+            dt = datetime(*[int(g) for g in m.groups()])
+        except ValueError:
+            dt = None
+    if dt is None:
+        dt = datetime.fromtimestamp(html_path.stat().st_mtime)
+        label = stem
+    else:
+        label = f"{stem[:m.start()]} - {dt:%d} {_MONTHS[dt.month - 1]} {dt:%H:%M}"
+    return {"href": html_path.relative_to(project_dir).as_posix(),
+            "label": label, "_k": dt}
+
+
+def collect_sessions(project_dir: Path) -> list[dict]:
+    """Every exported session HTML of one project, newest first.
+
+    Scans ``<project>/sessions/*/checkpoint/*.html``. Labels come from the
+    stem's ``_YYYY-MM-DD-HHMM`` tail (``name - DD Mon HH:MM``); a stem
+    without a parseable tail falls back to the raw stem with file mtime.
+    Unreadable files are skipped.
+    """
+    entries = []
+    for p in project_dir.glob("sessions/*/checkpoint/*.html"):
+        try:
+            entries.append(_session_entry(p, project_dir))
+        except OSError:
+            continue
+    entries.sort(key=lambda e: e["_k"], reverse=True)
+    return [{"href": e["href"], "label": e["label"]} for e in entries]
+
+
+def render_manifest(entries: list[dict]) -> str:
+    """``sessions.js`` body: one global assignment, ASCII JSON only."""
+    return ("window.CC_SESSIONS="
+            + json.dumps(entries, ensure_ascii=True, separators=(",", ":")) + ";\n")
+
+
+def _checkpoint_project(dest_dir: Path) -> tuple[Path, str] | None:
+    """``(project_dir, '../' prefix)`` when dest_dir is a real checkpoint
+    dir (``<project>/sessions/<NNN>/checkpoint``); ``None`` otherwise.
+    The page sits three levels under the project, hence ``../../../``."""
+    try:
+        if dest_dir.name != "checkpoint":
+            return None
+        if dest_dir.parents[1].name != "sessions" or not dest_dir.parents[0].name.isdigit():
+            return None
+        return dest_dir.parents[2], "../../../"
+    except IndexError:
+        return None
+
+
+def update_sessions_manifest(dest_dir: Path) -> None:
+    """Best-effort refresh of ``<project>/sessions.js`` after one export.
+
+    Never raises (P9-D7): a manifest problem is one debug line; the export
+    pair stands on its own.
+    """
+    try:
+        ctx = _checkpoint_project(dest_dir)
+        if ctx is None:
+            return
+        project, _up = ctx
+        body = render_manifest(collect_sessions(project))
+        atomic.write_bytes_fsync(project / "sessions.js", body.encode("utf-8"))
+    except Exception:
+        debug_log(f"manifest skipped: sessions.js for {dest_dir}")
+
+
 def _ts_hms(ts: str | None) -> str:
     """Local HH:MM:SS for an ISO-8601 timestamp; empty when absent or bad."""
     if not ts:
@@ -238,6 +339,15 @@ def render_html(blocks: list[Block], meta: dict) -> str:
     """
     ratio = meta.get("ratio")
     ratio_s = "n/a" if ratio is None else f"{float(ratio):.1%}"
+    ext = switch = switch_js = ""
+    if meta.get("manifest_src"):
+        src = html.escape(str(meta["manifest_src"]), quote=True)
+        cur = html.escape(str(meta.get("self_href") or ""), quote=True)
+        up = src[:src.rfind("/") + 1]
+        ext = f'<script src="{src}"></script>\n'
+        switch = (f'<div class="controls"><label>session '
+                  f'<select id="s" data-cur="{cur}" data-up="{up}"></select></label></div>\n')
+        switch_js = _SWITCH_JS
     sections = []
     for role, text, ts in blocks:
         cls = "user" if role == "user" else "asst"
@@ -262,9 +372,10 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<div class="controls"><input type="search" id="q" '
         'placeholder="search - marks all matches, optional block filter">\n'
         '<label><input type="checkbox" id="f"> matching blocks only</label>\n'
-        '<button id="t">theme</button><span id="stats"></span></div></header>\n'
+        '<button id="t">theme</button><span id="stats"></span></div>\n'
+        f'{switch}</header>\n'
         f'<main>{"".join(sections)}</main>\n'
-        f'<script>{_JS}</script></body>')
+        f'{ext}<script>{_JS}{switch_js}</script></body>')
 
 
 def resolve_transcript_path(metric: dict | None, root: Path, sid: str | None,
@@ -327,7 +438,8 @@ def render_markdown(blocks: list[Block], meta: dict) -> str:
 
 
 def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
-                   *, cap_bytes: int = 5 * 1024 * 1024) -> str | None:
+                   *, cap_bytes: int = 5 * 1024 * 1024,
+                   final_dir: Path | None = None) -> str | None:
     """Best-effort readable export of one session JSONL (B3/B4).
 
     Reads at most ``cap_bytes`` (past the cap the trailing partial line is
@@ -335,7 +447,11 @@ def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
     ``<stem>.md`` and ``<stem>.html`` into ``dest_dir`` with fsync'd plain
     writes and returns the stem. ``span``/``stem`` are derived from the
     first/last block timestamps (local; ``stem`` falls back to now) and
-    added to a meta copy. Never raises: unreadable source, empty parse, or
+    added to a meta copy. ``final_dir`` (issue #16): where the pair will
+    live when ``dest_dir`` is only a staging dir (finalize's
+    ``checkpoint.tmp-*``); the switcher wiring uses it and the in-place
+    manifest refresh is skipped (the mover refreshes at the final dir).
+    Never raises: unreadable source, empty parse, or
     any write failure logs one debug line, leaves no half-written pair,
     and returns ``None``.
     """
@@ -373,6 +489,14 @@ def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
         export_meta = dict(meta)
         export_meta["stem"] = stem
         export_meta["span"] = span
+        eff = final_dir or dest_dir
+        ctx = _checkpoint_project(eff)
+        if ctx is not None:
+            project, up = ctx
+            export_meta["manifest_src"] = up + "sessions.js"
+            export_meta["manifest_up"] = up
+            export_meta["self_href"] = (eff.relative_to(project).as_posix()
+                                        + "/" + stem + ".html")
         dest_dir.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []
         try:
@@ -392,6 +516,14 @@ def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
                     pass
             debug_log(f"export skipped: write failed for {stem}")
             return None
+        # Issue #16: refresh the per-project manifest the switcher reads.
+        # When exporting into a staging dir the mover refreshes at the
+        # final dir instead. Guarded belt-and-braces; never raises.
+        if final_dir is None:
+            try:
+                update_sessions_manifest(dest_dir)
+            except Exception:
+                debug_log(f"manifest skipped: refresh failed for {stem}")
         return stem
     except Exception:
         debug_log(f"export skipped: unexpected error for {jsonl_path}")

@@ -72,3 +72,20 @@ def test_insert_transcript_line_position():
     i = next(i for i, l in enumerate(lines) if l.startswith("Transcript: "))
     assert lines[i - 1].startswith("- ") and lines[i + 1] == ""
     assert checkpoint.headings_in_order(out)
+
+
+def test_finalize_writes_sessions_manifest(cc_home, tmp_path):
+    # Issue #16: the export also refreshes the per-project sessions.js so
+    # every viewer page can offer the session switcher over file://.
+    repo, key, nnn = _registered(tmp_path, draft=DRAFT_TEXT)
+    checkpoint.finalize(
+        key, nnn, cfg=_cfg_for(repo), root=repo,
+        metric={"session_id": SID, "transcript_path": str(_conv(tmp_path)),
+                "model": "m", "ratio": 0.5})
+    proj = paths.session_dir(key, nnn).parent.parent
+    js = (proj / "sessions.js").read_text(encoding="utf-8")
+    assert js.startswith("window.CC_SESSIONS=")
+    assert f"sessions/{nnn:03d}/checkpoint/" in js
+    # the checkpoint dir itself must stay manifest-free (SHA256SUMS shape)
+    final = paths.session_dir(key, nnn) / "checkpoint"
+    assert "sessions.js" not in {p.name for p in final.iterdir()}

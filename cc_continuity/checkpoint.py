@@ -590,7 +590,8 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
                 metric, root, (metric or {}).get("session_id") or None)
             if tpath is not None:
                 stem = transcript.export_session(
-                    tpath, tmp, _transcript_meta(snapshot, metric))
+                    tpath, tmp, _transcript_meta(snapshot, metric),
+                    final_dir=pdir / "checkpoint")
         except Exception:
             stem = None
             transcript.debug_log("export aborted: finalize guard")
@@ -633,6 +634,10 @@ def finalize(key: str, nnn: int, *, cfg: dict, root: Path,
             shutil.rmtree(final)
         os.rename(tmp, final)
         atomic.fsync_dir(pdir)
+        # Issue #16: the switcher manifest lives at the project root;
+        # refresh it once the pair has landed (never raises, P9-D7).
+        if stem:
+            transcript.update_sessions_manifest(final)
         step(8)
         state._transition_unlocked(key, nnn, "CHECKPOINT_VERIFIED",
                                    degraded=degraded)
