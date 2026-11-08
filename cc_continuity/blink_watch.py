@@ -110,6 +110,7 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
           _state=None, _consec_fails: int = 6,
           _frontmost_tty=None, _client_ttys=None,
           _dwell_ticks: int = 3, _reply_fade: float = 600.0,
+          _settle: float | None = None,
           _focus_log=blink._debug_line) -> None:
     """Poll one session's pane until a quit condition; never raises.
 
@@ -123,7 +124,10 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
     ``reply_ready`` ledger entry (Stop hook: turn ended waiting for the
     user) blinks the tab WITHOUT needing status line renders. Replying
     is not required; a later main-session user prompt also consumes the
-    entry.
+    entry. A fresh reply additionally waits out a settle window
+    (``blink_reply_settle``, default 15 s, user ruling 2026-11-07):
+    a session that wakes itself within it (background task wake, cron
+    fire) was never waiting for the user and never blinks.
 
     Focus dwell (user directive 2026-11-07, v2): EVERY blink source
     (needs_human, selection dialog, reply) falls silent once the user
@@ -138,6 +142,8 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
             else os.environ.get("CC_CONTINUITY_TMUX_BIN") or "tmux")
     state_fn = _state if _state is not None else _default_state
     reply_on = config.blink_reply(cfg)
+    settle = (config.blink_reply_settle(cfg) if _settle is None
+              else float(_settle))
     store = _make_store(window_id)
     clients_fn = (_client_ttys if _client_ttys is not None
                   else (lambda: _default_client_ttys(window_id, _runner, bin_)))
@@ -188,7 +194,8 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
             reply = None
             if reply_on:
                 try:
-                    reply = ledger.reply_pending(session_dir)
+                    reply = ledger.reply_pending(session_dir,
+                                                 settle=settle, now=t)
                 except Exception:
                     reply = None
             if reply is not None and t - reply > _reply_fade:

@@ -287,3 +287,13 @@ def test_blink_reply_default_and_off():
     assert config.blink_reply({}) is True
     assert config.blink_reply({"blink_reply": False}) is False
     assert config.blink_reply({"blink_reply": "nonsense"}) is True
+
+
+def test_blink_reply_settle_default_and_clamps():
+    # user-approved 2026-11-07: 15 s settle before the reply blink arms
+    assert config.blink_reply_settle({}) == 15.0
+    assert config.blink_reply_settle({"blink_reply_settle": 0}) == 0.0
+    assert config.blink_reply_settle({"blink_reply_settle": 40}) == 40.0
+    assert config.blink_reply_settle({"blink_reply_settle": 500}) == 120.0
+    assert config.blink_reply_settle({"blink_reply_settle": True}) == 15.0
+    assert config.blink_reply_settle({"blink_reply_settle": "x"}) == 15.0

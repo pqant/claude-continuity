@@ -357,9 +357,10 @@ def test_spawn_never_raises_on_runner_failure(cc_home, monkeypatch):
 
 
 def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
-               clients=frozenset(), dwell=3, fade=600.0):
+               clients=frozenset(), dwell=3, fade=600.0,
+               session_dir="/sess"):
     blink_watch.watch(
-        "/sess", pane_id="%7", window_id="@7", cfg=cfg or {}, _blink=fake,
+        session_dir, pane_id="%7", window_id="@7", cfg=cfg or {}, _blink=fake,
         _runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0,
                                                                b"", b""),
         _bin_="tmux", _tty_open=_tty_open, _now=lambda: now,
@@ -371,7 +372,7 @@ def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
 
 def test_watch_reply_ready_blinks_without_block(cc_home, monkeypatch):
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: 100.0)
     fake = _FakeBlinkMod(captures=[None])
     _run_watch(fake)
     text, _ = fake.made[0].ticks[0]
@@ -382,7 +383,7 @@ def test_watch_reply_ready_blinks_without_block(cc_home, monkeypatch):
 def test_watch_reply_blocked_and_reply_both_gates(cc_home, monkeypatch):
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
                         lambda d: "deploy approval")
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: 100.0)
     fake = _FakeBlinkMod(captures=[None])
     _run_watch(fake)
     text, _ = fake.made[0].ticks[0]
@@ -391,7 +392,7 @@ def test_watch_reply_blocked_and_reply_both_gates(cc_home, monkeypatch):
 
 def test_watch_reply_disabled_by_config(cc_home, monkeypatch):
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 100.0)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: 100.0)
     fake = _FakeBlinkMod(captures=[None])
     _run_watch(fake, cfg={"blink_reply": False})
     text, _ = fake.made[0].ticks[0]
@@ -403,7 +404,7 @@ def test_watch_focus_dwell_consumes_reply(cc_home, monkeypatch):
     consumed = []
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
     monkeypatch.setattr(blink_watch.ledger, "reply_pending",
-                        lambda d: pending[0])
+                        lambda d, **kw: pending[0])
     monkeypatch.setattr(blink_watch.ledger, "mark_reply_read",
                         lambda d: (consumed.append(1), pending.__setitem__(0, None)))
     fake = _FakeBlinkMod(captures=[None, None, None])
@@ -423,7 +424,7 @@ def test_watch_short_focus_continues_blink(cc_home, monkeypatch):
     fronts = iter(["/dev/ttys001", None, "/dev/ttys001"])
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
     monkeypatch.setattr(blink_watch.ledger, "reply_pending",
-                        lambda d: pending[0])
+                        lambda d, **kw: pending[0])
     monkeypatch.setattr(blink_watch.ledger, "mark_reply_read",
                         lambda d: consumed.append(1))
     fake = _FakeBlinkMod(captures=[None, None, None])
@@ -438,7 +439,7 @@ def test_watch_reply_self_fades_without_focus_capability(cc_home, monkeypatch):
     # ts 0.0 vs clock 700.0 with a 600 s fade: never focusable (no
     # iTerm2), so the blink must not strand on an absent user.
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: 0.0)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: 0.0)
     fake = _FakeBlinkMod(captures=[None])
     _run_watch(fake, now=700.0, fade=600.0)
     text, _ = fake.made[0].ticks[0]
@@ -467,7 +468,7 @@ def test_watch_needs_human_reblinks_on_new_reason(cc_home, monkeypatch):
     reasons = iter(["deploy approval", "deploy approval", "merge conflict"])
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
                         lambda d: next(reasons))
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: None)
     fake = _FakeBlinkMod(captures=[None, None, None])
     _run_watch(fake, ticks=3, dwell=2,
                frontmost=lambda: "/dev/ttys001",
@@ -483,7 +484,7 @@ def test_watch_ask_region_reblinks_on_new_dialog(cc_home, monkeypatch):
                 "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
                 + "─" * 40)
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
-    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: None)
     fake = _FakeBlinkMod(captures=[_DIALOG_REGION, _DIALOG_REGION,
                                    _DIALOG_REGION, region_b])
     _run_watch(fake, ticks=4, dwell=2,
@@ -494,3 +495,50 @@ def test_watch_ask_region_reblinks_on_new_dialog(cc_home, monkeypatch):
     assert b.ticks[1] == ("", None)          # dwell reached: silent
     assert b.ticks[2] == ("", None)          # same region stays silent
     assert b.ticks[3][1] == region_b         # new dialog: re-arms
+
+
+# ------------------------------------------------------------ reply settle
+#
+# User ruling 2026-11-07 (supersedes the same-day background no-blink
+# rule): an answer at an idle prompt must blink even with a background
+# shell running - but only after a settle window (default 15 s). A
+# session that wakes itself within the window (task notification, cron,
+# late tool activity) was never waiting for the user and never blinks.
+
+
+def test_watch_reply_settle_holds_blink_back(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import ledger
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    ledger.append(tmp_path, {"type": "reply_ready", "ts": 100.0})
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, now=110.0, cfg={"blink_reply_settle": 15},
+               session_dir=tmp_path)
+    text, _ = fake.made[0].ticks[0]
+    assert text == ""              # 10 s old: still settling, stay silent
+
+
+def test_watch_reply_blinks_after_settle(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import ledger
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    ledger.append(tmp_path, {"type": "reply_ready", "ts": 100.0})
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, now=116.0, cfg={"blink_reply_settle": 15},
+               session_dir=tmp_path)
+    text, _ = fake.made[0].ticks[0]
+    assert blink.MARKER_REPLY in text
+
+
+def test_watch_reply_cancelled_by_auto_continue(cc_home, tmp_path,
+                                                monkeypatch):
+    # The background wake landed (tool activity after the reply): the
+    # session resumed itself, so even long past the settle window the
+    # tab must stay silent.
+    from cc_continuity import ledger
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    ledger.append(tmp_path, {"type": "reply_ready", "ts": 100.0})
+    ledger.append(tmp_path, {"type": "tool_use", "tool": "Bash", "ts": 102.0})
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, now=300.0, cfg={"blink_reply_settle": 15},
+               session_dir=tmp_path)
+    text, _ = fake.made[0].ticks[0]
+    assert text == ""

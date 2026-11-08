@@ -1381,7 +1381,8 @@ def _registered_home(cc_home, tmp_path):
 def test_run_shows_reply_when_reply_ready_present(cc_home, tmp_path):
     from cc_continuity import ledger
     sid, key, nnn = _registered_home(cc_home, tmp_path)
-    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "reply_ready", "ts": time.time() - 999})
     line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
                           _cfg(statusline_ansi=False))
     assert line.endswith(blink.MARKER_REPLY)
@@ -1390,7 +1391,8 @@ def test_run_shows_reply_when_reply_ready_present(cc_home, tmp_path):
 def test_run_no_reply_when_blink_reply_disabled(cc_home, tmp_path):
     from cc_continuity import ledger
     sid, key, nnn = _registered_home(cc_home, tmp_path)
-    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "reply_ready", "ts": time.time() - 999})
     line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
                           _cfg(statusline_ansi=False, blink_reply=False))
     assert blink.MARKER_REPLY not in line
@@ -1401,7 +1403,8 @@ def test_run_mode1_writes_reply_to_data_file(cc_home, tmp_path, monkeypatch):
     # alone, so the reply marker must ride into progress-data-<win>.json.
     from cc_continuity import ledger
     sid, key, nnn = _registered_home(cc_home, tmp_path)
-    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    ledger.append(paths.session_dir(key, nnn),
+                  {"type": "reply_ready", "ts": time.time() - 999})
     monkeypatch.setattr(progress_pane, "ensure_progress_pane",
                         _fake_ensure([]))
     statusline.run(json.dumps(_payload(session_id=sid)).encode(),
@@ -1410,3 +1413,15 @@ def test_run_mode1_writes_reply_to_data_file(cc_home, tmp_path, monkeypatch):
         (paths.runtime_dir() / "progress-data-@7.json").read_text(
             encoding="utf-8"))
     assert blink.MARKER_REPLY in data["text"]
+
+
+def test_run_reply_settles_before_marker(cc_home, tmp_path):
+    # user ruling 2026-11-07: a just-written reply_ready waits out the
+    # settle window (15 s default) before its marker reaches the pane;
+    # an auto-continuation inside the window keeps it out for good.
+    from cc_continuity import ledger
+    sid, key, nnn = _registered_home(cc_home, tmp_path)
+    ledger.append(paths.session_dir(key, nnn), {"type": "reply_ready"})
+    line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
+                          _cfg(statusline_ansi=False))
+    assert blink.MARKER_REPLY not in line

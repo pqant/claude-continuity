@@ -660,10 +660,17 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         except (OSError, ValueError):
             blocked = None
         if config.blink_reply(cfg):
+            # settle (user ruling 2026-11-07): a just-finished turn is
+            # only reported once its settle window elapsed and nothing
+            # woke the session since - CC re-renders ~1/s while idle,
+            # so the marker lands on the first settled render and an
+            # auto-continuation keeps it out entirely.
             try:
                 reply = ledger.reply_pending(
                     paths.session_dir(record["project_key"],
-                                      int(record["nnn"]))) is not None
+                                      int(record["nnn"])),
+                    settle=config.blink_reply_settle(cfg),
+                    now=time.time()) is not None
             except (OSError, ValueError):
                 reply = False
     ansi = bool(cfg.get("statusline_ansi", True))

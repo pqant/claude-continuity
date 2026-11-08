@@ -124,3 +124,33 @@ def test_reply_latest_turn_wins(tmp_path):
     ledger.mark_reply_read(sdir)
     ledger.append(sdir, {"type": "reply_ready", "ts": 2.0})
     assert ledger.reply_pending(sdir) == 2.0
+
+
+def test_reply_pending_settle_hides_young_reply(tmp_path):
+    # user ruling 2026-11-07: no blink before the settle window elapses
+    sdir = _rdir(tmp_path)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 100.0})
+    assert ledger.reply_pending(sdir, settle=15, now=110.0) is None
+    assert ledger.reply_pending(sdir, settle=15, now=116.0) == 100.0
+    assert ledger.reply_pending(sdir) == 100.0   # settle 0: raw read
+
+
+def test_reply_pending_resume_entries_consume(tmp_path):
+    # a session that wakes itself was never waiting for the user
+    for wake in ("tool_use", "tool_failure", "task_created",
+                 "task_completed", "stop"):
+        sdir = tmp_path / wake
+        ledger.append(sdir, {"type": "reply_ready", "ts": 100.0})
+        ledger.append(sdir, {"type": wake, "ts": 101.0})
+        assert ledger.reply_pending(sdir, settle=0, now=300.0) is None
+
+
+def test_reply_pending_non_work_entries_do_not_consume(tmp_path):
+    sdir = _rdir(tmp_path)
+    ledger.append(sdir, {"type": "reply_ready", "ts": 100.0})
+    ledger.append(sdir, {"type": "state", "from": "ACTIVE", "ts": 101.0})
+    ledger.append(sdir, {"type": "user_prompt", "agent_id": "sub",
+                         "ts": 102.0})
+    assert ledger.reply_pending(sdir, settle=0, now=300.0) == 100.0
+    ledger.append(sdir, {"type": "tool_failure", "tool": "Bash", "ts": 103.0})
+    assert ledger.reply_pending(sdir, settle=0, now=300.0) is None

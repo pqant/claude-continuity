@@ -150,21 +150,6 @@ def _degrade(ctx: HookContext, key: str, nnn: int) -> dict | None:
     return _rotate_or_amcl(ctx, key, nnn, "CHECKPOINT_VERIFIED")
 
 
-def _awaits_background(payload: dict) -> bool:
-    """True when in-flight background tasks or scheduled crons will wake
-    the session on their own, so a Stop is NOT a wait for the user.
-
-    The Stop payload ships these arrays (CC >= 2.1.145) exactly to tell
-    "done" from "paused waiting to be woken". Absent fields (older CC,
-    unreachable registry) are unknown: unknown fails open toward
-    blinking, a genuine "waiting for you" must never be silenced by a
-    missing signal (live incident 2026-11-07: a background watch loop
-    kept the tab blinking "waiting for you" while work continued).
-    """
-    return bool(payload.get("background_tasks")) or bool(
-        payload.get("session_crons"))
-
-
 def handle(ctx: HookContext) -> dict | None:
     if ctx.session is None or ctx.payload.get("agent_id"):
         return None
@@ -220,11 +205,12 @@ def handle(ctx: HookContext) -> dict | None:
         return _rotate_or_amcl(ctx, key, nnn, "ROTATING")
     # Normal turn end: this session now waits for the user's eyes. The
     # poller/animator blink the tab until the pane is focused (focus
-    # dwell consumes the entry); unattended dev loops never blink, and
-    # neither do sessions that paused over in-flight background work
-    # (they wake themselves when the work lands).
-    if (config.blink_reply(cfg) and not cfg.get("unattended")
-            and not _awaits_background(ctx.payload)):
+    # dwell consumes the entry); unattended dev loops never blink.
+    # Background-work pauses mark too (user ruling 2026-11-07: an
+    # answer delivered to an idle prompt must blink even with a shell
+    # still running): the settle window in ledger.reply_pending cancels
+    # the blink when the session wakes itself before the marker arms.
+    if config.blink_reply(cfg) and not cfg.get("unattended"):
         try:
             ledger.append(sdir, {"type": "reply_ready"})
         except OSError:

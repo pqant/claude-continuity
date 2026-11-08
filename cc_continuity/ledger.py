@@ -67,13 +67,29 @@ def blocked_reason(session_dir: str | Path) -> str | None:
     return blocked
 
 
-def reply_pending(session_dir: str | Path) -> float | None:
+# Entries that mean "the session woke itself and kept working": a Stop
+# whose reply is followed by any of these was never a wait for the user.
+_RESUME_TYPES = frozenset({"tool_use", "tool_failure", "task_created",
+                           "task_completed", "stop"})
+
+
+def reply_pending(session_dir: str | Path, *, settle: float = 0.0,
+                  now: float | None = None) -> float | None:
     """Ts of the latest UNCONSUMED ``reply_ready`` entry, or None.
 
     Written by the Stop hook when a turn ends waiting for the user;
     the tab blinks until read. A later main-session ``user_prompt``
     (no ``agent_id``) or a ``reply_read`` entry (the poller's focus
     dwell) consumes it; subagent prompts do not. Never raises.
+
+    Settle (user ruling 2026-11-07, opt-in via ``settle``): a reply
+    younger than the window is not reported yet, giving an
+    auto-continuation a chance to arrive. Any work/event entry newer
+    than the reply (a wake type in ``_RESUME_TYPES``) marks that the
+    session resumed on its own (background task, cron fire, late tool
+    run): the reply is then consumed silently, because a session that
+    wakes itself was never waiting for the user. ``now`` is injectable
+    for tests; ``settle=0`` keeps the raw read.
     """
     try:
         entries = read(session_dir)
@@ -86,6 +102,15 @@ def reply_pending(session_dir: str | Path) -> float | None:
             pending = entry.get("ts")
         elif (t == "user_prompt" and not entry.get("agent_id")) or t == "reply_read":
             pending = None
+    if pending is None:
+        return None
+    now = time.time() if now is None else now
+    if settle > 0 and now - pending < settle:
+        return None  # settling: an auto-continue may still land
+    for entry in entries:
+        if (entry.get("type") in _RESUME_TYPES
+                and (entry.get("ts") or 0) > pending):
+            return None  # woke itself: never a wait for the user
     return pending
 
 
