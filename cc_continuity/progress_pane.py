@@ -642,6 +642,11 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     _KEEP_REPLY = object()   # ledger unreadable this poll: change nothing
     _HOLD_REPLY = object()   # reply too young: keep the flag, stay dark
     reply_live = False
+    # ts of the unconsumed reply (str, "" when none): part of the
+    # watcher key so a SECOND reply with the same markers is a fresh
+    # unread key - the pane record's saved read survives restarts and
+    # would otherwise swallow every later reply of the same gate shape.
+    reply_id = ""
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -690,9 +695,11 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                         flag = None
                     if flag is None:
                         reply_live = False
+                        reply_id = ""
                     else:
                         sd = flag.get("session_dir")
                         settle = float(flag.get("settle", 0.0))
+                        raw = None
                         try:
                             r = (reply_read(sd, settle, t)
                                  if sd else None)
@@ -708,7 +715,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                                 # incident 2026-11-08 11:37: connector
                                 # answer armed at 11:37:06, flag cleared
                                 # within a second, tab never lit).
-                                if reply_read(sd, 0.0, t) is not None:
+                                raw = reply_read(sd, 0.0, t)
+                                if raw is not None:
                                     r = _HOLD_REPLY
                         except Exception:
                             r = _KEEP_REPLY
@@ -716,14 +724,17 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                             pass  # transient ledger failure: hold last state
                         elif r is _HOLD_REPLY:
                             reply_live = False  # hold the flag, no blink yet
+                            reply_id = repr(raw)
                         elif r is None or not sd:
                             reply_live = False
+                            reply_id = ""
                             try:
                                 flag_clear(window_id or "")
                             except Exception:
                                 pass
                         else:
                             reply_live = True
+                            reply_id = repr(r)
                 paint_text = cur_text
                 if reply_live and blink.MARKER_REPLY not in (paint_text or ""):
                     paint_text = (paint_text or "") + " " + blink.MARKER_REPLY
@@ -736,8 +747,14 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 # The focus probes run only on this ~1 s cadence.
                 gate = tuple(m in (paint_text or "")
                              for m in blink.GATE_MARKERS)
+                # reply_id (the unconsumed reply's ts, "" when none)
+                # makes every fresh reply a NEW unread key even under
+                # identical markers; the ts never churns for the same
+                # reply, so the dwell-stability intent of the
+                # gate-stable key survives.
                 src = "|".join(repr(p) for p in (gate,
-                                                 pane_text is not None) if p)
+                                                 pane_text is not None,
+                                                 reply_id) if p)
                 try:
                     suppressed = watcher.tick(t, src)
                 except Exception:

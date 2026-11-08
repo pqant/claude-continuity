@@ -582,6 +582,53 @@ def test_animator_reply_flag_held_through_settle(cc_home, monkeypatch):
     assert "\U0001F550 REPLY" in _visible(written[-1].decode("utf-8"))
 
 
+def test_animator_reply_gate_key_carries_reply_ts(cc_home, monkeypatch):
+    # The saved read lives in the pane record and survives both animator
+    # restarts and separate replies. With a gate-tuple-only key, a second
+    # reply that paints the SAME markers matched the first reply's stored
+    # read and stayed dark forever (live 2026-11-08: blink-@7-read preset
+    # '(False, False, True)|True' would have swallowed the 11:37 connector
+    # answer). The watcher key must carry the unconsumed reply's ts so
+    # every fresh reply is genuinely unread.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(progress_pane.blink, "list_client_ttys",
+                        lambda *a, **k: {"/dev/ttys001"})
+    fake = _FakeBlinkMod()
+    written = []
+    lines = []
+    ts_box = [100.0]
+
+    def ledger_like(sd, settle, now):
+        return None if now - ts_box[0] < settle else ts_box[0]
+
+    # two now() calls per frame: frames 0-19 poll at t=116 (reply ts
+    # 100 aged past settle), frames 20-49 poll at t=216 with a NEW reply
+    # (ts 200, also aged out) under the identical marker gate
+    state = {"n": 0}
+
+    def clock():
+        state["n"] += 1
+        if state["n"] == 41:
+            ts_box[0] = 200.0
+        return 116.0 if state["n"] <= 40 else 216.0
+
+    def flag_read(w):
+        return {"session_dir": "SD", "ts": ts_box[0], "settle": 15.0}
+
+    progress_pane.run_animator(
+        "12", _frames=50, _write=written.append, _now=clock,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=1,
+        _focus_log=lines.append,
+        _reply_flag_read=flag_read,
+        _reply_pending=ledger_like,
+        _reply_flag_clear=lambda w: None)
+    keys = [ln.split("key=", 1)[1] for ln in lines if "key=" in ln]
+    assert any("100.0" in k for k in keys)   # first reply: ts in key
+    assert any("200.0" in k for k in keys)   # second reply: fresh key
+
+
 def test_animator_no_flag_no_marker(cc_home, monkeypatch):
     # No flag armed (default reader finds nothing): behavior is exactly
     # the pre-flag animator - zero clear calls, zero markers.
