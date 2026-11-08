@@ -561,3 +561,29 @@ def test_plain_stop_missing_background_fields_still_marks(cc_home, capsys,
     repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
     run_hook("Stop", payload("Stop", repo))
     assert "reply_ready" in _types(paths.session_dir(key, nnn))
+
+
+def test_plain_stop_arms_reply_flag(cc_home, capsys, tmp_path, monkeypatch):
+    # Measured live 2026-11-08: CC never re-renders the status line while
+    # idle, so the settle marker can never reach the progress-data file
+    # on its own. Stop additionally arms the per-window reply flag the
+    # mode-1 animator polls (the ledger stays the single truth).
+    armed = []
+    monkeypatch.setattr(
+        stop.blink, "write_reply_flag",
+        lambda sdir, *, settle: armed.append((str(sdir), settle)))
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo))
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))
+    assert armed == [(str(paths.session_dir(key, nnn)), 15.0)]
+
+
+def test_stop_reply_flag_failure_never_blocks(cc_home, capsys, tmp_path,
+                                              monkeypatch):
+    def boom(sdir, *, settle):
+        raise RuntimeError("tmux vanished mid-stop")
+    monkeypatch.setattr(stop.blink, "write_reply_flag", boom)
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo))
+    # the hook swallows flag-arm failures: blink never blocks a stop
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))

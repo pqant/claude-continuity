@@ -23,8 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .. import (blink_watch, checkpoint, config, ledger, notify, paths,
-                rotator, state, statusline, thresholds)
+from .. import (blink, blink_watch, checkpoint, config, ledger, notify,
+                paths, rotator, state, statusline, thresholds)
 from .common import HookContext, log_error
 
 AMCL_MESSAGE = "Checkpoint ready. Type /clear to continue automatically."
@@ -214,6 +214,16 @@ def handle(ctx: HookContext) -> dict | None:
         try:
             ledger.append(sdir, {"type": "reply_ready"})
         except OSError:
+            pass
+        # idle gap (measured live 2026-11-08): the status line never
+        # re-renders while CC waits, so the settle marker can never reach
+        # the progress-data file on its own. Arm the per-window reply
+        # flag the mode-1 animator polls through the ledger (blink.py).
+        # Silent on failure: the blink layer never blocks a stop.
+        try:
+            blink.write_reply_flag(sdir,
+                                   settle=config.blink_reply_settle(cfg))
+        except Exception:
             pass
     # poller self-heal (gap 2026-11-07: sessions started before the
     # poller shipped never got a SessionStart spawn): every plain turn

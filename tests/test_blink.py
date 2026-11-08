@@ -628,3 +628,46 @@ def test_focus_watcher_logs_rearm_on_key_change():
     assert w.tick(4.0, "K2") is False
     assert w.tick(5.0, "K2") is False
     assert w.tick(6.0, "K2") is True
+
+
+# ------------------------------------------------------- reply-flag artifact
+#
+# The idle status-line gap (measured live 2026-11-08): CC never re-renders
+# the status line while it waits, so the settle marker can never reach the
+# progress-data file on its own. The Stop hook arms a per-window reply
+# flag file; the mode-1 animator polls it and consults the ledger itself.
+# Server-tokenized like the progress-data files (two tmux servers both
+# have an @7).
+
+
+def test_reply_flag_roundtrip(cc_home, monkeypatch):
+    from cc_continuity import paths
+    monkeypatch.setenv("TMUX", "/tmp/sock,4242,1")
+    monkeypatch.setenv("TMUX_PANE", "%64")
+    runner, calls = _runner_factory(["@7\n"])
+    d = blink.write_reply_flag("/x/sdir", settle=15.0, runner=runner,
+                               bin_="tmux")
+    assert d is not None
+    assert d["session_dir"] == "/x/sdir"
+    assert d["settle"] == 15.0
+    assert (paths.runtime_dir() / "reply-flag-s4242@7.json").exists()
+    got = blink.read_reply_flag("@7")
+    assert got is not None and got["ts"] == d["ts"]
+    blink.clear_reply_flag("@7")
+    assert blink.read_reply_flag("@7") is None
+
+
+def test_reply_flag_guards(cc_home, monkeypatch):
+    # no TMUX, no TMUX_PANE or an unreadable window id: silent no-op, the
+    # Stop hook must never care
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("TMUX_PANE", "%64")
+    assert blink.write_reply_flag("/x", settle=15.0,
+                                  runner=_runner_factory([])[0]) is None
+    monkeypatch.setenv("TMUX", "/tmp/sock,1,1")
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    assert blink.write_reply_flag("/x", settle=15.0,
+                                  runner=_runner_factory([])[0]) is None
+    monkeypatch.setenv("TMUX_PANE", "%64")
+    assert blink.write_reply_flag("/x", settle=15.0,
+                                  runner=_failing_runner) is None

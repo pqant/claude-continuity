@@ -10,6 +10,8 @@ never on ``progress_pane`` or ``statusline``, so a blink failure can
 never drag the animator down.
 """
 
+import json
+import os
 import re
 import subprocess
 import time
@@ -145,6 +147,88 @@ def capture_pane(runner, bin_: str, target: str | None = None) -> str | None:
     if target is not None:
         argv += ["-t", target]
     return _tmux(runner, bin_, argv)
+
+
+def window_id_of_pane(runner, bin_: str, pane: str) -> str | None:
+    """The tmux window id (``@N``) owning ``pane``, or None."""
+    out = _tmux(runner, bin_, ["display-message", "-p", "-t", pane,
+                               "#{window_id}"])
+    return out if out and out.startswith("@") else None
+
+
+def server_token(env=os.environ.get) -> str:
+    """The ``$TMUX`` server token used for per-server artifact names.
+
+    Duplicated from ``progress_pane._tmux_server_token`` (three lines)
+    because the import rule keeps this module leaf-only; a drift between
+    the two would split a reply flag from its animator the way the
+    frozen-pane bug once split progress data across servers.
+    """
+    tmux = env("TMUX", "") or ""
+    parts = tmux.split(",")
+    if len(parts) >= 2 and parts[1].isdigit():
+        return f"s{parts[1]}"
+    return ""
+
+
+def _reply_flag_path(window_id, env=os.environ.get):
+    token = server_token(env)
+    if not token or not window_id:
+        return None
+    return paths.runtime_dir() / f"reply-flag-{token}{window_id}.json"
+
+
+def write_reply_flag(session_dir, *, settle=15.0, runner=subprocess.run,
+                     bin_: str = "tmux", env=os.environ.get,
+                     now=time.time):
+    """Arm the animator-side reply marker for THIS window (Stop hook side).
+
+    The idle status line never re-renders (measured live 2026-11-08), so
+    the settle marker can never reach the progress-data file on its own.
+    The hook drops this tiny flag; the animator then consults the LEDGER
+    through it (single source of truth, settle honored there). Silent on
+    every failure: the Stop hook must never block on the blink layer.
+    """
+    try:
+        pane = env("TMUX_PANE")
+        if not pane:
+            return None
+        win = window_id_of_pane(runner, bin_, pane)
+        if not win:
+            return None
+        p = _reply_flag_path(win, env)
+        if p is None:
+            return None
+        data = {"session_dir": str(session_dir), "ts": float(now()),
+                "settle": float(settle)}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(p)
+        return data
+    except Exception:
+        return None
+
+
+def read_reply_flag(window_id, *, env=os.environ.get):
+    """The armed reply flag for ``window_id`` (dict), or None."""
+    try:
+        p = _reply_flag_path(window_id, env)
+        if p is None:
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def clear_reply_flag(window_id, *, env=os.environ.get) -> None:
+    """Drop the reply flag (the ledger consumed the reply, or it vanished)."""
+    try:
+        p = _reply_flag_path(window_id, env)
+        if p is not None:
+            p.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def write_tty(path: str, data: bytes, *, _open=open) -> bool:

@@ -486,6 +486,77 @@ def test_animator_stalls_end_the_loop(cc_home):
     assert len(calls) == 1, "animation stopped at the stalled frame"
 
 
+def test_animator_injects_reply_flag_marker(cc_home, monkeypatch):
+    # Idle status-line gap (measured live 2026-11-08): while CC waits for
+    # the user it never re-renders the status line, so the settle marker
+    # can never reach the progress-data file (the connector sat 13 min
+    # with a frozen @7 data file and a dark tab). The Stop hook arms a
+    # per-window reply flag; the animator's ~1 s blink poll consults the
+    # ledger through it (ledger stays the single truth) and injects
+    # MARKER_REPLY into BOTH the blinker gate and the painted frame.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    cleared = []
+    seen = []
+
+    def reply_read(sd, settle, now):
+        seen.append((sd, settle, now))
+        return 1.0
+
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _reply_flag_read=lambda w: {"session_dir": "SD", "ts": 1.0,
+                                    "settle": 15.0},
+        _reply_pending=reply_read,
+        _reply_flag_clear=lambda w: cleared.append(w))
+    assert seen and seen[0][0] == "SD" and seen[0][1] == 15.0
+    assert "\U0001f550 REPLY" in _visible(written[-1].decode("utf-8"))
+    assert not cleared
+    # the blinker gate saw the marker too
+    assert any("\U0001f550 REPLY" in t for t, _ts, _p in fake.made[0].texts)
+
+
+def test_animator_clears_consumed_reply_flag(cc_home, monkeypatch):
+    # The ledger says the reply is consumed (a work-type entry newer than
+    # the reply, or the user answered): the flag dies with it and no
+    # frame may carry the marker.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    cleared = []
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _reply_flag_read=lambda w: {"session_dir": "SD", "ts": 1.0,
+                                    "settle": 15.0},
+        _reply_pending=lambda sd, settle, now: None,
+        _reply_flag_clear=lambda w: cleared.append(w))
+    assert cleared and all(w == "12" for w in cleared)
+    assert all("\U0001f550 REPLY" not in _visible(b.decode("utf-8"))
+               for b in written)
+
+
+def test_animator_no_flag_no_marker(cc_home, monkeypatch):
+    # No flag armed (default reader finds nothing): behavior is exactly
+    # the pre-flag animator - zero clear calls, zero markers.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    cleared = []
+    written = []
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _reply_flag_clear=lambda w: cleared.append(w))
+    assert not cleared
+    assert all("\U0001f550 REPLY" not in _visible(b.decode("utf-8"))
+               for b in written)
+
+
 def test_animator_follows_terminal_resize(cc_home):
     # the terminal (and thus the pane) can be resized while the animator
     # runs: the frame width must be re-read every frame, or a frame wider

@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 
-from . import atomic, blink, config, paths
+from . import atomic, blink, config, ledger, paths
 from .statusline import _RAINBOW, _SHIMMER
 
 #: Window ids are tmux-generated (``@12``); restrict what we splice into
@@ -472,7 +472,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _blink_poll=20, _frontmost_tty=None,
                  _dwell_ticks=3, _focus_log=blink._debug_line,
                  _build_stamp=None, _build_poll=20,
-                 _restart=None) -> None:
+                 _restart=None, _reply_flag_read=None,
+                 _reply_flag_clear=None, _reply_pending=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -623,6 +624,23 @@ def run_animator(window_id: str | None = None, *, _frames=None,
         base_stamp = None
     restarting = False
     suppressed = False
+    # reply-flag poll (idle gap, measured live 2026-11-08): CC never
+    # re-renders the status line while it waits, so the settle marker can
+    # never reach the data file on its own. The Stop hook arms a
+    # per-window flag (blink.write_reply_flag); every ~1 s we ask the
+    # LEDGER through it - the flag only names the session, the ledger
+    # stays the single truth (settle honored in ledger.reply_pending).
+    reply_enabled = (config.blink_enabled(cfg) and config.blink_reply(cfg)
+                     and not cfg.get("unattended"))
+    flag_read = (_reply_flag_read if _reply_flag_read is not None
+                 else blink.read_reply_flag)
+    flag_clear = (_reply_flag_clear if _reply_flag_clear is not None
+                  else blink.clear_reply_flag)
+    reply_read = (_reply_pending if _reply_pending is not None
+                  else (lambda sd, settle, now_: ledger.reply_pending(
+                      sd, settle=settle, now=now_)))
+    _KEEP_REPLY = object()
+    reply_live = False
     try:
         cur_text = text_fn()
         cur_mtime = mtime_fn()
@@ -664,6 +682,33 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     cap = None
                 if cap is not None:
                     pane_text = cap
+                if reply_enabled:
+                    try:
+                        flag = flag_read(window_id or "")
+                    except Exception:
+                        flag = None
+                    if flag is None:
+                        reply_live = False
+                    else:
+                        sd = flag.get("session_dir")
+                        try:
+                            r = (reply_read(sd, float(flag.get("settle", 0.0)),
+                                            t) if sd else None)
+                        except Exception:
+                            r = _KEEP_REPLY
+                        if r is _KEEP_REPLY:
+                            pass  # transient ledger failure: hold last state
+                        elif r is None or not sd:
+                            reply_live = False
+                            try:
+                                flag_clear(window_id or "")
+                            except Exception:
+                                pass
+                        else:
+                            reply_live = True
+                paint_text = cur_text
+                if reply_live and blink.MARKER_REPLY not in (paint_text or ""):
+                    paint_text = (paint_text or "") + " " + blink.MARKER_REPLY
                 # gate-stable key over both gate sources: what re-arms
                 # the blink is WHICH markers are painted and whether a
                 # dialog is present, never the raw text. Raw text would
@@ -671,7 +716,7 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 # in the captured region) reset the dwell forever while
                 # the user stares at the tab they already acknowledged.
                 # The focus probes run only on this ~1 s cadence.
-                gate = tuple(m in (cur_text or "")
+                gate = tuple(m in (paint_text or "")
                              for m in blink.GATE_MARKERS)
                 src = "|".join(repr(p) for p in (gate,
                                                  pane_text is not None) if p)
@@ -679,13 +724,17 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     suppressed = watcher.tick(t, src)
                 except Exception:
                     suppressed = False
+            else:
+                paint_text = cur_text
+                if reply_live and blink.MARKER_REPLY not in (paint_text or ""):
+                    paint_text = (paint_text or "") + " " + blink.MARKER_REPLY
             if suppressed:
                 # hold the suppression across the frames between polls:
                 # re-feeding the gated text every frame would re-start
                 # the blink the tick before the next focus check
                 blinker.on_text("", t, pane_text=None)
             else:
-                blinker.on_text(cur_text, t, pane_text=pane_text)
+                blinker.on_text(paint_text, t, pane_text=pane_text)
             if not skipped:
                 # \x1b[H homes to row 1 col 1 every frame: \r alone can't
                 # recover a pty cursor that a resize-race wrap dropped to
@@ -693,7 +742,7 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 # rainbow line). \x1b[J then erases any wrapped tail/stale
                 # rows. A skipped frame writes nothing: the last good
                 # frame simply stays on screen.
-                write_all(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
+                write_all(("\x1b[H\x1b[2K" + _frame(width, paint_text, t)
                            + "\x1b[0m\x1b[J").encode("utf-8"))
             i += 1
             # Orphan guard: when the main pane dies (claude is the pane's
