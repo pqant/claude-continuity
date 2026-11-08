@@ -540,6 +540,48 @@ def test_animator_clears_consumed_reply_flag(cc_home, monkeypatch):
                for b in written)
 
 
+def test_animator_reply_flag_held_through_settle(cc_home, monkeypatch):
+    # Live incident 2026-11-08 11:37: the Stop hook armed the flag with
+    # a 15 s settle window; while the reply was still young the ledger
+    # answered None (settle semantics) and the animator read that as
+    # "done waiting" and CLEARED the flag - the blink for a genuine
+    # reply was killed before it could ever start. A settling reply
+    # must HOLD the flag (no marker, no clear) and blink once the reply
+    # ages past settle.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    cleared = []
+    written = []
+
+    def ledger_like(sd, settle, now):
+        # the real ledger.reply_pending contract: a reply younger than
+        # the settle window reports nothing; once aged out it reports ts
+        return None if now - 100.0 < settle else 100.0
+
+    # two now() calls per frame (t and t2); blink polls fire at frame
+    # 0 (t=105, reply 5 s old: settling) and frame 20 (t=120: aged out)
+    state = {"n": 0}
+
+    def clock():
+        state["n"] += 1
+        return 105.0 if state["n"] <= 40 else 120.0
+
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=clock,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _reply_flag_read=lambda w: {"session_dir": "SD", "ts": 100.0,
+                                    "settle": 15.0},
+        _reply_pending=ledger_like,
+        _reply_flag_clear=lambda w: cleared.append(w))
+    assert not cleared                      # settling: hold, never clear
+    # frames during the window carry no marker...
+    assert all("\U0001F550 REPLY" not in _visible(b.decode("utf-8"))
+               for b in written[:20])
+    # ...and once aged out the marker paints
+    assert "\U0001F550 REPLY" in _visible(written[-1].decode("utf-8"))
+
+
 def test_animator_no_flag_no_marker(cc_home, monkeypatch):
     # No flag armed (default reader finds nothing): behavior is exactly
     # the pre-flag animator - zero clear calls, zero markers.

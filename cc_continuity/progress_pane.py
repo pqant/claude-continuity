@@ -639,7 +639,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     reply_read = (_reply_pending if _reply_pending is not None
                   else (lambda sd, settle, now_: ledger.reply_pending(
                       sd, settle=settle, now=now_)))
-    _KEEP_REPLY = object()
+    _KEEP_REPLY = object()   # ledger unreadable this poll: change nothing
+    _HOLD_REPLY = object()   # reply too young: keep the flag, stay dark
     reply_live = False
     try:
         cur_text = text_fn()
@@ -691,13 +692,30 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                         reply_live = False
                     else:
                         sd = flag.get("session_dir")
+                        settle = float(flag.get("settle", 0.0))
                         try:
-                            r = (reply_read(sd, float(flag.get("settle", 0.0)),
-                                            t) if sd else None)
+                            r = (reply_read(sd, settle, t)
+                                 if sd else None)
+                            if r is None and sd and settle > 0:
+                                # None is ambiguous: still settling (the
+                                # reply is younger than the window, an
+                                # auto-continue may land) or truly
+                                # gone (consumed / self-woken). A raw
+                                # settle=0 read tells them apart. A
+                                # settling reply HOLDS the flag: killing
+                                # it here buried every genuine reply
+                                # blink younger than the window (live
+                                # incident 2026-11-08 11:37: connector
+                                # answer armed at 11:37:06, flag cleared
+                                # within a second, tab never lit).
+                                if reply_read(sd, 0.0, t) is not None:
+                                    r = _HOLD_REPLY
                         except Exception:
                             r = _KEEP_REPLY
                         if r is _KEEP_REPLY:
                             pass  # transient ledger failure: hold last state
+                        elif r is _HOLD_REPLY:
+                            reply_live = False  # hold the flag, no blink yet
                         elif r is None or not sd:
                             reply_live = False
                             try:
