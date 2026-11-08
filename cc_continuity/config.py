@@ -251,17 +251,18 @@ def blink_reply(cfg: dict) -> bool:
 def blink_reply_settle(cfg: dict) -> float:
     """Seconds a finished turn stays quiet before the reply blink arms.
 
-    ``blink_reply_settle``: default 15 s (user ruling 2026-11-07). The
-    Stop hook always marks reply_ready; the blink gate hides a younger
-    marker, and any ledger activity after it (an auto-continuation:
-    background task wake, cron fire, tool run) consumes it silently,
-    so a session that wakes itself never blinks. ``0`` disables the
-    delay. Clamped to [0, 120]; a missing key or invalid value (non-
-    numeric, bool) degrades to 15.
+    ``blink_reply_settle``: default 5 s (user ruling 2026-11-08: shipped
+    at 15 s on 2026-11-07, shortened after live acceptance felt slow).
+    The Stop hook always marks reply_ready; the blink gate hides a
+    younger marker, and any ledger activity after it (an
+    auto-continuation: background task wake, cron fire, tool run)
+    consumes it silently, so a session that wakes itself never blinks.
+    ``0`` disables the delay. Clamped to [0, 120]; a missing key or
+    invalid value (non-numeric, bool) degrades to the default.
     """
-    v = cfg.get("blink_reply_settle", 15.0)
+    v = cfg.get("blink_reply_settle", 5.0)
     if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return 15.0
+        return 5.0
     return min(max(float(v), 0.0), 120.0)
 
 

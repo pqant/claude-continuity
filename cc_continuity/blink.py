@@ -178,7 +178,7 @@ def _reply_flag_path(window_id, env=os.environ.get):
     return paths.runtime_dir() / f"reply-flag-{token}{window_id}.json"
 
 
-def write_reply_flag(session_dir, *, settle=15.0, runner=subprocess.run,
+def write_reply_flag(session_dir, *, settle=5.0, runner=subprocess.run,
                      bin_: str = "tmux", env=os.environ.get,
                      now=time.time):
     """Arm the animator-side reply marker for THIS window (Stop hook side).

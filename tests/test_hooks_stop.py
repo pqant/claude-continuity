@@ -575,7 +575,7 @@ def test_plain_stop_arms_reply_flag(cc_home, capsys, tmp_path, monkeypatch):
     repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
     run_hook("Stop", payload("Stop", repo))
     assert "reply_ready" in _types(paths.session_dir(key, nnn))
-    assert armed == [(str(paths.session_dir(key, nnn)), 15.0)]
+    assert armed == [(str(paths.session_dir(key, nnn)), 5.0)]
 
 
 def test_stop_reply_flag_failure_never_blocks(cc_home, capsys, tmp_path,

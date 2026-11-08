@@ -125,7 +125,7 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
     user) blinks the tab WITHOUT needing status line renders. Replying
     is not required; a later main-session user prompt also consumes the
     entry. A fresh reply additionally waits out a settle window
-    (``blink_reply_settle``, default 15 s, user ruling 2026-11-07):
+    (``blink_reply_settle``, default 5 s, user ruling 2026-11-08):
     a session that wakes itself within it (background task wake, cron
     fire) was never waiting for the user and never blinks.
 
