@@ -502,6 +502,26 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     loop (tests).
     """
     write = _write if _write is not None else (lambda b: os.write(1, b))
+
+    def write_all(b: bytes) -> None:
+        # os.write to a pty can flush PARTIALLY under backpressure (live
+        # sampler 2026-11-08: frame prefixes stuck on screen at 47/97/147
+        # bytes during a tool burst; the lone "·" is the one-cell case).
+        # The old code ignored the return value and dropped the tail: the
+        # pane stayed collapsed until a later tick re-painted it - longer
+        # while the width-jump guard skipped frames. Re-send the remainder
+        # until every byte is accepted; a pty that stops accepting
+        # anything is an I/O failure like any other (the run ends, the
+        # pane self-heals). Seam fakes returning None mean "full write"
+        # (the append-based test fakes).
+        off = 0
+        while off < len(b):
+            n = write(b[off:])
+            if n is None:
+                break
+            if n <= 0:
+                raise OSError(f"pty write stalled at {off}/{len(b)} bytes")
+            off += n
     now = _now if _now is not None else time.time
     size = (_size if _size is not None
             else (lambda: shutil.get_terminal_size((80, 1))))
@@ -673,8 +693,8 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 # rainbow line). \x1b[J then erases any wrapped tail/stale
                 # rows. A skipped frame writes nothing: the last good
                 # frame simply stays on screen.
-                write(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
-                       + "\x1b[0m\x1b[J").encode("utf-8"))
+                write_all(("\x1b[H\x1b[2K" + _frame(width, cur_text, t)
+                           + "\x1b[0m\x1b[J").encode("utf-8"))
             i += 1
             # Orphan guard: when the main pane dies (claude is the pane's
             # own process — both the launch layer and the demo run it that

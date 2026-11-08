@@ -439,6 +439,53 @@ def test_animator_writes_full_width_frames(cc_home):
     assert _visible(written[0].decode("utf-8")).startswith("◆ 9% ok")
 
 
+def test_animator_retries_partial_pty_writes(cc_home):
+    # Lone-dot bug (live sampler 2026-11-08, 01:06-01:07 during a tool
+    # burst): os.write to a pty under backpressure can return SHORT, and
+    # the old code ignored the return value - the tail bytes were dropped
+    # and the pane kept only the frame prefix (measured live at 47/97/147
+    # bytes; a lone "·" is the one-cell case). The pane stayed collapsed
+    # until the next tick, longer while the width-jump guard skipped
+    # re-paints. Every byte must be re-sent until the kernel accepts it.
+    chunks = []
+
+    def partial(b):
+        n = min(40, len(b))
+        chunks.append(bytes(b[:n]))
+        return n
+
+    progress_pane.run_animator(
+        _frames=1, _write=partial, _now=lambda: 0.0,
+        _size=lambda: _size_obj(60), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None)
+    assert chunks, "animator wrote nothing"
+    full = b"".join(chunks)
+    assert full.startswith(b"\x1b[H\x1b[2K")
+    assert full.endswith(b"\x1b[0m\x1b[J")
+    # every cell landed: the reassembled stream paints a full 60-cell line
+    assert len(_visible(full.decode("utf-8"))) == 60
+
+
+def test_animator_stalls_end_the_loop(cc_home):
+    # A pty that accepts bytes then stops (write returns 0) is an I/O
+    # failure like any other: the animator must exit so the pane dies and
+    # the status line self-heal recreates it - never spin on the same
+    # chunk forever.
+    calls = []
+
+    def stall(b):
+        calls.append(len(b))
+        return 0  # kernel accepts nothing: a stalled pty
+
+    progress_pane.run_animator(
+        _frames=5, _write=stall, _now=lambda: 0.0,
+        _size=lambda: _size_obj(60), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None)
+    # the stall ends the run on the first frame: the old code ignored the
+    # return value and would have "painted" all 5 frames on a dead pty
+    assert len(calls) == 1, "animation stopped at the stalled frame"
+
+
 def test_animator_follows_terminal_resize(cc_home):
     # the terminal (and thus the pane) can be resized while the animator
     # runs: the frame width must be re-read every frame, or a frame wider
