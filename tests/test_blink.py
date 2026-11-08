@@ -500,15 +500,41 @@ def test_focus_watcher_dwell_suppresses_and_persists():
     assert w2.tick(3.0, "K") is True
 
 
-def test_focus_watcher_new_key_is_unread_again():
+def test_focus_watcher_focused_key_change_suppresses_immediately():
+    # USER DIRECTIVE 2026-11-08 (screen recordings 06:19/06:33): the reply
+    # blink flashed the tab the user was ALREADY looking at, then fell
+    # silent 2-3 s later when the dwell caught up. A new waiting situation
+    # that arrives while the tab is focused is read on the spot: the dwell
+    # measured since the watcher's FIRST key (an already-blinking
+    # situation) stays as the short-glance guard, untouched.
+    store = _store_dict()
+    seen = []
+    w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=3,
+                           log=None)
+    assert w.tick(0.0, "K1") is False         # first key: glance guard
+    assert w.tick(1.0, "K1") is False
+    assert w.tick(2.0, "K1") is True          # dwell reached for K1
+    # a new reply lands while the user keeps looking: no flash at all
+    assert w.tick(3.0, "K2", on_read=seen.append) is True
+    assert store("read") == "K2"
+    assert seen == ["K2"]
+
+
+def test_focus_watcher_new_key_is_unread_when_not_focused():
     store = _store_dict()
     w = blink.FocusWatcher(store, frontmost=lambda: "/dev/ttys001",
                            clients=lambda: {"/dev/ttys001"}, dwell_ticks=2,
                            log=None)
     assert w.tick(0.0, "K1") is False         # focused 1
     assert w.tick(1.0, "K1") is True          # read K1
-    assert w.tick(2.0, "K2") is False         # new question: re-blink
-    assert w.tick(3.0, "K2") is True          # dwell again for K2
+    # user leaves the tab: a new question must get its blink
+    w._frontmost = lambda: "/dev/ttys009"
+    assert w.tick(2.0, "K2") is False         # not focused: re-blink
+    # and when focus returns, dwell guards the short glance
+    w._frontmost = lambda: "/dev/ttys001"
+    assert w.tick(3.0, "K2") is False         # arrival tick
+    assert w.tick(4.0, "K2") is True          # dwell again for K2
     assert store("read") == "K2"
 
 
@@ -621,13 +647,12 @@ def test_focus_watcher_logs_rearm_on_key_change():
                            clients=lambda: {"/dev/ttys001"},
                            dwell_ticks=5, label="@1", log=lines.append)
     assert w.tick(1.0, "K1") is False
-    assert w.tick(2.0, "K2") is False         # key change while focused
+    # key change while focused: rearm logged AND suppressed on the spot
+    # (2026-11-08 directive: never flash the tab the user is looking at)
+    assert w.tick(2.0, "K2") is True
     assert any("rearm" in l and "'K2'" in l for l in lines)
-    # dwell restarted on K2: suppress at tick 6 (2..6)
-    assert w.tick(3.0, "K2") is False
-    assert w.tick(4.0, "K2") is False
-    assert w.tick(5.0, "K2") is False
-    assert w.tick(6.0, "K2") is True
+    assert any("suppress " in l and "'K2'" in l for l in lines)
+    assert w.tick(3.0, "K2") is True          # stored read holds
 
 
 # ------------------------------------------------------- reply-flag artifact

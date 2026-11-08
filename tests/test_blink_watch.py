@@ -446,11 +446,14 @@ def test_watch_reply_self_fades_without_focus_capability(cc_home, monkeypatch):
     assert text == ""
 
 
-# ------------------------------------------------- focus dwell v2 re-arm
+# ------------------------------------------------- focus dwell v3 re-arm
 #
-# User directive 2026-11-07: focus silences EVERY blink source, and a new
-# event (new needs-human reason, new dialog region, fresh reply ts) must
-# re-arm the blink even while the tab stays focused.
+# User directive 2026-11-07: focus silences EVERY blink source.
+# User directive 2026-11-08 (screen recordings 06:19/06:33, supersedes the
+# focused half of the 11-07 rule): a new event (new needs-human reason, new
+# dialog region, fresh reply ts) that lands while the tab is ALREADY focused
+# is read on the spot and must NOT flash the foreground tab; the same event
+# must still re-arm the blink while the user is not looking.
 
 import pytest
 
@@ -464,7 +467,7 @@ def _no_real_focus_probe(monkeypatch):
                         lambda window_id, runner, bin_: set())
 
 
-def test_watch_needs_human_reblinks_on_new_reason(cc_home, monkeypatch):
+def test_watch_needs_human_new_reason_stays_silent_when_focused(cc_home, monkeypatch):
     reasons = iter(["deploy approval", "deploy approval", "merge conflict"])
     monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
                         lambda d: next(reasons))
@@ -474,12 +477,30 @@ def test_watch_needs_human_reblinks_on_new_reason(cc_home, monkeypatch):
                frontmost=lambda: "/dev/ttys001",
                clients=lambda: {"/dev/ttys001"})
     b = fake.made[0]
+    assert blink.MARKER_BLOCKED in b.ticks[0][0]    # first reason blinks once
+    assert b.ticks[1] == ("", None)                 # dwell reached: silent
+    assert b.ticks[2] == ("", None)                 # new reason while focused:
+    #                                               # read on the spot, no flash
+
+
+def test_watch_needs_human_new_reason_reblinks_when_not_focused(cc_home, monkeypatch):
+    reasons = iter(["deploy approval", "deploy approval", "merge conflict"])
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
+                        lambda d: next(reasons))
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: None)
+    fronts = iter(["/dev/ttys001", "/dev/ttys001", None])
+    fake = _FakeBlinkMod(captures=[None, None, None])
+    _run_watch(fake, ticks=3, dwell=2,
+               frontmost=lambda: next(fronts),
+               clients=lambda: {"/dev/ttys001"})
+    b = fake.made[0]
     assert blink.MARKER_BLOCKED in b.ticks[0][0]    # first reason blinks
     assert b.ticks[1] == ("", None)                 # dwell reached: silent
-    assert blink.MARKER_BLOCKED in b.ticks[2][0]    # new reason re-arms
+    # user looked away and a new reason landed: it must call again
+    assert blink.MARKER_BLOCKED in b.ticks[2][0]
 
 
-def test_watch_ask_region_reblinks_on_new_dialog(cc_home, monkeypatch):
+def test_watch_ask_region_new_dialog_stays_silent_when_focused(cc_home, monkeypatch):
     region_b = ("❯ 1. (B) stay\n"
                 "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
                 + "─" * 40)
@@ -494,7 +515,29 @@ def test_watch_ask_region_reblinks_on_new_dialog(cc_home, monkeypatch):
     assert b.ticks[0][1] == _DIALOG_REGION   # live dialog blinks while unread
     assert b.ticks[1] == ("", None)          # dwell reached: silent
     assert b.ticks[2] == ("", None)          # same region stays silent
-    assert b.ticks[3][1] == region_b         # new dialog: re-arms
+    assert b.ticks[3] == ("", None)          # new dialog while focused:
+    #                                         # read on the spot, no flash
+
+
+def test_watch_ask_region_new_dialog_reblinks_when_not_focused(cc_home, monkeypatch):
+    region_b = ("❯ 1. (B) stay\n"
+                "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+                + "─" * 40)
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason", lambda d: None)
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending", lambda d, **kw: None)
+    # one probe per tick EXCEPT the store-hit tick (the stored read
+    # short-circuits before the probe): 3 calls for 4 ticks
+    fronts = iter(["/dev/ttys001", "/dev/ttys001", None])
+    fake = _FakeBlinkMod(captures=[_DIALOG_REGION, _DIALOG_REGION,
+                                   _DIALOG_REGION, region_b])
+    _run_watch(fake, ticks=4, dwell=2,
+               frontmost=lambda: next(fronts),
+               clients=lambda: {"/dev/ttys001"})
+    b = fake.made[0]
+    assert b.ticks[0][1] == _DIALOG_REGION   # live dialog blinks while unread
+    assert b.ticks[1] == ("", None)          # dwell reached: silent
+    assert b.ticks[2] == ("", None)          # same region stays silent
+    assert b.ticks[3][1] == region_b         # new dialog after look-away: re-arms
 
 
 # ------------------------------------------------------------ reply settle

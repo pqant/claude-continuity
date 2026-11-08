@@ -523,11 +523,17 @@ class FocusWatcher:
             self._last_key = key
             return False
         if key != self._last_key:
-            # a fresh waiting situation always gets its blink first: the
-            # dwell measures continuous focus ON THE SAME key, otherwise
-            # a focused idler would never see a new reply or question
-            self._dwell = 0
+            # USER DIRECTIVE 2026-11-08 (screen recordings 06:19/06:33):
+            # a fresh situation that lands while the user ALREADY looks at
+            # the tab is read on the spot (dwell armed so this same tick
+            # suppresses) - the old grace flashed the foreground tab for
+            # 2-3 s before the dwell caught up. The dwell still measures
+            # continuous focus on an already-known key (the short-glance
+            # guard survives), and a watcher that never observed any key
+            # yet (respawn mid-blink: last_key None) still blinks first.
             self._note("rearm", key)
+            self._dwell = (self._dwell_ticks - 1
+                           if self._last_key is not None else 0)
             self._last_key = key
         self._dwell += 1
         if self._dwell < self._dwell_ticks:

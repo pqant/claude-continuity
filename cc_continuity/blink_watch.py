@@ -209,8 +209,11 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
             # composite key (FocusWatcher): blocked reason, reply ts and the
             # pane region. A changed key (new needs-human reason, new
             # dialog, fresh reply) reads as unread and re-arms the blink
-            # even while the tab stays focused; per-part repr keeps reason
-            # and region text from ever colliding across the join.
+            # while the user is NOT looking; a change that lands while the
+            # tab is focused is read on the spot (user directive 2026-11-08:
+            # the tab the user watches must never flash); per-part repr
+            # keeps reason and region text from ever colliding across the
+            # join.
             key = "|".join(repr(p) for p in
                            (blocked,
                             repr(reply) if reply is not None else "",
