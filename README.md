@@ -26,26 +26,22 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
-- **2026-11-06** — Handoffs export the session transcript as a readable
-  HTML page (search, theme toggle) plus raw JSONL, and the successor
-  session echoes a clickable `Transcript:` link in its navigator panel
-  ([issue #8](https://github.com/pqant/claude-continuity/commit/a5a8b36)).
-- **2026-11-05** — Notification pushes got richer: project, host, model
-  and context ratio plus the session's objective, next step and what the
-  agent last said, with secrets scrubbed on the way out
-  ([issue #7](https://github.com/pqant/claude-continuity/commit/393d083)).
-- **2026-11-05** — The first output of a rotated session is now a
-  Done/Next navigator panel rendered from the handoff, so you always see
-  where the work picked up
-  ([issue #6](https://github.com/pqant/claude-continuity/commit/67f189b)).
-- **2026-11-03** — Rotation resume guarantee: the rotator retries until
-  the successor genuinely resumes (ack-driven keystrokes) instead of
-  giving up after two blind attempts
-  ([commit](https://github.com/pqant/claude-continuity/commit/4592b12)).
-- **2026-11-03** — Session index stability: a restart after a stalled
-  rotation reuses the orphaned successor and its number instead of
-  minting a new session index
-  ([commit](https://github.com/pqant/claude-continuity/commit/27f4d1a)).
+- **2026-11-08**: An interactive architecture diagram of the whole system
+  (modules, dependencies and data flows) now ships in `docs/diagrams` as a
+  self-contained HTML page with guided views and export
+  ([commit](https://github.com/pqant/claude-continuity/commit/5ae9011)).
+- **2026-11-08**: The waiting tab blink now starts after a 5 s settle
+  window instead of 15 s, so a finished turn reaches your tab faster
+  ([commit](https://github.com/pqant/claude-continuity/commit/a9a295d)).
+- **2026-11-08**: Progress frames are padded by rendered cells, so wide
+  glyphs never wrap into the next line
+  ([commit](https://github.com/pqant/claude-continuity/commit/581fe93)).
+- **2026-11-08**: The animator blink key carries the unconsumed reply ts,
+  so a reply arriving mid-blink is still delivered
+  ([commit](https://github.com/pqant/claude-continuity/commit/54494b4)).
+- **2026-11-08**: The reply flag is held through the settle window instead
+  of being cleared early
+  ([commit](https://github.com/pqant/claude-continuity/commit/581ff6f)).
 
 ## How it works
 

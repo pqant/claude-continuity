@@ -4,6 +4,25 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
+### Added
+
+- Architecture documentation: `docs/diagrams/cc-continuity-architecture.html`,
+  a self-contained interactive diagram of modules, dependencies and data
+  flows with guided views, dark/light themes and PNG/SVG export, plus its
+  source spec `cc-continuity-architecture.architecture.json`.
+
+### Fixed
+
+- Tab blink notifications (issues #20 to #23): a fresh waiting situation is
+  suppressed instantly when the tab is already focused; the reply flag is
+  held through the settle window instead of being cleared early; the
+  animator blink key carries the unconsumed reply ts; and the default
+  reply settle window is now 5 s instead of 15 s.
+- Progress pane: frames are padded by rendered cells so wide glyphs never
+  wrap.
+
 ## [0.3.0] - 2026-11-07
 
 ### Added
