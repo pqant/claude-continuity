@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 
 from . import atomic, blink, config, ledger, paths
 from .statusline import _RAINBOW, _SHIMMER
@@ -67,23 +68,44 @@ _PANE_RECORD_NAME = "progress-pane.json"
 # ------------------------------------------------------------------ _frame
 
 
+def _cell_w(ch: str) -> int:
+    """Rendered cells for one char: East-Asian Wide/Fullwidth cover 2."""
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
 def _frame(width: int, text: str, now: float) -> str:
     """One full-width progress line at wall clock ``now`` (PURE).
 
-    ``text`` is left-justified; the remainder is padded with ``·``. Char
-    ``i`` renders ``_RAINBOW[i % 7]``; the 3-cell band (chars within ±1 of
-    the glimmer at ``int(now * PANE_CELLS_PER_S) % width``) renders
-    ``_SHIMMER[i % 7]`` — the brighter same-hue variant (revision 9's axis).
+    ``text`` is left-justified; the remainder is padded with ``·``. Cells
+    are counted as RENDERED cells (a wide glyph like the ``🕐`` reply
+    marker covers 2; one straddling the edge is dropped, never split: a
+    per-CHARACTER pad made the "🕐 REPLY" line 1 cell too wide and the
+    wrap scrolled a 1-row pane's whole frame out of view, live 2026-11-08).
+    Cell ``i`` renders ``_RAINBOW[i % 7]``; the 3-cell band (cells within
+    ±1 of the glimmer at ``int(now * PANE_CELLS_PER_S) % width``) renders
+    ``_SHIMMER[i % 7]``, the brighter same-hue variant (revision 9's axis).
     """
     if width <= 0:
         return ""
     glimmer = int(now * PANE_CELLS_PER_S) % width
     n = len(_RAINBOW)
+
+    def _sgr(i: int) -> str:
+        return _SHIMMER[i % n] if abs(i - glimmer) <= 1 else _RAINBOW[i % n]
+
     cells = []
-    for i in range(width):
-        ch = text[i] if i < len(text) else "·"
-        sgr = _SHIMMER[i % n] if abs(i - glimmer) <= 1 else _RAINBOW[i % n]
-        cells.append(sgr + ch)
+    i = 0
+    for ch in text:
+        if i >= width:
+            break
+        w = _cell_w(ch)
+        if i + w > width:
+            break  # glyph would straddle the edge: drop it, pad the rest
+        cells.append(_sgr(i) + ch)
+        i += w
+    while i < width:
+        cells.append(_sgr(i) + "·")
+        i += 1
     return "".join(cells)
 
 

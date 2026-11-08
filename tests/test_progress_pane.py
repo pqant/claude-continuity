@@ -63,6 +63,29 @@ def test_frame_zero_width_is_empty():
     assert progress_pane._frame(-3, "abc", 0.0) == ""
 
 
+def _display_cells(frame: str) -> int:
+    """Rendered cell count: wcwidth-aware (a wide glyph covers 2 cells)."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+               for c in _visible(frame))
+
+
+def test_frame_wide_glyph_counts_two_cells():
+    # Live incident 2026-11-08: the "🕐 REPLY" line padded per CHARACTER,
+    # so a 195-wide pane got a 196-cell frame -> wrapped -> a 1-row pane
+    # scrolled its whole frame out and only the dot tail stayed visible.
+    frame = progress_pane._frame(10, "🕐AB", 0.0)
+    assert _display_cells(frame) == 10
+    assert _visible(frame) == "🕐AB" + "·" * 6
+
+
+def test_frame_wide_glyph_at_edge_is_dropped_not_split():
+    # width 4: 🕐(2) + 🕐(2) fill it; X cannot straddle the edge: dropped.
+    frame = progress_pane._frame(4, "🕐🕐X", 0.0)
+    assert _display_cells(frame) == 4
+    assert _visible(frame) == "🕐🕐"
+
+
 def test_frame_band_at_glimmer_exact_sgrs():
     # now=0.0 -> glimmer 0 -> band {0,1}: chars 0,1 shimmer, rest base
     cells = _cells(progress_pane._frame(8, "abcdef", 0.0))
