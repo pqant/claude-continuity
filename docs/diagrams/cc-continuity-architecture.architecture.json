@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "cc-continuity - Modules, Dependencies and Data Flows",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/pqant/claude-continuity",
+      "provider": "github",
+      "revision": "a9a295da5270e0efdf4b04488414786eae7756df"
+    },
+    "views": [
+      { "id": "waiting-blink", "label": "Waiting blink path", "focus": ["claude-code", "hooks", "ledger", "blink", "animator", "iterm2"], "note": "A finished turn arms the reply flag; the animator polls the ledger and the blink paints the tab." },
+      { "id": "continuity-loop", "label": "Session continuity loop", "focus": ["claude-code", "hooks", "cli", "rotation", "ledger"], "note": "Hooks record state; the CLI and rotation engine write the handoff the next session reads." },
+      { "id": "guardrails", "label": "Watchdog and pushes", "focus": ["watchdog", "notify", "ntfy", "ledger"], "note": "Stall probes nudge via ntfy pushes to the user's phone." },
+      { "id": "rendering", "label": "Pane rendering", "focus": ["claude-code", "animator", "tmux", "iterm2"], "note": "Statusline renders progress data; the 20 fps animator paints frames into the tmux pane." }
+    ]
+  },
+  "components": [
+    { "id": "cli", "type": "backend", "label": "cc-continuity CLI", "sublabel": "cli.py - signal,checkpoint", "pos": [40, 60], "size": [150, 64], "sources": [{ "path": "cc_continuity/cli.py", "label": "main()" }] },
+    { "id": "rotation", "type": "backend", "label": "Rotation Engine", "sublabel": "checkpoint + git snapshot", "pos": [620, 60], "size": [150, 64], "sources": [{ "path": "cc_continuity/rotator.py" }, { "path": "cc_continuity/checkpoint.py" }, { "path": "cc_continuity/gitsnap.py" }] },
+    { "id": "watchdog", "type": "backend", "label": "Watchdog", "sublabel": "watchdogd liveness probes", "pos": [910, 60], "size": [150, 64], "sources": [{ "path": "cc_continuity/watchdogd.py" }, { "path": "cc_continuity/watchdog.py" }] },
+    { "id": "notify", "type": "backend", "label": "Notify", "sublabel": "notify.py - push client", "pos": [1160, 60], "size": [150, 64], "sources": [{ "path": "cc_continuity/notify.py" }] },
+    { "id": "ntfy", "type": "cloud", "label": "ntfy relay", "sublabel": "push to user phone", "pos": [1160, 170], "size": [150, 64] },
+    { "id": "claude-code", "type": "external", "label": "Claude Code", "sublabel": "cc CLI 2.1.209", "pos": [40, 260], "size": [150, 64] },
+    { "id": "hooks", "type": "backend", "label": "CC Hooks", "sublabel": "Stop, SessionStart, PreCompact", "tag": "settings.json", "pos": [330, 260], "size": [172, 64], "sources": [{ "path": "cc_continuity/hooks/stop.py" }, { "path": "cc_continuity/hooks/session_start.py" }] },
+    { "id": "ledger", "type": "database", "label": "Ledger & State", "sublabel": "JSON events, session index", "tag": "single source of truth", "pos": [620, 260], "size": [150, 64], "sources": [{ "path": "cc_continuity/ledger.py" }, { "path": "cc_continuity/state.py" }] },
+    { "id": "blink", "type": "backend", "label": "Blink Layer", "sublabel": "OSC 6 tabs + FocusWatcher", "pos": [910, 260], "size": [150, 64], "sources": [{ "path": "cc_continuity/blink.py" }, { "path": "cc_continuity/blink_watch.py" }] },
+    { "id": "iterm2", "type": "external", "label": "iTerm2", "sublabel": "tab color + tmux clients", "pos": [1160, 260], "size": [150, 64] },
+    { "id": "animator", "type": "backend", "label": "Pane Animator", "sublabel": "progress_pane 20 fps", "pos": [620, 460], "size": [150, 64], "sources": [{ "path": "cc_continuity/progress_pane.py" }, { "path": "cc_continuity/statusline.py" }] },
+    { "id": "tmux", "type": "external", "label": "tmux server", "sublabel": "panes, windows, clients", "pos": [910, 460], "size": [150, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "User's macOS machine", "wraps": ["cli", "rotation", "watchdog", "notify", "claude-code", "hooks", "ledger", "blink", "iterm2", "animator", "tmux"] }
+  ],
+  "connections": [
+    { "id": "cc-hooks", "from": "claude-code", "to": "hooks", "label": "hook JSON on stdin", "variant": "emphasis", "labelAt": [270, 282] },
+    { "id": "cc-animator", "from": "claude-code", "to": "animator", "label": "statusline render -> progress data" },
+    { "id": "hooks-ledger", "from": "hooks", "to": "ledger", "label": "append reply_ready, needs_human", "labelAt": [550, 338] },
+    { "id": "hooks-blink", "from": "hooks", "to": "blink", "label": "arm reply flag (settle 5 s)", "fromSide": "bottom", "toSide": "bottom", "via": [[416, 392], [985, 392]] },
+    { "id": "cli-rotation", "from": "cli", "to": "rotation", "label": "checkpoint / request-rotation" },
+    { "id": "cli-ledger", "from": "cli", "to": "ledger", "label": "signal writes", "fromSide": "right", "toSide": "right", "via": [[260, 92], [260, 40], [810, 40], [810, 292]] },
+    { "id": "cli-notify", "from": "cli", "to": "notify", "label": "urgent + done pushes", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[115, 25], [1235, 25]] },
+    { "id": "rotation-ledger", "from": "rotation", "to": "ledger", "label": "checkpoint records", "labelAt": [695, 138] },
+    { "id": "rotation-cc", "from": "rotation", "to": "claude-code", "label": "handoff.md + transcript link", "variant": "dashed" },
+    { "id": "watchdog-ledger", "from": "watchdog", "to": "ledger", "label": "turn liveness probes", "labelAt": [870, 178.5] },
+    { "id": "watchdog-notify", "from": "watchdog", "to": "notify", "label": "stall nudge", "variant": "dashed" },
+    { "id": "notify-ntfy", "from": "notify", "to": "ntfy", "label": "HTTPS POST topic", "labelAt": [1235, 138] },
+    { "id": "ledger-blink", "from": "ledger", "to": "blink", "label": "reply_pending (settle-aware)", "labelAt": [760, 338] },
+    { "id": "blink-animator", "from": "blink", "to": "animator", "label": "reply flag + focus gate" },
+    { "id": "blink-iterm", "from": "blink", "to": "iterm2", "label": "OSC 6 on client tty", "variant": "emphasis" },
+    { "id": "animator-tmux", "from": "animator", "to": "tmux", "label": "full-width SGR frames", "variant": "emphasis", "labelAt": [840, 506] },
+    { "id": "tmux-iterm", "from": "tmux", "to": "iterm2", "label": "client ptys" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Waiting blink (issue #11)", "items": ["Stop hook arms a per-window reply flag; the ledger stays the single truth", "Animator polls reply_pending with the settle window (5 s default)", "FocusWatcher suppresses instantly while the user already looks at the tab", "OSC 6 bytes go to tmux client ttys, never into the pane stream"] },
+    { "dot": "emerald", "title": "Continuity loop", "items": ["Rotation triggers on the context ratio threshold", "Handoff.md + git snapshot refs make the next session byte-verifiable", "Transcript export ships a clickable file:// link in the panel", "Hooks bootstrap the handoff at SessionStart"] },
+    { "dot": "amber", "title": "Guardrails", "items": ["Watchdog ntfy pushes when a turn goes silent", "Atomic JSON writes protect ledger and pane records", "Blink self-heals: restore on clear and on animator shutdown"] }
+  ]
+}
