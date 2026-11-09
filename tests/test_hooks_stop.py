@@ -1,6 +1,9 @@
 """hooks/stop.py: turn-end enforcement (PRD §9, spec §6.4).
 
-Attempt ladder: RP -> HR + block C.2; HR without a valid draft -> block
+Attempt ladder (issue #26 unified): RP advances to HR, then both states
+validate the draft directly - a valid draft finalizes and rotates
+SILENTLY (no block: any Stop block renders as a red "Stop hook error:"
+line, which CC hardcodes); a missing/invalid draft blocks
 (C.6 when the draft exists and is invalid, else C.2); 3 accumulated
 failed attempts -> degraded checkpoint (C.7), NO block, systemMessage.
 A valid draft (even one Stop itself discovers, e.g. Bash-written) ->
@@ -139,6 +142,43 @@ def test_handoff_requested_valid_draft_finalizes(cc_home, capsys, tmp_path):
     cp = paths.session_dir(key, nnn) / "checkpoint"
     assert (cp / "handoff.md").is_file()
     assert "## Next Atomic Action" in (cp / "handoff.md").read_text()
+
+
+def test_rotation_pending_valid_draft_finalizes_without_block(cc_home,
+                                                              capsys,
+                                                              tmp_path):
+    # issue #26: a routine rotation where the draft is already valid must
+    # rotate silently - any Stop block renders as a red "Stop hook error:"
+    # line (prefix hardcoded in CC 2.1.209), which must never appear for a
+    # valid routine case.
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert "decision" not in out  # NO block
+    assert out == {"systemMessage": AMCL}
+    rec = state.load_state(key, nnn)
+    assert rec["state"] == "AWAITING_MANUAL_CLEAR"
+    assert rec["degraded"] is False
+    assert rec.get("handoff_attempts", 0) == 0  # silent success is not an attempt
+    cp = paths.session_dir(key, nnn) / "checkpoint"
+    assert (cp / "handoff.md").is_file()
+
+
+def test_rotation_pending_invalid_draft_blocks_c6(cc_home, capsys, tmp_path):
+    # enforcement stays reserved for genuine violations: after guidance,
+    # an invalid draft still blocks (the red line is justified there).
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        "## Objective\nshort\n", encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    assert "handoff draft invalid" in out["reason"]
+    rec = state.load_state(key, nnn)
+    assert rec["state"] == "HANDOFF_REQUESTED"
+    assert rec["handoff_attempts"] == 1
 
 
 def test_checkpoint_writing_finalizes(cc_home, capsys, tmp_path):

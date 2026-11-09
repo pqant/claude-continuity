@@ -1,10 +1,13 @@
 """Stop hook (PRD §9) — turn-end enforcement (Phase 5, spec §6.4).
 
 State-based (never ratio-based): ROTATION_PENDING -> advance to
-HANDOFF_REQUESTED + attempt/block; HANDOFF_REQUESTED -> validate the
+HANDOFF_REQUESTED and fall through; HANDOFF_REQUESTED -> validate the
 draft file DIRECTLY (a Bash-written draft was never seen by
-PostToolUse) -> finalize or attempt/block; 3 accumulated failed
-attempts -> degrade (HANDOFF_FAILED -> deterministic checkpoint, C.7);
+PostToolUse) -> finalize (SILENTLY when valid, issue #26 - a block
+would render as a hardcoded red "Stop hook error:" line) or
+attempt/block (missing/invalid draft = genuine violation);
+3 accumulated failed attempts -> degrade (HANDOFF_FAILED ->
+deterministic checkpoint, C.7);
 CHECKPOINT_WRITING -> finalize; CHECKPOINT_VERIFIED -> AMCL without
 re-running finalize; everything else: ``turn_active=False`` +
 ``last_stop_ts`` only. After a verified checkpoint the session rotates
@@ -163,16 +166,17 @@ def handle(ctx: HookContext) -> dict | None:
     s = rec["state"]
     tool_calls = rec.get("tool_calls", 0)
     if s == "ROTATION_PENDING":
+        # Issue #26: C.2 already reached the model as PostToolUse
+        # additionalContext at the crossing (guide-first). The old blind
+        # block re-sent the full instruction even when the draft was
+        # already written - and every Stop block renders as a red
+        # "Stop hook error:" line (prefix hardcoded in the CC binary),
+        # so a routine rotation showed "Error" for no effect. Advance
+        # and fall through to the shared HR validation below: it blocks
+        # only on a missing/invalid draft (a genuine violation after
+        # guidance) and rotates silently when the draft is valid.
         rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED", cfg=cfg)
-        attempts = state.update_fields(key, nnn,
-                                       handoff_attempts=rec.get("handoff_attempts", 0) + 1,
-                                       ctx_emitted_at=tool_calls)["handoff_attempts"]
-        if attempts >= 3:
-            return _degrade(ctx, key, nnn)
-        return {"decision": "block",
-                "reason": thresholds.c2_text(thresholds.display_ratio(ctx, cfg),
-                                             draft_path,
-                                             blocked=ledger.blocked_reason(sdir))}
+        s = "HANDOFF_REQUESTED"
     if s == "HANDOFF_REQUESTED":
         draft = sdir / "handoff.draft.md"
         report = None
