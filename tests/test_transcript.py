@@ -235,6 +235,10 @@ def test_render_html_switcher_when_wired():
     assert d.index('id="slbl"') > d.index("Session Time")
     assert '<div class="row2">' in d and d.index('id="f"') > d.index('id="slbl"')
     assert "'Sessions'" in d and "'Session'" in d  # plural-aware JS
+    # User polish round 4 (2026-11-09): the header labels read bold and
+    # dark (key labels, Search, Sessions), not faded grey.
+    assert ".hd .k{font-weight:600;color:var(--fg)}" in d
+    assert "label{font-size:13px;color:var(--fg);font-weight:600" in d
 
 
 def test_render_html_no_switcher_when_unwired():
