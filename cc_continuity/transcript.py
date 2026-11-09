@@ -153,11 +153,10 @@ _CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.6 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;background:var(--hdr);border-bottom:1px solid var(--line);padding:10px 22px;z-index:9;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.meta{font-size:13px;color:var(--muted);display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:2px 14px}
-.meta .v{color:var(--fg);font-weight:600;padding-left:2px}
-.controls{display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap}
-#slbl{margin-left:auto;padding-left:10px}
-input[type=search]{flex:1 1 260px;min-width:220px;max-width:50%;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
+.hd{font-size:13px;color:var(--muted);display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:6px 14px;align-items:center}
+.hd .v{color:var(--fg);font-weight:600;padding-left:2px}
+.row2{display:flex;gap:12px;align-items:center;margin-top:6px;grid-column:1/3;flex-wrap:wrap}
+.qbox{width:360px;max-width:100%;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
 label{font-size:13px;color:var(--muted);white-space:nowrap}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:13px}
 button:hover{border-color:var(--muted)}
@@ -342,7 +341,9 @@ def render_html(blocks: list[Block], meta: dict) -> str:
     """
     ratio = meta.get("ratio")
     ratio_s = "n/a" if ratio is None else f"{float(ratio):.1%}"
-    ext = switch = switch_js = ""
+    ext = switch_js = ""
+    # Unwired pages keep empty grid cells so auto-flow columns stay aligned.
+    switch = "<span></span><span></span>"
     if meta.get("manifest_src"):
         src = html.escape(str(meta["manifest_src"]), quote=True)
         cur = html.escape(str(meta.get("self_href") or ""), quote=True)
@@ -364,21 +365,20 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
         f'<title>{_meta_val(meta, "stem")} - session transcript</title>'
         f'<style>{_CSS}</style></head><body>\n'
-        '<header><div class="meta">\n'
+        '<header><div class="hd">\n'
         f'<span class="k">Session Name</span><span class="v">{_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>\n'
         f'<span class="k">Model</span><span class="v">{_meta_val(meta, "model")}</span>\n'
         f'<span class="k">Project</span><span class="v">{_meta_val(meta, "project")}</span>\n'
         f'<span class="k">Ratio at rotation</span><span class="v">{ratio_s}</span>\n'
         f'<span class="k">Branch</span><span class="v">{_meta_val(meta, "branch")} @ {_meta_val(meta, "head")}</span>\n'
         f'<span class="k">Session Time</span><span class="v">{_meta_val(meta, "span")}</span>\n'
-        '</div>\n'
-        '<div class="controls"><label for="q">Search</label>\n'
-        '<input type="search" id="q" '
+        '<label for="q">Search</label>\n'
+        '<input type="search" id="q" class="qbox" '
         'placeholder="marks all matches, optional block filter">\n'
-        f'{switch}</div>\n'
-        '<div class="controls"><label><input type="checkbox" id="f"> '
+        f'{switch}\n'
+        '<div class="row2"><label><input type="checkbox" id="f"> '
         'matching blocks only</label>\n'
-        '<button id="t">theme</button><span id="stats"></span></div></header>\n'
+        '<button id="t">theme</button><span id="stats"></span></div></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'{ext}<script>{_JS}{switch_js}</script></body>')
 

@@ -226,15 +226,15 @@ def test_render_html_switcher_when_wired():
     assert d.isascii()
     # User polish (2026-11-08): switcher shares the search row, both groups
     # carry visible capitalized labels; the plural is resolved client-side.
-    # User polish round 2 (2026-11-08): two rows. Row 1 = Search (capped at
-    # half the header) with Sessions facing it at the right edge; row 2 =
-    # matching-blocks filter, theme, stats.
-    assert d.count('<div class="controls">') == 2
-    assert '<label for="q">Search</label>' in d
-    assert '<label for="s" id="slbl">' in d
+    # User polish round 3 (2026-11-08): ONE shared header grid so the
+    # Sessions label sits directly below Session Time (same column, always);
+    # the search box is a fixed short width, no greedy stretching.
+    assert d.count('class="hd"') == 1 and '<div class="controls">' not in d
+    assert "grid-template-columns:max-content 1fr max-content 1fr" in d
+    assert ".qbox{width:360px" in d
+    assert d.index('id="slbl"') > d.index("Session Time")
+    assert '<div class="row2">' in d and d.index('id="f"') > d.index('id="slbl"')
     assert "'Sessions'" in d and "'Session'" in d  # plural-aware JS
-    assert "input[type=search]{flex:1" in d and "max-width:50%" in d
-    assert d.index('id="s"') < d.index('id="f"') < d.index('id="t"') < d.index('id="stats"')
 
 
 def test_render_html_no_switcher_when_unwired():
