@@ -26,6 +26,15 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-09**: Exported transcript pages now carry a session
+  switcher: a header dropdown lists the newest exports of the project
+  (the top ten plus the current page) and loads them over plain
+  `file://`
+  ([commit](https://github.com/pqant/claude-continuity/commit/e22f4ac)).
+- **2026-11-09**: The transcript header was rebuilt on a single grid:
+  the Sessions label sits under Session Time, the search box keeps a
+  fixed width, and labels read bold and high-contrast
+  ([commit](https://github.com/pqant/claude-continuity/commit/18af742)).
 - **2026-11-08**: An interactive architecture diagram of the whole system
   (modules, dependencies and data flows) now ships in `docs/diagrams` as a
   self-contained HTML page with guided views and export
@@ -36,12 +45,6 @@ log:
 - **2026-11-08**: Progress frames are padded by rendered cells, so wide
   glyphs never wrap into the next line
   ([commit](https://github.com/pqant/claude-continuity/commit/581fe93)).
-- **2026-11-08**: The animator blink key carries the unconsumed reply ts,
-  so a reply arriving mid-blink is still delivered
-  ([commit](https://github.com/pqant/claude-continuity/commit/54494b4)).
-- **2026-11-08**: The reply flag is held through the settle window instead
-  of being cleared early
-  ([commit](https://github.com/pqant/claude-continuity/commit/581ff6f)).
 
 ## How it works
 

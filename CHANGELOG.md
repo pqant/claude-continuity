@@ -4,6 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-09
+
+### Added
+
+- Transcript session switcher (issue #16): every export refreshes a
+  per-project `sessions.js` manifest, and the viewer header renders a
+  dropdown of the newest exports (the top ten plus the current page),
+  working over plain `file://` without a server.
+
+### Fixed
+
+- Transcript viewer header: the Sessions switcher now always sits in
+  the same column as the Session Time field (the header is one shared
+  grid), the search box keeps a fixed 360px width instead of
+  stretching across the page, and every header label renders bold and
+  high-contrast.
+
 ## [0.3.1] - 2026-11-08
 
 ### Added
