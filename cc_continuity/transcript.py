@@ -155,8 +155,9 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.6 -apple-system
 header{position:sticky;top:0;background:var(--hdr);border-bottom:1px solid var(--line);padding:10px 22px;z-index:9;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .meta{font-size:13px;color:var(--muted);display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:2px 14px}
 .meta .v{color:var(--fg);font-weight:600;padding-left:2px}
-.controls{display:flex;gap:12px;align-items:center;margin-top:8px}
-input[type=search]{flex:1;max-width:520px;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
+.controls{display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap}
+#slbl{margin-left:auto;padding-left:10px}
+input[type=search]{flex:1 1 260px;min-width:220px;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
 label{font-size:13px;color:var(--muted);white-space:nowrap}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:13px}
 button:hover{border-color:var(--muted)}
@@ -233,6 +234,8 @@ for(var k=0;k<top.length;k++){var o=document.createElement('option');
 o.value=top[k].href;o.textContent=top[k].label;sel.appendChild(o);}
 if(cur)sel.value=cur;
 sel.disabled=all.length<2;
+var lbl=document.getElementById('slbl');
+if(lbl)lbl.textContent=all.length>1?'Sessions':'Session';
 sel.onchange=function(){if(this.value)location.href=up+this.value;};})();
 """
 
@@ -345,8 +348,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         cur = html.escape(str(meta.get("self_href") or ""), quote=True)
         up = src[:src.rfind("/") + 1]
         ext = f'<script src="{src}"></script>\n'
-        switch = (f'<div class="controls"><label>session '
-                  f'<select id="s" data-cur="{cur}" data-up="{up}"></select></label></div>\n')
+        switch = (f'<label for="s" id="slbl">Sessions</label>'
+                  f'<select id="s" data-cur="{cur}" data-up="{up}"></select>')
         switch_js = _SWITCH_JS
     sections = []
     for role, text, ts in blocks:
@@ -369,11 +372,12 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'<span class="k">Branch</span><span class="v">{_meta_val(meta, "branch")} @ {_meta_val(meta, "head")}</span>\n'
         f'<span class="k">Session Time</span><span class="v">{_meta_val(meta, "span")}</span>\n'
         '</div>\n'
-        '<div class="controls"><input type="search" id="q" '
-        'placeholder="search - marks all matches, optional block filter">\n'
+        '<div class="controls"><label for="q">Search</label>\n'
+        '<input type="search" id="q" '
+        'placeholder="marks all matches, optional block filter">\n'
+        '<span id="stats"></span>'
         '<label><input type="checkbox" id="f"> matching blocks only</label>\n'
-        '<button id="t">theme</button><span id="stats"></span></div>\n'
-        f'{switch}</header>\n'
+        f'<button id="t">theme</button>{switch}</div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'{ext}<script>{_JS}{switch_js}</script></body>')
 

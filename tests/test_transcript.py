@@ -224,11 +224,22 @@ def test_render_html_switcher_when_wired():
     assert '<select id="s"' in d and 'data-cur="sessions/166/checkpoint/x.html"' in d
     assert 'src="../../sessions.js"' in d
     assert d.isascii()
+    # User polish (2026-11-08): switcher shares the search row, both groups
+    # carry visible capitalized labels; the plural is resolved client-side.
+    assert d.count('<div class="controls">') == 1
+    assert '<label for="q">Search</label>' in d
+    assert '<label for="s" id="slbl">' in d
+    assert "'Sessions'" in d and "'Session'" in d  # plural-aware JS
+    # Full-width balance (user feedback 2026-11-08): the search box grows
+    # instead of stopping at 520px and stranding the dropdown at the edge.
+    assert "input[type=search]{flex:1" in d and "max-width:520px" not in d
+    assert d.index('id="q"') < d.index('id="stats"') < d.index('id="f"') < d.index('id="t"')
 
 
 def test_render_html_no_switcher_when_unwired():
     d = _doc()  # META has no manifest keys (legacy call shape)
     assert 'id="s"' not in d and "sessions.js" not in d
+    assert '<label for="q">Search</label>' in d  # Search label is unconditional
 
 
 def test_export_session_writes_manifest(tmp_path):
