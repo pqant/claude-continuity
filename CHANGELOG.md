@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-09
+
+### Fixed
+
+- Rotation stop gate (issue #26): a routine turn-end rotation no longer
+  blocks the stop when the handoff draft is already valid - the
+  rotation now finalizes and rotates silently. Claude Code renders
+  every Stop hook block as a red "Stop hook error:" line (the prefix
+  is hardcoded in the binary), so the routine case must never emit a
+  block; blocks remain reserved for a missing or invalid draft after
+  the model received its guidance.
+
 ## [0.3.3] - 2026-11-09
 
 ### Fixed

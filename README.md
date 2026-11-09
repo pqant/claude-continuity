@@ -26,6 +26,11 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-09**: The turn-end rotation gate no longer blocks a routine
+  rotation when the handoff draft is already valid: the rotation now
+  finishes silently, so the built-in "Stop hook error" line only appears
+  when the model genuinely fails to produce a draft after being told
+  ([commit](https://github.com/pqant/claude-continuity/commit/2c9d2bf)).
 - **2026-11-09**: Routine rotations no longer print a red error: at the
   hard context limit the in-flight tool call now passes and the handoff
   instruction arrives as a neutral notice, so the pane stays clean
@@ -47,9 +52,6 @@ log:
   (modules, dependencies and data flows) now ships in `docs/diagrams` as a
   self-contained HTML page with guided views and export
   ([commit](https://github.com/pqant/claude-continuity/commit/5ae9011)).
-- **2026-11-08**: The waiting tab blink now starts after a 5 s settle
-  window instead of 15 s, so a finished turn reaches your tab faster
-  ([commit](https://github.com/pqant/claude-continuity/commit/a9a295d)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
