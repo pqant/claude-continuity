@@ -114,6 +114,17 @@ def c3_text(ratio: float | None, hard_ratio: float, draft_path: str,
             + _blocked_suffix(blocked))
 
 
+def c3_brief(ratio: float | None, hard_ratio: float, draft_path: str,
+             blocked: str | None = None) -> str:
+    """Model-facing short reason for the C.3 deny (full guidance travels
+    in the hook's systemMessage, not the red deny reason)."""
+    shown = ratio if ratio is not None else hard_ratio
+    return (f"CONTINUITY: context at {pct_of(shown)}% (hard limit). Write the "
+            f"handoff to {draft_path} with the required level-2 headings "
+            f"(format '## Heading'), then end your turn."
+            + _blocked_suffix(blocked))
+
+
 def c6_text(problems: list, draft_path: str) -> str:
     return ("CONTINUITY: handoff draft invalid: " + "; ".join(problems)
             + f". Fix {draft_path} and end your turn.")
@@ -124,6 +135,11 @@ def c9_text() -> str:
     # is a manual /clear until Phase 6.
     return ("CONTINUITY: handoff accepted. Do not start any more work in "
             "this session. End your turn now.")
+
+
+def c9_brief() -> str:
+    """Model-facing short reason for the C.9 deny (full text in systemMessage)."""
+    return "CONTINUITY: handoff accepted. End your turn now."
 
 
 # -------------------------------------------------------------- state walk

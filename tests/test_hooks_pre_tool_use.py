@@ -33,6 +33,10 @@ def _reason(out):
     return out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def _system(out):
+    return out.get("systemMessage", "")
+
+
 def test_below_hard_allows_silently(cc_home, capsys, tmp_path):
     repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE", ratio=0.60)
     _pretool(repo, "Bash", {"command": "rm -rf x"})
@@ -48,6 +52,44 @@ def test_hard_ratio_walks_to_handoff_and_denies(cc_home, capsys, tmp_path):
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "hard limit" in _reason(out)
     assert state.load_state(key, nnn)["state"] == "HANDOFF_REQUESTED"
+
+
+def test_hard_ratio_deny_routes_guidance_to_system_message(cc_home, capsys,
+                                                            tmp_path):
+    # The full gate guidance renders as an informational systemMessage, not
+    # only as the red error the model sees in the deny reason.
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.73)
+    _pretool(repo, "Bash", {"command": "rm -rf x"})
+    out = stdout_json(capsys)
+    assert "hard limit" in _system(out)
+    assert "Allowed now" in _system(out)
+
+
+def test_hard_ratio_deny_reason_omits_allowed_tools_guidance(cc_home, capsys,
+                                                              tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.73)
+    _pretool(repo, "Bash", {"command": "rm -rf x"})
+    out = stdout_json(capsys)
+    assert "Allowed now" not in _reason(out)
+    assert "handoff.draft.md" in _reason(out)
+    assert "end your turn" in _reason(out)
+
+
+def test_handoff_accepted_deny_routes_guidance_to_system_message(cc_home,
+                                                                 capsys,
+                                                                 tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="CHECKPOINT_WRITING")
+    _pretool(repo, "Bash", {"command": "pytest"})
+    out = stdout_json(capsys)
+    assert "Do not start any more work" in _system(out)
+
+
+def test_handoff_accepted_deny_reason_is_brief(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="CHECKPOINT_WRITING")
+    _pretool(repo, "Bash", {"command": "pytest"})
+    out = stdout_json(capsys)
+    assert "handoff accepted" in _reason(out)
+    assert "Do not start any more work" not in _reason(out)
 
 
 def test_hard_ratio_walks_even_when_tool_allowed(cc_home, capsys, tmp_path):

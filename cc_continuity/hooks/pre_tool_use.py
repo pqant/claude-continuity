@@ -42,17 +42,24 @@ def handle(ctx: HookContext) -> dict | None:
                                         ratio=ratio, cfg=cfg)
             s = rec["state"]
     if s in DENY_C3:
-        reason = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path,
-                                    blocked=ledger.blocked_reason(ctx.session_dir))
+        blocked = ledger.blocked_reason(ctx.session_dir)
+        guidance = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path,
+                                      blocked=blocked)
+        reason = thresholds.c3_brief(ratio, cfg["hard_ratio"], draft_path,
+                                     blocked=blocked)
     elif s in DENY_C9:
-        reason = thresholds.c9_text()
+        guidance = thresholds.c9_text()
+        reason = thresholds.c9_brief()
     else:
         return None
     tool = ctx.payload.get("tool_name")
     tool_input = _dict(ctx.payload.get("tool_input"))
     if thresholds.is_allowed_tool(tool, tool_input, draft_path):
         return None
-    return {"hookSpecificOutput": {
+    # The full gate guidance rides in systemMessage so the UI shows an
+    # informational note, not a red error; the model still acts on the
+    # brief deny reason.
+    return {"systemMessage": guidance, "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason": reason,
