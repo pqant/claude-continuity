@@ -157,7 +157,7 @@ header{position:sticky;top:0;background:var(--hdr);border-bottom:1px solid var(-
 .meta .v{color:var(--fg);font-weight:600;padding-left:2px}
 .controls{display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap}
 #slbl{margin-left:auto;padding-left:10px}
-input[type=search]{flex:1 1 260px;min-width:220px;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
+input[type=search]{flex:1 1 260px;min-width:220px;max-width:50%;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
 label{font-size:13px;color:var(--muted);white-space:nowrap}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:13px}
 button:hover{border-color:var(--muted)}
@@ -375,9 +375,10 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<div class="controls"><label for="q">Search</label>\n'
         '<input type="search" id="q" '
         'placeholder="marks all matches, optional block filter">\n'
-        '<span id="stats"></span>'
-        '<label><input type="checkbox" id="f"> matching blocks only</label>\n'
-        f'<button id="t">theme</button>{switch}</div></header>\n'
+        f'{switch}</div>\n'
+        '<div class="controls"><label><input type="checkbox" id="f"> '
+        'matching blocks only</label>\n'
+        '<button id="t">theme</button><span id="stats"></span></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'{ext}<script>{_JS}{switch_js}</script></body>')
 
