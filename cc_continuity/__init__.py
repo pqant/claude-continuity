@@ -4,4 +4,4 @@ Spec: docs/PRD.md (v1.0). Platform facts verified in docs/VERIFICATION.md.
 Standard library only at runtime; pytest is dev-only.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-09
+
+### Fixed
+
+- Rotation gate notices (issue #25): a routine hard-ratio crossing no
+  longer denies the in-flight tool call - the handoff instruction now
+  arrives as a neutral context message and the user sees an
+  informational note instead of a red "Error" line. When a gate denial
+  is truly warranted (the model continues after being told), the full
+  guidance likewise shows as an informational message while the model
+  gets a short actionable reason.
+
 ## [0.3.2] - 2026-11-09
 
 ### Added
