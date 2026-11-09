@@ -1,8 +1,10 @@
 """PreToolUse hook (PRD §9) — the hard ceiling (Phase 5).
 
 Ratio gate: fresh ratio >= hard_ratio with a pre-handoff state ->
-``advance`` to HANDOFF_REQUESTED first, then the deny decision. State gate
-(no metric needed): HANDOFF_REQUESTED/HANDOFF_FAILED deny with C.3;
+``advance`` to HANDOFF_REQUESTED, let the in-flight call through and inject
+the C.2 handoff instruction as neutral additionalContext (issue #25: CC
+renders denials as red Errors; routine rotation is not an error). State
+gate (no metric needed): HANDOFF_REQUESTED/HANDOFF_FAILED deny with C.3;
 CHECKPOINT_WRITING/VERIFIED/ROTATING (handoff accepted) deny with C.9, so
 the model cannot keep working and make the handoff stale. AWAITING_MANUAL_
 CLEAR / ROTATED allow (checkpoint final, user in control). The allowlist
@@ -38,9 +40,21 @@ def handle(ctx: HookContext) -> dict | None:
     if s in PRE_HANDOFF:
         ratio = thresholds.read_ratio(ctx)
         if ratio is not None and ratio >= cfg["hard_ratio"]:
-            rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED",
-                                        ratio=ratio, cfg=cfg)
-            s = rec["state"]
+            thresholds.advance(key, nnn, "HANDOFF_REQUESTED", ratio=ratio,
+                               cfg=cfg)
+            # Guidance-first (issue #25): this call was queued before the
+            # model could learn rotation started, and CC renders any denial
+            # as a red "Error:" line - routine rotation is not an error.
+            # Let the in-flight call through and inject the C.2 instruction
+            # as neutral context instead; denial is reserved for calls the
+            # model makes AFTER seeing the guidance.
+            return {"systemMessage": thresholds.c2_note(ratio),
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": thresholds.c2_text(
+                            ratio, draft_path,
+                            blocked=ledger.blocked_reason(ctx.session_dir)),
+                    }}
     if s in DENY_C3:
         blocked = ledger.blocked_reason(ctx.session_dir)
         guidance = thresholds.c3_text(ratio, cfg["hard_ratio"], draft_path,

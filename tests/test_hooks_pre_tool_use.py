@@ -1,9 +1,12 @@
 """hooks/pre_tool_use.py: hard ceiling (PRD §9, spec §6.3).
 
 Ratio gate: ratio >= hard with a pre-handoff state -> walk to
-HANDOFF_REQUESTED, then deny. State gate: pre-checkpoint states deny C.3,
-handoff-accepted states deny C.9, always with the same allowlist. Silent
-allow otherwise.
+HANDOFF_REQUESTED, let the in-flight call through and inject the C.2
+handoff instruction as neutral additionalContext (CC renders denials as
+red "Error:" lines; routine rotation is not an error - issue #25).
+State gate: handoff-requested states deny C.3 (only after the model saw
+the guidance), handoff-accepted states deny C.9, always with the same
+allowlist. Silent allow otherwise.
 """
 
 import pytest
@@ -44,30 +47,48 @@ def test_below_hard_allows_silently(cc_home, capsys, tmp_path):
     assert state.load_state(key, nnn)["state"] == "ACTIVE"
 
 
-def test_hard_ratio_walks_to_handoff_and_denies(cc_home, capsys, tmp_path):
+def test_hard_ratio_crossing_guides_without_denying(cc_home, capsys, tmp_path):
+    # Routine crossing (issue #25): CC renders denials as red "Error:"
+    # lines, but rotation is routine - the in-flight call passes and the
+    # handoff instruction arrives as neutral additionalContext.
     repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.73)
     _pretool(repo, "Bash", {"command": "rm -rf x"})
     out = stdout_json(capsys)
     assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "hard limit" in _reason(out)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert "Rotation pending" in out["hookSpecificOutput"]["additionalContext"]
+    assert "handoff.draft.md" in out["hookSpecificOutput"]["additionalContext"]
+    assert "cc-continuity" in _system(out)
     assert state.load_state(key, nnn)["state"] == "HANDOFF_REQUESTED"
 
 
-def test_hard_ratio_deny_routes_guidance_to_system_message(cc_home, capsys,
-                                                            tmp_path):
-    # The full gate guidance renders as an informational systemMessage, not
-    # only as the red error the model sees in the deny reason.
+def test_second_work_tool_after_crossing_denies(cc_home, capsys, tmp_path):
+    # Only AFTER the model saw the guidance may a work tool be denied.
     repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.73)
+    _pretool(repo, "Bash", {"command": "rm -rf x"})  # crossing: allow + guide
+    stdout_json(capsys)
+    _pretool(repo, "Bash", {"command": "pytest"})
+    out = stdout_json(capsys)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "hard limit" in _system(out)
+
+
+def test_handoff_requested_deny_routes_guidance_to_system_message(cc_home,
+                                                                   capsys,
+                                                                   tmp_path):
+    # A post-guidance denial renders its full guidance as an informational
+    # systemMessage, not only as the red error in the deny reason.
+    repo, key, nnn = _setup(cc_home, tmp_path, s="HANDOFF_REQUESTED")
     _pretool(repo, "Bash", {"command": "rm -rf x"})
     out = stdout_json(capsys)
     assert "hard limit" in _system(out)
     assert "Allowed now" in _system(out)
 
 
-def test_hard_ratio_deny_reason_omits_allowed_tools_guidance(cc_home, capsys,
-                                                              tmp_path):
-    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.73)
+def test_handoff_requested_deny_reason_omits_allowed_tools_guidance(cc_home,
+                                                                     capsys,
+                                                                     tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="HANDOFF_REQUESTED")
     _pretool(repo, "Bash", {"command": "rm -rf x"})
     out = stdout_json(capsys)
     assert "Allowed now" not in _reason(out)
@@ -95,7 +116,9 @@ def test_handoff_accepted_deny_reason_is_brief(cc_home, capsys, tmp_path):
 def test_hard_ratio_walks_even_when_tool_allowed(cc_home, capsys, tmp_path):
     repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE", ratio=0.75)
     _pretool(repo, "Read", {"file_path": "/x"})
-    assert stdout_json(capsys) is None  # Read passes the allowlist
+    # The allowlisted call also receives the crossing guidance.
+    out = stdout_json(capsys)
+    assert "Rotation pending" in out["hookSpecificOutput"]["additionalContext"]
     assert state.load_state(key, nnn)["state"] == "HANDOFF_REQUESTED"
 
 

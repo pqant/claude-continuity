@@ -1,7 +1,7 @@
 """Phase 5 end-to-end chain without a model (spec §8/§9): warn ->
-pending -> hard (PreToolUse ceiling) -> deny -> draft -> C.9 -> Stop ->
-finalized checkpoint -> AMCL. Locks the cross-hook sequence; a failure
-here is an integration regression (all parts land in Tasks 4-9)."""
+pending -> hard (PreToolUse ceiling) -> guide -> deny -> draft -> C.9 ->
+Stop -> finalized checkpoint -> AMCL. Locks the cross-hook sequence; a
+failure here is an integration regression (all parts land in Tasks 4-9)."""
 
 from cc_continuity import config, ledger, paths, state, validate
 from cc_continuity.hooks import stop
@@ -67,10 +67,16 @@ def test_full_threshold_to_checkpoint_chain(cc_home, capsys, tmp_path,
 
     set_metric(0.73)  # >= hard_ratio 0.72
     out = pretool("Bash", {"command": "rm -rf /tmp/whatever"})
-    # The PreToolUse ratio gate (spec 6.3) walks RP -> HR, then denies.
+    # Guidance-first (issue #25): the PreToolUse ratio gate (spec 6.3)
+    # walks RP -> HR, lets the in-flight call through and injects C.2 as
+    # neutral context - no red "Error:" denial for a routine crossing.
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert "Rotation pending" in out["hookSpecificOutput"]["additionalContext"]
+    assert state.load_state(key, nnn)["state"] == "HANDOFF_REQUESTED"
+    # Only AFTER the guidance may a work call be denied.
+    out = pretool("Bash", {"command": "echo more"})
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "hard limit" in out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert state.load_state(key, nnn)["state"] == "HANDOFF_REQUESTED"
     assert pretool("Read", {"file_path": "/x"}) is None  # allowlist passes
 
     draft.write_text(_draft_text(), encoding="utf-8")

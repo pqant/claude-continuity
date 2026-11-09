@@ -103,6 +103,14 @@ def c2_text(ratio: float, draft_path: str,
             "turn." + _blocked_suffix(blocked))
 
 
+def c2_note(ratio: float) -> str:
+    """User-facing neutral note for a hard-ratio crossing (issue #25):
+    informational only - routine rotation is never rendered as an error."""
+    return (f"cc-continuity: context at {pct_of(ratio)}% - rotation handoff "
+            "requested. The model finishes the current step, writes the "
+            "handoff, and ends its turn.")
+
+
 def c3_text(ratio: float | None, hard_ratio: float, draft_path: str,
             blocked: str | None = None) -> str:
     shown = ratio if ratio is not None else hard_ratio
