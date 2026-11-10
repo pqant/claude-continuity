@@ -4,6 +4,20 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-11-10
+
+### Added
+
+- The status line HUD now shows the previous task's wall time when
+  `turn_clock` is on (issue #45): the `◆ …` segment reads
+  `◆ 64% Active Usage ⏱ prev task 39m15s` on a normal turn, updated
+  the moment the turn ends (Claude Code re-renders the status line
+  continuously). The duration reuses the guarded transcript tail
+  parser from #44 (prompt send to final reply, byte-capped read); a
+  missing or unreadable transcript simply omits the segment, and the
+  first turn of a session has none. Rotation/handoff states and all
+  animation rules are untouched.
+
 ## [0.3.12] - 2026-11-10
 
 ### Fixed

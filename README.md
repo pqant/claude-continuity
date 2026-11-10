@@ -26,6 +26,11 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: `turn_clock` now drives the status line HUD too: the
+  `◆ … Active Usage` segment carries `⏱ prev task 39m15s`, so the last
+  task's duration sits in the line you actually watch, updated the
+  moment the turn ends
+  ([commit](https://github.com/pqant/claude-continuity/commit/6524d4b)).
 - **2026-11-10**: The turn clock's reply timing moved to where the pane
   actually renders it: every prompt line now carries the previous task
   (`prev reply start -> end (2m34s)`) read from the transcript, so you
@@ -45,10 +50,6 @@ log:
   a fresh install always starts the rotation gate ahead of native
   auto-compact (a user-set value is never overwritten)
   ([commit](https://github.com/pqant/claude-continuity/commit/708237d)).
-- **2026-11-10**: `cc-continuity signal --dry-run` now prints the exact
-  push (title, priority, body, enabled state) without sending it -
-  formatting checks are silent now
-  ([commit](https://github.com/pqant/claude-continuity/commit/534a6d6)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
