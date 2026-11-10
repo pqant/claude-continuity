@@ -11,7 +11,7 @@ allowlist. Silent allow otherwise.
 
 import pytest
 
-from cc_continuity import paths, state
+from cc_continuity import ledger, paths, state
 
 from hookutil import (draft_path_for, make_repo, payload, register_session,
                       run_hook, set_metric, stdout_json, walk_to)
@@ -38,6 +38,11 @@ def _reason(out):
 
 def _system(out):
     return out.get("systemMessage", "")
+
+
+def _gates(key, nnn):
+    return [e for e in ledger.read(paths.session_dir(key, nnn))
+            if e.get("type") == "gate"]
 
 
 def test_below_hard_allows_silently(cc_home, capsys, tmp_path):
@@ -188,3 +193,48 @@ def test_unregistered_session_silent(cc_home, capsys, tmp_path):
                 tool_input={"command": "x"})
     assert run_hook("PreToolUse", p) == 0
     assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------------- gate ledger (#39)
+
+
+def test_crossing_records_guide_gate_entry(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="WARNED", ratio=0.80)
+    _pretool(repo, "Bash", {"command": "rm -rf x"})
+    stdout_json(capsys)
+    g = _gates(key, nnn)
+    assert len(g) == 1
+    e = g[0]
+    assert e["action"] == "guide" and e["variant"] == "c2"
+    assert e["from"] == "WARNED" and e["to"] == "HANDOFF_REQUESTED"
+    assert e["ratio"] == 0.8
+
+
+def test_denies_record_gate_entries(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING", ratio=0.80)
+    _pretool(repo, "Bash", {"command": "rm -rf x"})  # crossing: guide
+    stdout_json(capsys)
+    _pretool(repo, "Bash", {"command": "pytest"})     # deny C.3
+    stdout_json(capsys)
+    g = _gates(key, nnn)
+    assert [(e["action"], e["variant"], e["from"], e["to"]) for e in g] == [
+        ("guide", "c2", "ROTATION_PENDING", "HANDOFF_REQUESTED"),
+        ("deny", "c3", "HANDOFF_REQUESTED", "HANDOFF_REQUESTED")]
+    assert g[1]["tool"] == "Bash" and "ratio" not in g[1]
+
+
+def test_allowed_tool_in_deny_state_records_nothing(cc_home, capsys, tmp_path):
+    # Only REAL denials are gate decisions: allowlisted calls pass silently.
+    repo, key, nnn = _setup(cc_home, tmp_path, s="HANDOFF_REQUESTED")
+    _pretool(repo, "Read", {"file_path": "x"})
+    assert stdout_json(capsys) is None
+    assert _gates(key, nnn) == []
+
+
+def test_c9_deny_records_gate_entry(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="CHECKPOINT_VERIFIED")
+    _pretool(repo, "Bash", {"command": "pytest"})
+    stdout_json(capsys)
+    g = _gates(key, nnn)
+    assert [(e["action"], e["variant"], e["from"], e["to"]) for e in g] == [
+        ("deny", "c9", "CHECKPOINT_VERIFIED", "CHECKPOINT_VERIFIED")]

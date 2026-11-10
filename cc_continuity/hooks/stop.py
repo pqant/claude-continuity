@@ -184,6 +184,10 @@ def handle(ctx: HookContext) -> dict | None:
             report = checkpoint.validate_draft(draft.read_text(encoding="utf-8"),
                                                cfg)
         if report is not None and report.ok:
+            # Decision recorded for post-hoc rotation debugging (#39):
+            # valid draft -> silent finalize + rotate, no Stop block.
+            ledger.gate(sdir, action="silent", state_from="HANDOFF_REQUESTED",
+                        state_to="CHECKPOINT_VERIFIED")
             state.transition(key, nnn, "CHECKPOINT_WRITING")
             if not _finalize(ctx, key, nnn):
                 return None
@@ -196,6 +200,10 @@ def handle(ctx: HookContext) -> dict | None:
         text = (thresholds.c6_text(report.problems, draft_path) if report is not None
                 else thresholds.c2_text(thresholds.display_ratio(ctx, cfg), draft_path,
                                         blocked=ledger.blocked_reason(sdir)))
+        ledger.gate(sdir, action="block", state_from="HANDOFF_REQUESTED",
+                    state_to="HANDOFF_REQUESTED",
+                    variant="c6" if report is not None else "c2",
+                    attempts=attempts)
         return {"decision": "block", "reason": text}
     if s == "CHECKPOINT_WRITING":
         if not _finalize(ctx, key, nnn):

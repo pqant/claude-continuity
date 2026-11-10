@@ -48,6 +48,27 @@ def read(session_dir: str | Path) -> list[dict]:
     return out
 
 
+def gate(session_dir: str | Path, *, action: str, state_from: str,
+         state_to: str, ratio: float | None = None,
+         variant: str | None = None, **extra) -> dict | None:
+    """Append a compact gate-decision record (issue #39): which decision
+    fired, its state transition, ratio and the C-text variant used.
+    Read-only for the model; consumed by logs and post-hoc debugging.
+    A failed append must never change hook behaviour, so OSError is
+    swallowed here and None is returned (blink-style discipline)."""
+    entry: dict = {"type": "gate", "action": action,
+                   "from": state_from, "to": state_to}
+    if ratio is not None:
+        entry["ratio"] = round(float(ratio), 4)
+    if variant:
+        entry["variant"] = variant
+    entry.update(extra)
+    try:
+        return append(session_dir, entry)
+    except OSError:
+        return None
+
+
 def blocked_reason(session_dir: str | Path) -> str | None:
     """P9-P5: reason of the latest UNCONSUMED ``needs_human`` entry, or
     None. A later main-session ``user_prompt`` entry (no ``agent_id``)

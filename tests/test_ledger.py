@@ -154,3 +154,31 @@ def test_reply_pending_non_work_entries_do_not_consume(tmp_path):
     assert ledger.reply_pending(sdir, settle=0, now=300.0) == 100.0
     ledger.append(sdir, {"type": "tool_failure", "tool": "Bash", "ts": 103.0})
     assert ledger.reply_pending(sdir, settle=0, now=300.0) is None
+
+
+# ---------------------------------------------------------------- gate (#39)
+
+
+def test_gate_entry_shape(tmp_path):
+    e = ledger.gate(tmp_path, action="guide", state_from="WARNED",
+                    state_to="HANDOFF_REQUESTED", ratio=0.81234,
+                    variant="c2", tool="Bash")
+    assert e["type"] == "gate" and e["action"] == "guide"
+    assert e["from"] == "WARNED" and e["to"] == "HANDOFF_REQUESTED"
+    assert e["ratio"] == 0.8123 and e["variant"] == "c2" and e["tool"] == "Bash"
+    assert ledger.read(tmp_path)[-1]["ts"] == e["ts"]
+
+
+def test_gate_omits_none_ratio_and_variant(tmp_path):
+    e = ledger.gate(tmp_path, action="silent", state_from="HANDOFF_REQUESTED",
+                    state_to="CHECKPOINT_VERIFIED")
+    assert "ratio" not in e and "variant" not in e
+
+
+def test_gate_never_raises_on_write_failure(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(ledger.os, "write", boom)
+    assert ledger.gate(tmp_path, action="deny",
+                       state_from="HANDOFF_REQUESTED",
+                       state_to="HANDOFF_REQUESTED") is None

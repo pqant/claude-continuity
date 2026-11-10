@@ -48,6 +48,9 @@ def handle(ctx: HookContext) -> dict | None:
             # Let the in-flight call through and inject the C.2 instruction
             # as neutral context instead; denial is reserved for calls the
             # model makes AFTER seeing the guidance.
+            ledger.gate(ctx.session_dir, action="guide", state_from=s,
+                        state_to="HANDOFF_REQUESTED", ratio=ratio,
+                        variant="c2")
             return {"systemMessage": thresholds.c2_note(ratio),
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -61,15 +64,21 @@ def handle(ctx: HookContext) -> dict | None:
                                       blocked=blocked)
         reason = thresholds.c3_brief(ratio, cfg["hard_ratio"], draft_path,
                                      blocked=blocked)
+        variant = "c3"
     elif s in DENY_C9:
         guidance = thresholds.c9_text()
         reason = thresholds.c9_brief()
+        variant = "c9"
     else:
         return None
     tool = ctx.payload.get("tool_name")
     tool_input = _dict(ctx.payload.get("tool_input"))
     if thresholds.is_allowed_tool(tool, tool_input, draft_path):
         return None
+    # Only REAL denials are gate decisions (allowlisted calls pass
+    # silently); the record exists for post-hoc rotation debugging (#39).
+    ledger.gate(ctx.session_dir, action="deny", state_from=s, state_to=s,
+                ratio=ratio, variant=variant, tool=str(tool))
     # The full gate guidance rides in systemMessage so the UI shows an
     # informational note, not a red error; the model still acts on the
     # brief deny reason.

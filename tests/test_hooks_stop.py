@@ -627,3 +627,39 @@ def test_stop_reply_flag_failure_never_blocks(cc_home, capsys, tmp_path,
     run_hook("Stop", payload("Stop", repo))
     # the hook swallows flag-arm failures: blink never blocks a stop
     assert "reply_ready" in _types(paths.session_dir(key, nnn))
+
+
+# ------------------------------------------------------- gate ledger (#39)
+
+
+def test_valid_draft_rotation_records_silent_gate_entry(cc_home, capsys,
+                                                        tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ROTATION_PENDING")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    stdout_json(capsys)
+    g = [e for e in ledger.read(paths.session_dir(key, nnn))
+         if e.get("type") == "gate"]
+    assert [(e["action"], e["from"], e["to"]) for e in g] == [
+        ("silent", "HANDOFF_REQUESTED", "CHECKPOINT_VERIFIED")]
+    assert "variant" not in g[0] and "ratio" not in g[0]
+
+
+def test_blocks_record_gate_entries_with_variant_and_attempts(cc_home,
+                                                              capsys,
+                                                              tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="HANDOFF_REQUESTED")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        "## Objective\nshort\n", encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    (paths.session_dir(key, nnn) / "handoff.draft.md").unlink()
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    g = [e for e in ledger.read(paths.session_dir(key, nnn))
+         if e.get("type") == "gate"]
+    assert [(e["action"], e["variant"], e["attempts"]) for e in g] == [
+        ("block", "c6", 1), ("block", "c2", 2)]
