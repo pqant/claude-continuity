@@ -244,3 +244,48 @@ def test_turn_clock_subagent_never_prints(cc_home, capsys, tmp_path):
     run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo,
                                          prompt="sub task", agent_id="a1"))
     assert capsys.readouterr().out.strip() == ""
+
+
+def test_turn_clock_line_includes_prev_reply(cc_home, capsys, tmp_path):
+    import re as _re
+    from datetime import datetime
+
+    def hms(iso):
+        return datetime.fromisoformat(
+            iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    tpath = tmp_path / "conv.jsonl"
+    tpath.write_text("\n".join([
+        json.dumps({"type": "user", "timestamp": "2026-11-10T11:19:00.000Z",
+                    "message": {"content": "go"}}),
+        json.dumps({"type": "assistant", "timestamp": "2026-11-10T11:19:03.000Z",
+                    "message": {"content": [{"type": "text", "text": "bas"}]}}),
+        json.dumps({"type": "assistant", "timestamp": "2026-11-10T11:19:55.000Z",
+                    "message": {"content": [{"type": "text", "text": "bitti"}]}}),
+    ]) + "\n", encoding="utf-8")
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo,
+                                         prompt="devam",
+                                         transcript_path=str(tpath)))
+    out = json.loads(capsys.readouterr().out)
+    assert _re.fullmatch(
+        r"cc-continuity: prompt \d{2}:\d{2}:\d{2} \| prev reply "
+        + _re.escape(hms("2026-11-10T11:19:03.000Z"))
+        + r" -> " + _re.escape(hms("2026-11-10T11:19:55.000Z"))
+        + r" \(55s\)", out["systemMessage"])
+
+
+def test_turn_clock_unreadable_transcript_prints_prompt_only(cc_home, capsys,
+                                                             tmp_path):
+    import re as _re
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo, prompt="x",
+                                         transcript_path="/nonexistent/x.jsonl"))
+    out = json.loads(capsys.readouterr().out)
+    assert _re.fullmatch(r"cc-continuity: prompt \d{2}:\d{2}:\d{2}",
+                         out["systemMessage"])

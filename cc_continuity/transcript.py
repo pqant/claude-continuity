@@ -324,18 +324,35 @@ def _ts_hms(ts: str | None) -> str:
         return ""
 
 
-def turn_clock_line(path, *, tail: int = 400) -> str | None:
-    """One clock line for the LAST genuine user turn (issue #43):
+#: Max bytes read from the end of a transcript by the clock helpers. The
+#: prompt path must stay fast even when a session grew a huge transcript
+#: (base64 tool payloads), so only the tail is ever read (issue #44).
+_TAIL_BYTES = 1_000_000
 
-    ``cc-continuity: prompt HH:MM:SS | reply HH:MM:SS -> HH:MM:SS (Ns)``
-    in machine-local time, read from CC's own transcript JSONL tail.
-    ``user_prompt`` records whose content is only tool_result blocks ride
-    along with the turn and never reset the prompt time. Missing file,
-    bad path type or no readable user/assistant pair -> None (never
-    raises); the Stop hook shows nothing rather than risk failing."""
+
+def _tail_lines(path, tail: int = 400) -> list[str] | None:
+    """Last ``tail`` lines of a JSONL file, reading at most
+    ``_TAIL_BYTES`` bytes from the end. ``None`` when unreadable (missing
+    file, directory, bad path type). A partial first line from a mid-line
+    read boundary simply fails the caller's JSON parse and is skipped."""
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()[-tail:]
-    except (OSError, TypeError):
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _TAIL_BYTES))
+            chunk = fh.read().decode("utf-8", "replace")
+    except (OSError, TypeError, AttributeError):
+        return None
+    return chunk.splitlines()[-tail:]
+
+
+def _last_turn_ts(path, *, tail: int = 400):
+    """``(user_ts, first_reply_ts, last_reply_ts)`` of the LAST genuine
+    user turn, or ``None`` when no readable pair exists. Records whose
+    content is only tool_result blocks ride along with the turn and never
+    reset the prompt time."""
+    lines = _tail_lines(path, tail=tail)
+    if lines is None:
         return None
     user_ts = start_ts = last_ts = None
     for raw in lines:
@@ -358,8 +375,25 @@ def turn_clock_line(path, *, tail: int = 400) -> str | None:
             if start_ts is None:
                 start_ts = ts
             last_ts = ts
-    p, s, e = _ts_hms(user_ts), _ts_hms(start_ts), _ts_hms(last_ts)
-    if not (p and s and e):
+    if not (user_ts and start_ts and last_ts):
+        return None
+    return user_ts, start_ts, last_ts
+
+
+def prev_reply_clock(path, *, tail: int = 400) -> str | None:
+    """``prev reply HH:MM:SS -> HH:MM:SS (2m34s)`` for the LAST genuine
+    user turn (issue #44), machine-local, from CC's own transcript JSONL
+    tail so the timing matches the transcript HTML export. The duration
+    spans prompt send to final reply, so it reads as the task's wall
+    time: ``47s`` under a minute, ``2m34s`` beyond. Missing file, bad
+    path type or no readable user/assistant pair -> None (never raises);
+    the UserPromptSubmit hook then shows the prompt clock alone."""
+    ts = _last_turn_ts(path, tail=tail)
+    if ts is None:
+        return None
+    user_ts, start_ts, last_ts = ts
+    s, e = _ts_hms(start_ts), _ts_hms(last_ts)
+    if not (s and e):
         return None
     try:
         dur = (datetime.fromisoformat(str(last_ts).replace("Z", "+00:00"))
@@ -367,7 +401,8 @@ def turn_clock_line(path, *, tail: int = 400) -> str | None:
     except ValueError:
         return None
     secs = max(int(dur.total_seconds()), 0)
-    return f"cc-continuity: prompt {p} | reply {s} -> {e} ({secs}s)"
+    dur_txt = f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+    return f"prev reply {s} -> {e} ({dur_txt})"
 
 
 def _meta_val(meta: dict, key: str) -> str:

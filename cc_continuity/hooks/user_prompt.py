@@ -19,7 +19,7 @@ import re
 import time
 
 from .. import (atomic, bootstrap, config, ledger, lock, paths, project,
-                redact, state)
+                redact, state, transcript)
 from .common import HookContext, log_error, notify_claimed
 
 MAX_PROMPT_CHARS = 2000  # PRD §9, verbatim
@@ -66,12 +66,22 @@ def handle(ctx: HookContext) -> dict | None:
     if is_resume:
         _consume_resume(key, nnn, rec.get("name"), prompt)
     state.update_fields(key, nnn, turn_active=True)
-    # Turn clock (issue #43, opt-in): show the prompt time as an
-    # informational pane line (same systemMessage channel as the gate
-    # notes); subagent prompts returned earlier and never print.
+    # Turn clock (issue #43, opt-in; issue #44: the reply side rides this
+    # line too). One informational pane line per prompt: the prompt time
+    # plus, when the transcript holds a completed previous turn, that
+    # turn's reply window and wall time. UserPromptSubmit is the only
+    # hook whose systemMessage the pinned CC renderer shows in the pane,
+    # so all turn timing travels on this channel. Guarded read: missing
+    # or unreadable transcript falls back to the prompt-only line.
+    # Subagent prompts returned earlier and never print.
     if config.turn_clock(ctx.cfg):
-        return {"systemMessage":
-                f"cc-continuity: prompt {time.strftime('%H:%M:%S')}"}
+        tp = ctx.payload.get("transcript_path")
+        prev = (transcript.prev_reply_clock(tp)
+                if isinstance(tp, str) and tp else None)
+        line = f"cc-continuity: prompt {time.strftime('%H:%M:%S')}"
+        if prev:
+            line += f" | {prev}"
+        return {"systemMessage": line}
     return None
 
 

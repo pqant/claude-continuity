@@ -280,32 +280,52 @@ def test_export_session_survives_manifest_failure(tmp_path, cc_home, monkeypatch
     assert list(dest.glob("*.html"))
 
 
-# ------------------------------------------------------------- turn_clock (#43)
+# ------------------------------------------------- turn_clock prev reply (#44)
 
 
 def _hms(iso):
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
 
 
-def test_turn_clock_line_basic(tmp_path):
-    f = tmp_path / "t.jsonl"
-    f.write_text("\n".join([
+def _turn_records(first_iso="2026-11-10T11:19:03.000Z",
+                  last_iso="2026-11-10T11:19:55.000Z"):
+    return [
         _rec("user", "ee ne durumdayiz ?", ts="2026-11-10T11:19:00.000Z"),
-        _rec("assistant", [{"type": "text", "text": "durum su"}],
-             ts="2026-11-10T11:19:03.000Z"),
-        _rec("assistant", [{"type": "text", "text": "bitti"}],
-             ts="2026-11-10T11:19:55.000Z"),
-    ]) + "\n", encoding="utf-8")
-    line = transcript.turn_clock_line(f)
-    assert line is not None
-    assert line.startswith("cc-continuity: prompt ")
-    assert _hms("2026-11-10T11:19:00.000Z") in line
-    assert _hms("2026-11-10T11:19:03.000Z") in line
-    assert _hms("2026-11-10T11:19:55.000Z") in line
-    assert "(55s)" in line
+        _rec("assistant", [{"type": "text", "text": "durum su"}], ts=first_iso),
+        _rec("assistant", [{"type": "text", "text": "bitti"}], ts=last_iso),
+    ]
 
 
-def test_turn_clock_line_tool_results_do_not_reset_prompt(tmp_path):
+def test_prev_reply_clock_basic(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(_turn_records()) + "\n", encoding="utf-8")
+    assert transcript.prev_reply_clock(f) == (
+        f"prev reply {_hms('2026-11-10T11:19:03.000Z')} -> "
+        f"{_hms('2026-11-10T11:19:55.000Z')} (55s)")
+
+
+def test_prev_reply_clock_under_minute(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(
+        _turn_records(last_iso="2026-11-10T11:19:47.000Z")) + "\n",
+        encoding="utf-8")
+    assert transcript.prev_reply_clock(f).endswith("(47s)")
+
+
+def test_prev_reply_clock_minute_format(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(
+        _turn_records(last_iso="2026-11-10T11:21:34.000Z")) + "\n",
+        encoding="utf-8")
+    assert transcript.prev_reply_clock(f).endswith("(2m34s)")
+    # the 60s boundary reads as one minute, zero-padded seconds
+    f.write_text("\n".join(
+        _turn_records(last_iso="2026-11-10T11:20:00.000Z")) + "\n",
+        encoding="utf-8")
+    assert transcript.prev_reply_clock(f).endswith("(1m00s)")
+
+
+def test_prev_reply_clock_tool_results_do_not_reset(tmp_path):
     f = tmp_path / "t.jsonl"
     f.write_text("\n".join([
         _rec("user", "go", ts="2026-11-10T11:19:00.000Z"),
@@ -316,16 +336,41 @@ def test_turn_clock_line_tool_results_do_not_reset_prompt(tmp_path):
         _rec("assistant", [{"type": "text", "text": "bitti"}],
              ts="2026-11-10T11:20:00.000Z"),
     ]) + "\n", encoding="utf-8")
-    line = transcript.turn_clock_line(f)
-    assert _hms("2026-11-10T11:19:00.000Z") in line  # prompt stays
-    assert "(60s)" in line
+    assert transcript.prev_reply_clock(f) == (
+        f"prev reply {_hms('2026-11-10T11:19:02.000Z')} -> "
+        f"{_hms('2026-11-10T11:20:00.000Z')} (1m00s)")
 
 
-def test_turn_clock_line_without_turn_returns_none(tmp_path):
+def test_prev_reply_clock_uses_the_last_turn(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(_turn_records(last_iso="2026-11-10T11:19:10.000Z") + [
+        _rec("user", "devam", ts="2026-11-10T11:25:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "ikinci"}],
+             ts="2026-11-10T11:25:04.000Z"),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.prev_reply_clock(f) == (
+        f"prev reply {_hms('2026-11-10T11:25:04.000Z')} -> "
+        f"{_hms('2026-11-10T11:25:04.000Z')} (4s)")
+
+
+def test_prev_reply_clock_unreadable_returns_none(tmp_path):
     f = tmp_path / "t.jsonl"
     f.write_text(_rec("user", "hi") + "\n", encoding="utf-8")
-    assert transcript.turn_clock_line(f) is None
+    assert transcript.prev_reply_clock(f) is None  # no assistant reply yet
     f.write_text("garbage\n{broken\n", encoding="utf-8")
-    assert transcript.turn_clock_line(f) is None
-    assert transcript.turn_clock_line(tmp_path / "missing.jsonl") is None
-    assert transcript.turn_clock_line(None) is None
+    assert transcript.prev_reply_clock(f) is None  # unparsable file
+    assert transcript.prev_reply_clock(tmp_path / "missing.jsonl") is None
+    assert transcript.prev_reply_clock(None) is None
+
+
+def test_prev_reply_clock_huge_prefix_still_reads_tail(tmp_path):
+    f = tmp_path / "t.jsonl"
+    noise = "\n".join(
+        '{"type":"user","timestamp":"2026-01-01T00:00:00.000Z",'
+        '"message":{"content":"' + "x" * 4096 + '"}}'
+        for _ in range(600))  # ~2.5 MB before the real turn
+    f.write_text(noise + "\n" + "\n".join(_turn_records()) + "\n",
+                 encoding="utf-8")
+    line = transcript.prev_reply_clock(f)
+    assert line == (f"prev reply {_hms('2026-11-10T11:19:03.000Z')} -> "
+                    f"{_hms('2026-11-10T11:19:55.000Z')} (55s)")

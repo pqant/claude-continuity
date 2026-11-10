@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 
 from .. import (blink, blink_watch, checkpoint, config, ledger, notify,
-                paths, rotator, state, statusline, thresholds, transcript)
+                paths, rotator, state, statusline, thresholds)
 from .common import HookContext, log_error
 
 AMCL_MESSAGE = "Checkpoint ready. Type /clear to continue automatically."
@@ -246,13 +246,4 @@ def handle(ctx: HookContext) -> dict | None:
         blink_watch.spawn(sdir)
     except Exception:
         pass
-    # Turn clock (issue #43, opt-in): the prompt/reply timing CC already
-    # recorded in its transcript JSONL, surfaced as one informational
-    # pane line. Guarded read: no file, no turn, bad path -> no line.
-    if config.turn_clock(cfg):
-        tp = ctx.payload.get("transcript_path")
-        line = (transcript.turn_clock_line(tp)
-                if isinstance(tp, str) and tp else None)
-        if line:
-            return {"systemMessage": line}
     return None

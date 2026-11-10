@@ -681,34 +681,13 @@ def _clock_transcript(tmp_path):
     return str(f)
 
 
-def test_plain_stop_turn_clock_prints_clock_line(cc_home, capsys, tmp_path):
-    from datetime import datetime
-
-    def hms(iso):
-        return datetime.fromisoformat(
-            iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+def test_plain_stop_turn_clock_block_removed(cc_home, capsys, tmp_path):
+    # Issue #44: the Stop clock line never rendered (CC only displays the
+    # hook_system_message channel on the prompt side); the block is gone and
+    # the clock now rides the UserPromptSubmit line instead.
     (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
                                          encoding="utf-8")
     repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
     run_hook("Stop", payload("Stop", repo,
                              transcript_path=_clock_transcript(tmp_path)))
-    out = stdout_json(capsys)
-    assert out == {"systemMessage": f"cc-continuity: prompt {hms('2026-11-10T11:19:00.000Z')} | "
-                                    f"reply {hms('2026-11-10T11:19:03.000Z')} -> "
-                                    f"{hms('2026-11-10T11:19:55.000Z')} (55s)"}
-
-
-def test_plain_stop_turn_clock_default_off(cc_home, capsys, tmp_path):
-    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
-    run_hook("Stop", payload("Stop", repo,
-                             transcript_path=_clock_transcript(tmp_path)))
-    assert stdout_json(capsys) is None
-
-
-def test_plain_stop_turn_clock_missing_transcript_is_silent(cc_home, capsys,
-                                                            tmp_path):
-    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
-                                         encoding="utf-8")
-    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
-    run_hook("Stop", payload("Stop", repo, transcript_path="/nonexistent/x.jsonl"))
     assert stdout_json(capsys) is None
