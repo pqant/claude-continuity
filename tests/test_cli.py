@@ -675,6 +675,44 @@ def test_signal_done_pushes_and_records(cc_home, tmp_path, monkeypatch):
     assert last == {"type": "task_done", "summary": "all 14 tasks green"}
 
 
+def test_signal_dry_run_renders_without_sending(cc_home, tmp_path, monkeypatch,
+                                                capsys):
+    # issue #30: --dry-run renders the exact push and sends nothing
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    (cc_home / "config.json").write_text(json.dumps(
+        {"notify_enabled": True,
+         "notify_endpoint": "https://ntfy.sh/example-topic"}),
+        encoding="utf-8")
+    key, nnn = register_session(repo)
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda *a, **kw: sent.append(a) or True)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    monkeypatch.chdir(repo)
+    assert cli.main(["signal", "--dry-run", "done", "all tests green"]) == 0
+    assert sent == []  # nothing leaves the machine
+    out = capsys.readouterr().out
+    assert "title: ✅ cc-continuity: task complete" in out
+    assert "priority: default" in out
+    assert "summary=all tests green" in out
+    types = [e["type"] for e in ledger.read(paths.session_dir(key, nnn))]
+    assert "task_done" not in types  # ledger untouched too
+
+
+def test_signal_dry_run_reports_disabled(cc_home, tmp_path, monkeypatch,
+                                         capsys):
+    # disabled notify must be visible in the render instead of a silent no-op
+    repo = make_repo(tmp_path)
+    register_session(repo)  # default cc_home config: notify disabled
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    monkeypatch.chdir(repo)
+    assert cli.main(["signal", "--dry-run", "needs-human", "stuck?"]) == 0
+    out = capsys.readouterr().out
+    assert "would NOT send" in out
+    assert "🛑 cc-continuity: BLOCKED" in out
+
+
 def test_signal_without_session_exits_1_no_push(cc_home, tmp_path,
                                                 monkeypatch, capsys):
     from cc_continuity import notify

@@ -225,6 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sig = sub.add_parser("signal",
                            help="agent signal: needs-human / done (Phase 9)")
     p_sig.add_argument("kind", choices=["needs-human", "done"])
+    p_sig.add_argument("--dry-run", action="store_true",
+                       help="print the resolved push without sending "
+                            "or recording (issue #30)")
     p_sig.add_argument("text",
                        help="reason (needs-human) or summary (done)")
 
@@ -690,6 +693,26 @@ def cmd_signal(args: argparse.Namespace) -> int:
     nnn = int(record["nnn"])
     slug = notify.project_slug(key)
     cfg = config.load_config()
+    if args.dry_run:
+        # issue #30: render the exact push, touch nothing (no network,
+        # no ledger).
+        if args.kind == "needs-human":
+            event, fields = "needs_human", {"reason": args.text,
+                                            "host": notify.host()}
+        else:
+            event, fields = "task_done", {"summary": args.text}
+        title, body, prio = notify.build_message(event, slug=slug, nnn=nnn,
+                                                 **fields)
+        on = notify.enabled(cfg)
+        print("cc-continuity: dry run (nothing sent, nothing recorded)")
+        print(f"enabled: {on}"
+              + ("" if on else " — would NOT send (disabled or bad config)"))
+        print(f"title: {title}")
+        print(f"priority: {prio}")
+        print("body:")
+        for ln in body.splitlines():
+            print(f"  {ln}")
+        return 0
     if args.kind == "needs-human":
         sent = notify.safe_send(cfg, "needs_human", slug=slug, nnn=nnn,
                                 reason=args.text, host=notify.host(),
