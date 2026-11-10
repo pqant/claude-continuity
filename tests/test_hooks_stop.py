@@ -663,3 +663,52 @@ def test_blocks_record_gate_entries_with_variant_and_attempts(cc_home,
          if e.get("type") == "gate"]
     assert [(e["action"], e["variant"], e["attempts"]) for e in g] == [
         ("block", "c6", 1), ("block", "c2", 2)]
+
+
+# ------------------------------------------------------------- turn_clock (#43)
+
+
+def _clock_transcript(tmp_path):
+    f = tmp_path / "conv.jsonl"
+    f.write_text("\n".join([
+        json.dumps({"type": "user", "timestamp": "2026-11-10T11:19:00.000Z",
+                    "message": {"content": "go"}}),
+        json.dumps({"type": "assistant", "timestamp": "2026-11-10T11:19:03.000Z",
+                    "message": {"content": [{"type": "text", "text": "bas"}]}}),
+        json.dumps({"type": "assistant", "timestamp": "2026-11-10T11:19:55.000Z",
+                    "message": {"content": [{"type": "text", "text": "bitti"}]}}),
+    ]) + "\n", encoding="utf-8")
+    return str(f)
+
+
+def test_plain_stop_turn_clock_prints_clock_line(cc_home, capsys, tmp_path):
+    from datetime import datetime
+
+    def hms(iso):
+        return datetime.fromisoformat(
+            iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo,
+                             transcript_path=_clock_transcript(tmp_path)))
+    out = stdout_json(capsys)
+    assert out == {"systemMessage": f"cc-continuity: prompt {hms('2026-11-10T11:19:00.000Z')} | "
+                                    f"reply {hms('2026-11-10T11:19:03.000Z')} -> "
+                                    f"{hms('2026-11-10T11:19:55.000Z')} (55s)"}
+
+
+def test_plain_stop_turn_clock_default_off(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo,
+                             transcript_path=_clock_transcript(tmp_path)))
+    assert stdout_json(capsys) is None
+
+
+def test_plain_stop_turn_clock_missing_transcript_is_silent(cc_home, capsys,
+                                                            tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    run_hook("Stop", payload("Stop", repo, transcript_path="/nonexistent/x.jsonl"))
+    assert stdout_json(capsys) is None

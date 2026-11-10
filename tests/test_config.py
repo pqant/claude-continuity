@@ -297,3 +297,15 @@ def test_blink_reply_settle_default_and_clamps():
     assert config.blink_reply_settle({"blink_reply_settle": 500}) == 120.0
     assert config.blink_reply_settle({"blink_reply_settle": True}) == 5.0
     assert config.blink_reply_settle({"blink_reply_settle": "x"}) == 5.0
+
+
+# ------------------------------------------------------------- turn_clock (#43)
+
+
+def test_turn_clock_defaults_off():
+    assert config.turn_clock({}) is False
+
+
+def test_turn_clock_true_and_non_bool():
+    assert config.turn_clock({"turn_clock": True}) is True
+    assert config.turn_clock({"turn_clock": "yes"}) is False

@@ -278,3 +278,54 @@ def test_export_session_survives_manifest_failure(tmp_path, cc_home, monkeypatch
     dest = tmp_path / "proj" / "sessions" / "001" / "checkpoint"
     assert transcript.export_session(_fixture(tmp_path), dest, _meta())
     assert list(dest.glob("*.html"))
+
+
+# ------------------------------------------------------------- turn_clock (#43)
+
+
+def _hms(iso):
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+
+
+def test_turn_clock_line_basic(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join([
+        _rec("user", "ee ne durumdayiz ?", ts="2026-11-10T11:19:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "durum su"}],
+             ts="2026-11-10T11:19:03.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T11:19:55.000Z"),
+    ]) + "\n", encoding="utf-8")
+    line = transcript.turn_clock_line(f)
+    assert line is not None
+    assert line.startswith("cc-continuity: prompt ")
+    assert _hms("2026-11-10T11:19:00.000Z") in line
+    assert _hms("2026-11-10T11:19:03.000Z") in line
+    assert _hms("2026-11-10T11:19:55.000Z") in line
+    assert "(55s)" in line
+
+
+def test_turn_clock_line_tool_results_do_not_reset_prompt(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join([
+        _rec("user", "go", ts="2026-11-10T11:19:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "basliyorum"}],
+             ts="2026-11-10T11:19:02.000Z"),
+        _rec("user", [{"type": "tool_result", "content": "ok"}],
+             ts="2026-11-10T11:19:30.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T11:20:00.000Z"),
+    ]) + "\n", encoding="utf-8")
+    line = transcript.turn_clock_line(f)
+    assert _hms("2026-11-10T11:19:00.000Z") in line  # prompt stays
+    assert "(60s)" in line
+
+
+def test_turn_clock_line_without_turn_returns_none(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text(_rec("user", "hi") + "\n", encoding="utf-8")
+    assert transcript.turn_clock_line(f) is None
+    f.write_text("garbage\n{broken\n", encoding="utf-8")
+    assert transcript.turn_clock_line(f) is None
+    assert transcript.turn_clock_line(tmp_path / "missing.jsonl") is None
+    assert transcript.turn_clock_line(None) is None

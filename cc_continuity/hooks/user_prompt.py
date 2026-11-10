@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from .. import (atomic, bootstrap, config, ledger, lock, paths, project,
                 redact, state)
@@ -65,6 +66,12 @@ def handle(ctx: HookContext) -> dict | None:
     if is_resume:
         _consume_resume(key, nnn, rec.get("name"), prompt)
     state.update_fields(key, nnn, turn_active=True)
+    # Turn clock (issue #43, opt-in): show the prompt time as an
+    # informational pane line (same systemMessage channel as the gate
+    # notes); subagent prompts returned earlier and never print.
+    if config.turn_clock(ctx.cfg):
+        return {"systemMessage":
+                f"cc-continuity: prompt {time.strftime('%H:%M:%S')}"}
     return None
 
 

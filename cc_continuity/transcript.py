@@ -324,6 +324,52 @@ def _ts_hms(ts: str | None) -> str:
         return ""
 
 
+def turn_clock_line(path, *, tail: int = 400) -> str | None:
+    """One clock line for the LAST genuine user turn (issue #43):
+
+    ``cc-continuity: prompt HH:MM:SS | reply HH:MM:SS -> HH:MM:SS (Ns)``
+    in machine-local time, read from CC's own transcript JSONL tail.
+    ``user_prompt`` records whose content is only tool_result blocks ride
+    along with the turn and never reset the prompt time. Missing file,
+    bad path type or no readable user/assistant pair -> None (never
+    raises); the Stop hook shows nothing rather than risk failing."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()[-tail:]
+    except (OSError, TypeError):
+        return None
+    user_ts = start_ts = last_ts = None
+    for raw in lines:
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        t = rec.get("type")
+        ts = rec.get("timestamp")
+        if t == "user":
+            content = (rec.get("message") or {}).get("content")
+            if isinstance(content, list) and all(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content):
+                continue  # a tool result is not a new prompt
+            user_ts, start_ts, last_ts = ts, None, None
+        elif t == "assistant" and user_ts is not None:
+            if start_ts is None:
+                start_ts = ts
+            last_ts = ts
+    p, s, e = _ts_hms(user_ts), _ts_hms(start_ts), _ts_hms(last_ts)
+    if not (p and s and e):
+        return None
+    try:
+        dur = (datetime.fromisoformat(str(last_ts).replace("Z", "+00:00"))
+               - datetime.fromisoformat(str(user_ts).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+    secs = max(int(dur.total_seconds()), 0)
+    return f"cc-continuity: prompt {p} | reply {s} -> {e} ({secs}s)"
+
+
 def _meta_val(meta: dict, key: str) -> str:
     """Escaped meta value for the header, ``n/a`` when missing."""
     val = meta.get(key)

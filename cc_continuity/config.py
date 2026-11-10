@@ -235,6 +235,15 @@ def blink_enabled(cfg: dict) -> bool:
     return v if isinstance(v, bool) else True
 
 
+def turn_clock(cfg: dict) -> bool:
+    """Whether the pane shows per-turn timestamps (issue #43).
+
+    Opt-in: a missing key or any non-bool value keeps it off.
+    """
+    v = cfg.get("turn_clock", False)
+    return v if isinstance(v, bool) else False
+
+
 def blink_reply(cfg: dict) -> bool:
     """Whether a finished turn blinks the tab until the user focuses it
     (reply-ready blink, feature request 2026-11-07).

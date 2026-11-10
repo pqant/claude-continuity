@@ -212,3 +212,35 @@ def test_subagent_prompt_tags_entry_and_skips_state(cc_home, capsys, tmp_path):
     assert entry["type"] == "user_prompt"
     assert entry["agent_id"] == "agent-1"
     assert state.load_state(key, nnn)["turn_active"] is False  # not main work
+
+
+# ------------------------------------------------------------- turn_clock (#43)
+
+
+def test_turn_clock_prompt_line_when_on(cc_home, capsys, tmp_path):
+    import re as _re
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo, prompt="ee ne durumdayiz ?"))
+    out = json.loads(capsys.readouterr().out)
+    assert _re.fullmatch(r"cc-continuity: prompt \d{2}:\d{2}:\d{2}",
+                         out["systemMessage"])
+
+
+def test_turn_clock_off_is_silent_by_default(cc_home, capsys, tmp_path):
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo, prompt="x"))
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_turn_clock_subagent_never_prints(cc_home, capsys, tmp_path):
+    (cc_home / "config.json").write_text(json.dumps({"turn_clock": True}),
+                                         encoding="utf-8")
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    run_hook("UserPromptSubmit", payload("UserPromptSubmit", repo,
+                                         prompt="sub task", agent_id="a1"))
+    assert capsys.readouterr().out.strip() == ""
