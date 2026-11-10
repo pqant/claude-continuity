@@ -26,9 +26,14 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
-- **2026-11-10**: New opt-in `turn_clock` config prints prompt and reply
-  timestamps right in the pane (`prompt | reply start -> end (Ns)`), so
-  the timing the transcript HTML shows is no longer lost while you work
+- **2026-11-10**: The turn clock's reply timing moved to where the pane
+  actually renders it: every prompt line now carries the previous task
+  (`prev reply start -> end (2m34s)`) read from the transcript, so you
+  see how long the last task took the moment you send the next one
+  ([commit](https://github.com/pqant/claude-continuity/commit/b220ddf)).
+- **2026-11-10**: New opt-in `turn_clock` config surfaces message timing
+  in the pane: the prompt time plus the previous reply's window and
+  wall time, matching what the transcript HTML export shows
   ([commit](https://github.com/pqant/claude-continuity/commit/37317c8)).
 - **2026-11-10**: Rotation gate decisions (guide/deny/block/silent) now
   land in the session ledger with their ratio and C-text variant, so a
@@ -44,10 +49,6 @@ log:
   push (title, priority, body, enabled state) without sending it -
   formatting checks are silent now
   ([commit](https://github.com/pqant/claude-continuity/commit/534a6d6)).
-- **2026-11-10**: The quickstart now recommends `pipx install` (and
-  `uv tool install`) for the CLI - the Python environment stays clean,
-  the command lands on PATH
-  ([commit](https://github.com/pqant/claude-continuity/commit/6ea23a9)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional

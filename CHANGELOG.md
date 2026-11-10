@@ -4,6 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-10
+
+### Fixed
+
+- The reply half of the turn clock now appears in the pane
+  (issue #44): the pinned Claude Code renderer only displays hook
+  `systemMessage` for the prompt-side channel, so the Stop hook's
+  clock line shipped in #43 was never visible (the hook itself ran
+  fine, proven by ledger entries and an empty error log). Reply
+  timing now rides the UserPromptSubmit line: each new prompt prints
+  `cc-continuity: prompt HH:MM:SS | prev reply HH:MM:SS -> HH:MM:SS (2m34s)`,
+  with the previous turn read from the transcript JSONL tail (a
+  byte-capped read keeps the prompt path fast) and the duration
+  rendered human-readable (`47s` under a minute). The first prompt of
+  a session prints the prompt time only, and the never-rendered Stop
+  clock block was removed.
+
 ## [0.3.11] - 2026-11-10
 
 ### Added
