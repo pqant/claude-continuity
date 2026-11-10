@@ -4,6 +4,15 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-10
+
+### Changed
+
+- README quickstart (issue #29): the PyPI path now recommends
+  `pipx install cc-continuity` (with `uv tool install` as the
+  alternative), the standard way to install Python CLIs; plain
+  `pip install` stays documented for venv and library use.
+
 ## [0.3.6] - 2026-11-10
 
 ### Added

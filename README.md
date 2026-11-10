@@ -26,6 +26,10 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: The quickstart now recommends `pipx install` (and
+  `uv tool install`) for the CLI - the Python environment stays clean,
+  the command lands on PATH
+  ([commit](https://github.com/pqant/claude-continuity/commit/6ea23a9)).
 - **2026-11-10**: New `cc-continuity ratio [slug]` prints the live
   context ratio of a project on one line - the manual metric-file read
   in trial bookkeeping is gone
@@ -43,10 +47,6 @@ log:
   hard context limit the in-flight tool call now passes and the handoff
   instruction arrives as a neutral notice, so the pane stays clean
   ([commit](https://github.com/pqant/claude-continuity/commit/d8e015c)).
-- **2026-11-09**: When the gate does deny a tool (only after the model
-  was told to write the handoff and kept working), the full guidance
-  shows as an informational message instead of a red error line
-  ([commit](https://github.com/pqant/claude-continuity/commit/f8a6cc9)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
