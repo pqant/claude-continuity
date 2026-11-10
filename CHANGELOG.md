@@ -4,6 +4,16 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-10
+
+### Added
+
+- `cc-continuity ratio [slug]` (issue #28): prints the latest known
+  context ratio of the current (or named) project on one line, e.g.
+  `claude-continuity 0.774`. Removes the manual metric-file reading
+  from rotation trial bookkeeping and debugging; missing metrics or an
+  unknown/ambiguous slug exit non-zero with a one-line message.
+
 ## [0.3.5] - 2026-11-10
 
 ### Added
