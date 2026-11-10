@@ -26,6 +26,10 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: `cc-continuity signal --dry-run` now prints the exact
+  push (title, priority, body, enabled state) without sending it -
+  formatting checks are silent now
+  ([commit](https://github.com/pqant/claude-continuity/commit/534a6d6)).
 - **2026-11-10**: The quickstart now recommends `pipx install` (and
   `uv tool install`) for the CLI - the Python environment stays clean,
   the command lands on PATH
@@ -43,10 +47,6 @@ log:
   finishes silently, so the built-in "Stop hook error" line only appears
   when the model genuinely fails to produce a draft after being told
   ([commit](https://github.com/pqant/claude-continuity/commit/2c9d2bf)).
-- **2026-11-09**: Routine rotations no longer print a red error: at the
-  hard context limit the in-flight tool call now passes and the handoff
-  instruction arrives as a neutral notice, so the pane stays clean
-  ([commit](https://github.com/pqant/claude-continuity/commit/d8e015c)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional

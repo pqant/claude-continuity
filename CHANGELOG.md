@@ -4,6 +4,16 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-10
+
+### Added
+
+- `cc-continuity signal --dry-run done|needs-human "text"` (issue #30):
+  prints the resolved title, priority and body of the push - plus
+  whether notifications are enabled at all - without touching the
+  network or the ledger. Formatting checks no longer require a real
+  push to the user's phone.
+
 ## [0.3.7] - 2026-11-10
 
 ### Changed
