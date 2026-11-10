@@ -26,6 +26,10 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: New opt-in `turn_clock` config prints prompt and reply
+  timestamps right in the pane (`prompt | reply start -> end (Ns)`), so
+  the timing the transcript HTML shows is no longer lost while you work
+  ([commit](https://github.com/pqant/claude-continuity/commit/37317c8)).
 - **2026-11-10**: Rotation gate decisions (guide/deny/block/silent) now
   land in the session ledger with their ratio and C-text variant, so a
   strange rotation is debugged from disk instead of reverse-engineering
@@ -44,10 +48,6 @@ log:
   `uv tool install`) for the CLI - the Python environment stays clean,
   the command lands on PATH
   ([commit](https://github.com/pqant/claude-continuity/commit/6ea23a9)).
-- **2026-11-10**: New `cc-continuity ratio [slug]` prints the live
-  context ratio of a project on one line - the manual metric-file read
-  in trial bookkeeping is gone
-  ([commit](https://github.com/pqant/claude-continuity/commit/c0e6cdc)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional

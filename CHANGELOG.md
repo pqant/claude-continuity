@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-10
+
+### Added
+
+- Turn clock (issue #43): with `"turn_clock": true` in
+  `~/.claude-continuity/config.json` (opt-in, default off), the pane
+  shows when a prompt was sent and when the reply ran. UserPromptSubmit
+  prints the prompt time as an informational line; a normal turn end
+  prints `prompt HH:MM:SS | reply HH:MM:SS -> HH:MM:SS (Ns)` parsed from
+  CC's own transcript JSONL, so the timing matches what the transcript
+  HTML export shows. Missing or malformed transcripts print nothing and
+  the Stop hook never fails. Times render in machine-local time.
+
 ## [0.3.10] - 2026-11-10
 
 ### Added
