@@ -56,7 +56,8 @@ def test_merge_realistic_seed():
     assert s["theme"] == "dark"  # foreign keys survive
     assert m["previous_status_line"] == HUD
     assert m["status_line_changed"] is True
-    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144"}
+    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+                             "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95"}
 
 
 def test_merge_fresh_empty_settings():
@@ -115,9 +116,42 @@ def test_merge_preserves_user_acw():
     orig = {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "30000"}}
     merged, m = sm.merge_settings(orig, launcher=LAUNCHER, window=262144)
     assert merged["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "30000"
-    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": None}
+    assert m["env_prev"] == {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": None,
+                             "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": None}
     out = sm.unmerge_settings(merged, m)
     assert out["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "30000"
+
+
+def test_merge_pins_override_when_absent():
+    """Issue #31: install pins native auto-compact behind the rotation
+    gate (doctor #27 flags the gap otherwise); the pin is only added when
+    absent - an existing user value always wins."""
+    merged, m = sm.merge_settings({}, launcher=LAUNCHER, window=262144)
+    assert merged["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "95"
+    assert m["env_prev"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] is None
+
+
+def test_merge_preserves_existing_user_override():
+    orig = {"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90"}}
+    merged, m = sm.merge_settings(orig, launcher=LAUNCHER, window=262144)
+    assert merged["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "90"
+    assert m["env_prev"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "90"
+    assert sm.unmerge_settings(merged, m) == orig
+
+
+def test_merge_treats_empty_override_as_absent():
+    orig = {"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": ""}}
+    merged, m = sm.merge_settings(orig, launcher=LAUNCHER, window=262144)
+    assert merged["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "95"
+    out = sm.unmerge_settings(merged, m)
+    assert out["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == ""
+
+
+def test_unmerge_removes_override_when_we_added_it():
+    merged, m = sm.merge_settings({"theme": "dark"}, launcher=LAUNCHER,
+                                  window=262144)
+    out = sm.unmerge_settings(merged, m)
+    assert "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in out.get("env", {})
 
 
 def test_unmerge_env_prev_value_restored():

@@ -59,6 +59,42 @@ def test_install_fresh_home_creates_all(fake_home):
     assert "install" in cfg
 
 
+def test_install_writes_override_when_absent(fake_home):
+    """Issue #31: a fresh install must pin native auto-compact behind the
+    rotation gate (doctor #27 flags the gap otherwise); foreign env
+    values are preserved."""
+    h = fake_home
+    (h / ".claude").mkdir()
+    (h / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}},
+                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    install.install(h, window=262144, runner=FakeRun())
+    s = _settings(h)
+    assert s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "95"
+    assert s["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+
+
+def test_install_keeps_existing_user_override(fake_home):
+    h = fake_home
+    (h / ".claude").mkdir()
+    (h / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90"}},
+                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    install.install(h, window=262144, runner=FakeRun())
+    assert _settings(h)["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "90"
+
+
+def test_reinstall_then_uninstall_removes_override(fake_home):
+    """Carry-over (F-G7-2) must cover the override too: two installs plus
+    one uninstall on a fresh home restores the pre-install env exactly."""
+    install.install(fake_home, window=262144, runner=FakeRun())
+    install.install(fake_home, window=262144, runner=FakeRun())
+    install.uninstall(fake_home)
+    s = _settings(fake_home)
+    assert "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in s.get("env", {})
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in s.get("env", {})
+
+
 def test_hook_commands_use_absolute_launcher_path(fake_home):
     install.install(fake_home, window=262144, runner=FakeRun())
     s = _settings(fake_home)

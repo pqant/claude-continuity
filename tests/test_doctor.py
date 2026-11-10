@@ -120,9 +120,15 @@ def test_rotation_env_warns_on_drift(fake_home):
 
 
 def test_rotation_env_warns_when_env_missing(fake_home):
-    # a plain install never writes the env block: warning, not failure
+    # missing rotation-env keys are a warning, not a failure. The pins
+    # exist since #31, so the gap state must be created explicitly.
     h = fake_home
     install.install(h, window=262144, runner=FakeRun())
+    sp = h / ".claude" / "settings.json"
+    s = json.loads(sp.read_text(encoding="utf-8"))
+    del s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]
+    del s["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+    sp.write_text(json.dumps(s), encoding="utf-8")
     checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
     c = next(x for x in checks if x.name == "rotation-env")
     assert c.ok and c.warning

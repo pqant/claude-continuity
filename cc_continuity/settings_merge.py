@@ -21,7 +21,14 @@ ALLOW_RULES = ("Read(~/.claude-continuity/**)",
                "Edit(~/.claude-continuity/**)",
                "Bash(cc-continuity *)")
 ADDITIONAL_DIRS = ("~/.claude-continuity",)
-ENV_KEYS = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
+# Issue #31: install pins the native auto-compact override so a fresh
+# install starts the rotation race from the right position (the gate at
+# 0.75 must always fire before auto-compact at 0.95; doctor's
+# rotation-env check flags drift). Written only when absent - a
+# user-set value always wins.
+ENV_OVERRIDE_KEY = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+ENV_OVERRIDE_VALUE = "95"
+ENV_KEYS = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", ENV_OVERRIDE_KEY)
 # NOTE (F-P9-4, 2026-09-21 user decision): CLAUDE_CODE_AUTO_COMPACT_WINDOW
 # is user-owned and never written or removed by the installer — PCT
 # override + ACW together would enable native auto-compact, which the
@@ -70,6 +77,8 @@ def merge_settings(existing: dict, *, launcher: str, window: int) -> tuple[dict,
     for key in ENV_KEYS:
         manifest["env_prev"][key] = env.get(key)
     env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    if not str(env.get(ENV_OVERRIDE_KEY, "")).strip():
+        env[ENV_OVERRIDE_KEY] = ENV_OVERRIDE_VALUE
     perms = s.setdefault("permissions", {})
     allow = perms.get("allow")
     if not isinstance(allow, list):
