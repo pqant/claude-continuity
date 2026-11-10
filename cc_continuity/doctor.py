@@ -27,6 +27,10 @@ from .settings_merge import HOOK_EVENTS, is_ours
 TMP_MAX_AGE = 3600.0
 LOCK_STALE_AFTER = 120.0
 
+# Recommended rotation prerequisites (issue #27): rotation runs with any
+# values; 95 keeps native auto-compact (~249K) behind the custom gate.
+ROTATION_ENV_OVERRIDE_PCT = "95"
+
 
 @dataclasses.dataclass
 class Check:
@@ -164,6 +168,28 @@ def run_doctor(home: Path, runner=subprocess.run,
         sl = settings.get("statusLine") or {}
         cmd = str(sl.get("command", ""))
         add("statusline", "cc-continuity" in cmd, cmd or "absent")
+    # 8b: rotation prerequisites (issue #27): the settings env must keep
+    # native auto-compact behind the rotation gate and pin the window the
+    # ratios reference. Warning only - these are the user's values.
+    from . import config  # local: doctor stays import-light
+    raw_env = settings.get("env") if isinstance(settings, dict) else None
+    env = raw_env if isinstance(raw_env, dict) else {}
+    want_window = str((cfg or {}).get("window_tokens")
+                      or config.DEFAULTS["window_tokens"])
+    drift = []
+    got = str(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")).strip()
+    if got != ROTATION_ENV_OVERRIDE_PCT:
+        drift.append(f"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={got or 'unset'} "
+                     f"(recommended {ROTATION_ENV_OVERRIDE_PCT})")
+    got_w = str(env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "")).strip()
+    if got_w != want_window:
+        drift.append(f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={got_w or 'unset'} "
+                     f"(expected {want_window})")
+    add("rotation-env", True,
+        "; ".join(drift) if drift else
+        f"override {ROTATION_ENV_OVERRIDE_PCT}, window {want_window}",
+        warning=bool(drift))
+
     # 9: chained statusline target exists (warning only — the user's own
     # script may live outside this HOME in a half-installed machine)
     chained = (cfg or {}).get("chained_statusline")

@@ -89,6 +89,45 @@ def test_changed_claude_version_warns(fake_home):
     assert c.ok and c.warning
 
 
+def test_rotation_env_all_green_on_pinned_values(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    sfile = h / ".claude" / "settings.json"
+    s = json.loads(sfile.read_text(encoding="utf-8"))
+    s.setdefault("env", {}).update({
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144"})
+    sfile.write_text(json.dumps(s), encoding="utf-8")
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "rotation-env")
+    assert c.ok and not c.warning
+
+
+def test_rotation_env_warns_on_drift(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    sfile = h / ".claude" / "settings.json"
+    s = json.loads(sfile.read_text(encoding="utf-8"))
+    s.setdefault("env", {}).update({
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "131072"})
+    sfile.write_text(json.dumps(s), encoding="utf-8")
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "rotation-env")
+    assert c.ok and c.warning  # warn-only: the values are the user's call
+    assert "90" in c.detail and "95" in c.detail
+    assert "131072" in c.detail and "262144" in c.detail
+
+
+def test_rotation_env_warns_when_env_missing(fake_home):
+    # a plain install never writes the env block: warning, not failure
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "rotation-env")
+    assert c.ok and c.warning
+
+
 def test_stale_lock_warns(fake_home, cc_home):
     h = fake_home
     install.install(h, window=262144, runner=FakeRun())
