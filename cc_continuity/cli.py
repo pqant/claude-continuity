@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("-n", type=int, default=20,
                         help="show at most N most recent sessions (default 20)")
 
+    p_ratio = sub.add_parser("ratio",
+                             help="print the live context ratio of a project")
+    p_ratio.add_argument("slug", nargs="?",
+                         help="project slug (default: current project)")
+
     p_vd = sub.add_parser("validate-draft",
                           help="validate a handoff draft (PRD §10.1)")
     p_vd.add_argument("file", help="path to handoff.draft.md")
@@ -475,6 +480,79 @@ def cmd_history(args: argparse.Namespace) -> int:
         nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
         print(f"{nnn:03d}  {s.get('name')}  {s.get('session_id')}  "
               f"{s.get('created')}")
+    return 0
+
+
+def _project_record(key: str) -> dict | None:
+    pfile = paths.project_dir(key) / "project.json"
+    try:
+        record = json.loads(pfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def cmd_ratio(args: argparse.Namespace) -> int:
+    """One-shot context ratio for trial bookkeeping (issue #28)."""
+    from . import notify  # local: keep the module import list tight
+    if args.slug:
+        pdir = paths.projects_dir()
+        matches = [d.name for d in pdir.iterdir()
+                   if d.is_dir() and notify.project_slug(d.name) == args.slug] \
+            if pdir.is_dir() else []
+        if len(matches) != 1:
+            if not matches:
+                print(f"cc-continuity ratio: no project {args.slug!r}",
+                      file=sys.stderr)
+            else:
+                print(f"cc-continuity ratio: ambiguous slug {args.slug!r} "
+                      f"({', '.join(sorted(matches))})", file=sys.stderr)
+            return 1
+        key = matches[0]
+        record = _project_record(key)
+        if record is None or not record.get("root"):
+            print(f"cc-continuity ratio: unreadable project record for {key}",
+                  file=sys.stderr)
+            return 1
+        root = Path(record["root"])
+    else:
+        root = project.resolve_root(Path.cwd())
+        key = project.project_key_for_root(root)
+        record = _project_record(key)
+        if record is None:
+            # fall back to the single globally registered project
+            pdir = paths.projects_dir()
+            regs = [d for d in pdir.iterdir()
+                    if d.is_dir() and (d / "project.json").is_file()] \
+                if pdir.is_dir() else []
+            if len(regs) == 1:
+                key = regs[0].name
+                record = _project_record(key)
+                if record is None or not record.get("root"):
+                    print(f"cc-continuity ratio: unreadable project record "
+                          f"for {key}", file=sys.stderr)
+                    return 1
+                root = Path(record["root"])
+            else:
+                print(f"No cc-continuity project for {root} and "
+                      f"{len(regs)} registered: pass a slug.",
+                      file=sys.stderr)
+                return 1
+    _rec, metric = _resolve_session(root, key)
+    if not metric:
+        # the runtime marker is statusline-owned; trial runs often have no
+        # statusline yet: fall back to the newest registered session.
+        for s in reversed((record or {}).get("sessions") or []):
+            sid = s.get("session_id") if isinstance(s, dict) else None
+            if sid:
+                metric = statusline.read_metric(str(sid))
+                if metric:
+                    break
+    ratio = (metric or {}).get("ratio")
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        print(f"{notify.project_slug(key)}: no metrics yet", file=sys.stderr)
+        return 1
+    print(f"{notify.project_slug(key)} {ratio}")
     return 0
 
 
@@ -1236,6 +1314,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_hook(args)
     if args.command == "history":
         return cmd_history(args)
+    if args.command == "ratio":
+        return cmd_ratio(args)
     if args.command == "validate-draft":
         return cmd_validate_draft(args)
     if args.command == "validate":

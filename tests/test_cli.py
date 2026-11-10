@@ -122,6 +122,48 @@ def test_history_n_limits_output(cc_home, tmp_path, monkeypatch, capsys):
     assert "spike-repo-001" not in out
 
 
+# -------------------------------------------------------------------- ratio
+
+
+def test_ratio_prints_current_project(cc_home, tmp_path, monkeypatch,
+                                      capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.774, session_id=SID)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio"]) == 0
+    assert capsys.readouterr().out == "spike-repo 0.774\n"
+
+
+def test_ratio_no_metrics_exits_1(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio"]) == 1
+    assert "no metrics" in capsys.readouterr().err
+
+
+def test_ratio_explicit_slug_from_elsewhere(cc_home, tmp_path, monkeypatch,
+                                            capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.4, session_id=SID)
+    elsewhere = make_repo(tmp_path, name="elsewhere-repo")
+    monkeypatch.chdir(elsewhere)
+    assert cli.main(["ratio", "spike-repo"]) == 0
+    assert capsys.readouterr().out == "spike-repo 0.4\n"
+
+
+def test_ratio_unknown_slug_exits_1(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    monkeypatch.chdir(repo)
+    assert cli.main(["ratio", "nope"]) == 1
+    assert "nope" in capsys.readouterr().err
+
+
 # ------------------------------------------------------------- Phase 4 cmds
 
 import os as _os
