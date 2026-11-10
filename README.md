@@ -114,14 +114,18 @@ exec zsh                 # reload the shell (claude() wrapper)
 cc-continuity doctor     # everything should be green
 ```
 
-From PyPI:
+From PyPI (recommended: `pipx`, the standard way to install Python CLIs):
 
 ```bash
-pip install cc-continuity
+pipx install cc-continuity          # or: uv tool install cc-continuity
 cc-continuity install
 exec zsh
 cc-continuity doctor
 ```
+
+Plain `pip install cc-continuity` also works inside a venv or when
+embedding it as a library; `pipx`/`uv tool` put the CLI on PATH without
+touching your Python environment.
 
 On Windows (WSL) the same steps run inside the distro (bash as the
 login shell); the full WSL guide is [`docs/WINDOWS.md`](docs/WINDOWS.md).
