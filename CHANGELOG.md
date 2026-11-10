@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-10
+
+### Fixed
+
+- `install` now pins `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=95` (issue #31).
+  It previously wrote `CLAUDE_CODE_MAX_CONTEXT_TOKENS` but never the
+  auto-compact override, so a fresh machine started the rotation race
+  against native auto-compact at its default position; the doctor
+  rotation-env check (#27) flagged the gap on every such machine. The
+  override is written only when absent, so a user-set value always
+  wins, and uninstall still restores `settings.json` exactly (the
+  reinstall carry-over now covers this key too).
+
 ## [0.3.8] - 2026-11-10
 
 ### Added

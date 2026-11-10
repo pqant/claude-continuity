@@ -26,6 +26,11 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: `cc-continuity install` now pins
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=95` next to the context-window pin, so
+  a fresh install always starts the rotation gate ahead of native
+  auto-compact (a user-set value is never overwritten)
+  ([commit](https://github.com/pqant/claude-continuity/commit/708237d)).
 - **2026-11-10**: `cc-continuity signal --dry-run` now prints the exact
   push (title, priority, body, enabled state) without sending it -
   formatting checks are silent now
@@ -42,11 +47,6 @@ log:
   prerequisites in `settings.json` (auto-compact override + context
   window pin) and flags drift with the exact recommended values
   ([commit](https://github.com/pqant/claude-continuity/commit/9462064)).
-- **2026-11-09**: The turn-end rotation gate no longer blocks a routine
-  rotation when the handoff draft is already valid: the rotation now
-  finishes silently, so the built-in "Stop hook error" line only appears
-  when the model genuinely fails to produce a draft after being told
-  ([commit](https://github.com/pqant/claude-continuity/commit/2c9d2bf)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
