@@ -1425,3 +1425,63 @@ def test_run_reply_settles_before_marker(cc_home, tmp_path):
     line = statusline.run(json.dumps(_payload(session_id=sid)).encode(),
                           _cfg(statusline_ansi=False))
     assert blink.MARKER_REPLY not in line
+
+
+# ------------------------------------------- prev task duration (HUD #45)
+
+
+def _conv(tmp_path):
+    """Transcript with one completed turn: prompt 11:19:00Z, replies to
+    11:19:55Z -> 55 s wall time."""
+    f = tmp_path / "conv.jsonl"
+    f.write_text("\n".join([
+        json.dumps({"type": "user", "timestamp": "2026-11-10T11:19:00.000Z",
+                    "message": {"content": "go"}}),
+        json.dumps({"type": "assistant",
+                    "timestamp": "2026-11-10T11:19:03.000Z",
+                    "message": {"content": [{"type": "text",
+                                             "text": "bas"}]}}),
+        json.dumps({"type": "assistant",
+                    "timestamp": "2026-11-10T11:19:55.000Z",
+                    "message": {"content": [{"type": "text",
+                                             "text": "bitti"}]}}),
+    ]) + "\n", encoding="utf-8")
+    return str(f)
+
+
+def test_render_segment_prev_dur_on_active_usage():
+    assert statusline.render_segment(
+        0.64, {"state": "ACTIVE"}, True, ansi=False,
+        prev_dur="39m15s") == "◆ 64% Active Usage ⏱ prev task 39m15s"
+
+
+def test_render_segment_prev_dur_absent_is_unchanged():
+    assert statusline.render_segment(0.64, {"state": "ACTIVE"}, True,
+                                     ansi=False) == "◆ 64% Active Usage"
+
+
+def test_render_segment_prev_dur_only_on_active_usage():
+    assert statusline.render_segment(
+        0.7, {"name": "proj-001", "state": "ROTATING"}, True, ansi=False,
+        prev_dur="55s") == "◆ 70% ROTATING"
+
+
+def test_run_shows_prev_task_when_turn_clock_on(cc_home, tmp_path):
+    line = statusline.run(
+        json.dumps(_payload(transcript_path=_conv(tmp_path))).encode(),
+        _cfg(statusline_ansi=False, turn_clock=True))
+    assert line == "◆ 9% Active Usage ⏱ prev task 55s"
+
+
+def test_run_omits_prev_task_when_turn_clock_off(cc_home, tmp_path):
+    line = statusline.run(
+        json.dumps(_payload(transcript_path=_conv(tmp_path))).encode(),
+        _cfg(statusline_ansi=False))
+    assert line == "◆ 9% Active Usage"
+
+
+def test_run_unreadable_transcript_omits_prev_task(cc_home):
+    line = statusline.run(
+        json.dumps(_payload(transcript_path="/nonexistent/x.jsonl")).encode(),
+        _cfg(statusline_ansi=False, turn_clock=True))
+    assert line == "◆ 9% Active Usage"

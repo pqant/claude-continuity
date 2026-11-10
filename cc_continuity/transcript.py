@@ -401,8 +401,30 @@ def prev_reply_clock(path, *, tail: int = 400) -> str | None:
     except ValueError:
         return None
     secs = max(int(dur.total_seconds()), 0)
-    dur_txt = f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
-    return f"prev reply {s} -> {e} ({dur_txt})"
+    return f"prev reply {s} -> {e} ({_fmt_secs(secs)})"
+
+
+def _fmt_secs(secs: int) -> str:
+    """``47s`` under a minute, ``2m34s`` beyond (zero-padded seconds)."""
+    return f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+
+
+def prev_task_duration(path, *, tail: int = 400) -> str | None:
+    """Wall time of the LAST genuine user turn as ``39m15s`` (issue #45):
+    prompt send to final reply, the same span ``prev_reply_clock``
+    reports. For the status line HUD, which shows it the moment the turn
+    ends. Missing file, bad path type or no readable user/assistant pair
+    -> None (never raises); the HUD then simply omits the segment."""
+    ts = _last_turn_ts(path, tail=tail)
+    if ts is None:
+        return None
+    user_ts, _start_ts, last_ts = ts
+    try:
+        dur = (datetime.fromisoformat(str(last_ts).replace("Z", "+00:00"))
+               - datetime.fromisoformat(str(user_ts).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+    return _fmt_secs(max(int(dur.total_seconds()), 0))
 
 
 def _meta_val(meta: dict, key: str) -> str:

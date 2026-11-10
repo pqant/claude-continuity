@@ -30,7 +30,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import atomic, blink, config, ledger, naming, paths
+from . import atomic, blink, config, ledger, naming, paths, transcript
 
 #: Hooks treat a metric older than this as unknown (PRD §7, METRIC_STALE).
 STALE_SECONDS = 600
@@ -383,7 +383,8 @@ def render_segment(ratio: float | None, record: dict | None,
                    shimmer: bool = False,
                    shimmer_pos: float | None = None,
                    breathing: bool = False, ask: bool = False,
-    reply: bool = False) -> str:
+    reply: bool = False,
+    prev_dur: "str | None" = None) -> str:
     """Render our ``◆ …`` segment (PRD §7; Phase 11 styling, P11-D2/D3/D4).
 
     Forms: ``◆ off`` (disabled / session off), ``◆ …`` (no metric),
@@ -421,6 +422,12 @@ def render_segment(ratio: float | None, record: dict | None,
     blocked_text = ((f" {blink.MARKER_BLOCKED}" if blocked else "")
                     + (f" {blink.MARKER_ASK}" if ask else "")
                     + (f" {blink.MARKER_REPLY}" if reply else "")) or None
+    # Issue #45: previous task wall time (``⏱ prev task 39m15s``) rides
+    # the ACTIVE USAGE text only (opt-in via turn_clock at the call site;
+    # rotation/handoff states keep their established forms). Appended to
+    # the main text, not the marker suffix: blink substring-matches the
+    # markers, this text must stay neutral.
+    prev_text = f" ⏱ prev task {prev_dur}" if prev_dur else ""
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
             return "◆ off"
@@ -437,7 +444,8 @@ def render_segment(ratio: float | None, record: dict | None,
             return f"◆ {pct}% AMCL" + (blocked_text or "")
         if state_name in _HANDOFF_STATES:
             return f"◆ {pct}% HANDOFF!" + (blocked_text or "")
-        return f"◆ {pct}% Active Usage" + (blocked_text or "")
+        return (f"◆ {pct}% Active Usage" + prev_text
+                + (blocked_text or ""))
 
     if not enabled or (record is not None and record.get("off")):
         return _style("static", "◆ off", None, now)
@@ -460,8 +468,9 @@ def render_segment(ratio: float | None, record: dict | None,
     if state_name in _HANDOFF_STATES:
         return _style("handoff", f"◆ {pct}% HANDOFF!", blocked_text, now,
                       shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
-    return _style("ok", f"◆ {pct}% Active Usage", blocked_text, now,
-                  shimmer=shimmer, shimmer_pos=shimmer_pos, breath=breath)
+    return _style("ok", f"◆ {pct}% Active Usage{prev_text}", blocked_text,
+                  now, shimmer=shimmer, shimmer_pos=shimmer_pos,
+                  breath=breath)
 
 
 # ------------------------ Phase 11 rev 4: reactive shimmer detection
@@ -673,6 +682,17 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                     now=time.time()) is not None
             except (OSError, ValueError):
                 reply = False
+    # Issue #45: prev-task wall time for the HUD (turn_clock opt-in).
+    # The transcript path rides the status line payload; the parse is the
+    # guarded #44 tail reader and must never take the HUD down.
+    prev_dur = None
+    if enabled and config.turn_clock(cfg) and metric is not None:
+        tp = metric.get("transcript_path")
+        if isinstance(tp, str) and tp:
+            try:
+                prev_dur = transcript.prev_task_duration(tp)
+            except Exception:
+                prev_dur = None
     ansi = bool(cfg.get("statusline_ansi", True))
     live = (enabled and ratio is not None
             and not (record is not None and record.get("off")))
@@ -731,11 +751,11 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             if ratio is not None:
                 progress_pane.write_progress_data(win, render_segment(
                     ratio, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask, reply=reply))
+                    ask=ask, reply=reply, prev_dur=prev_dur))
             elif enabled and not progress_pane.has_progress_data(win):
                 progress_pane.write_progress_data(win, render_segment(
                     0.0, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask, reply=reply))
+                    ask=ask, reply=reply, prev_dur=prev_dur))
             segment = ""
         elif (isinstance(result, dict)
               and result.get("reason") in ("no-window", "error")):
@@ -749,7 +769,8 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         else:
             segment = render_segment(ratio, record, enabled,
                                      blocked=blocked, ansi=ansi, now=now,
-                                     shimmer=False, ask=ask, reply=reply)
+                                     shimmer=False, ask=ask, reply=reply,
+                                     prev_dur=prev_dur)
     elif mode == 2:
         # Phase 12: breathing — the whole segment brightens and dims in
         # a 2 s cycle (factor 1.0 == today's rainbow byte-for-byte). No
@@ -757,7 +778,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         sweep_pos = None
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, breathing=True,
-                                 ask=ask, reply=reply)
+                                 ask=ask, reply=reply, prev_dur=prev_dur)
     else:
         # mode 0 (default): byte-identical to today. Revision 10:
         # constant-speed sweep — the band advances SHIMMER_CELLS_PER_S
@@ -772,7 +793,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         segment = render_segment(ratio, record, enabled, blocked=blocked,
                                  ansi=ansi, now=now, shimmer=shimmer,
                                  shimmer_pos=sweep_pos, ask=ask,
-                                 reply=reply)
+                                 reply=reply, prev_dur=prev_dur)
     _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)

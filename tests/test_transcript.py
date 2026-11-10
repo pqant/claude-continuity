@@ -374,3 +374,32 @@ def test_prev_reply_clock_huge_prefix_still_reads_tail(tmp_path):
     line = transcript.prev_reply_clock(f)
     assert line == (f"prev reply {_hms('2026-11-10T11:19:03.000Z')} -> "
                     f"{_hms('2026-11-10T11:19:55.000Z')} (55s)")
+
+
+# ------------------------------------------ prev_task_duration (HUD #45)
+
+
+def test_prev_task_duration_basic(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(_turn_records()) + "\n", encoding="utf-8")
+    assert transcript.prev_task_duration(f) == "55s"
+
+
+def test_prev_task_duration_minutes(tmp_path):
+    f = tmp_path / "t.jsonl"
+    # prompt 11:17:00 -> final reply 11:56:15 = 39m15s wall time
+    f.write_text("\n".join([
+        _rec("user", "task", ts="2026-11-10T11:17:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bas"}],
+             ts="2026-11-10T11:17:20.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T11:56:15.000Z"),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.prev_task_duration(f) == "39m15s"
+
+
+def test_prev_task_duration_unreadable_returns_none(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text(_rec("user", "hi") + "\n", encoding="utf-8")
+    assert transcript.prev_task_duration(f) is None  # no reply yet
+    assert transcript.prev_task_duration(None) is None
