@@ -26,6 +26,10 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: `cc-continuity doctor` now verifies the rotation
+  prerequisites in `settings.json` (auto-compact override + context
+  window pin) and flags drift with the exact recommended values
+  ([commit](https://github.com/pqant/claude-continuity/commit/9462064)).
 - **2026-11-09**: The turn-end rotation gate no longer blocks a routine
   rotation when the handoff draft is already valid: the rotation now
   finishes silently, so the built-in "Stop hook error" line only appears
@@ -48,10 +52,6 @@ log:
   the Sessions label sits under Session Time, the search box keeps a
   fixed width, and labels read bold and high-contrast
   ([commit](https://github.com/pqant/claude-continuity/commit/18af742)).
-- **2026-11-08**: An interactive architecture diagram of the whole system
-  (modules, dependencies and data flows) now ships in `docs/diagrams` as a
-  self-contained HTML page with guided views and export
-  ([commit](https://github.com/pqant/claude-continuity/commit/5ae9011)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional

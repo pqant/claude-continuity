@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-10
+
+### Added
+
+- doctor rotation-env check (issue #27): `doctor` now verifies the
+  rotation prerequisites in `~/.claude/settings.json` -
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (recommended 95, keeps native
+  auto-compact behind the custom gate) and
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (the window the ratio references).
+  Drift is reported with the exact recommended/expected values; the
+  check is warn-only, so a healthy install stays all-green.
+
 ## [0.3.4] - 2026-11-09
 
 ### Fixed
