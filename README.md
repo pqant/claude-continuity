@@ -26,6 +26,11 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-10**: Rotation gate decisions (guide/deny/block/silent) now
+  land in the session ledger with their ratio and C-text variant, so a
+  strange rotation is debugged from disk instead of reverse-engineering
+  the renderer
+  ([commit](https://github.com/pqant/claude-continuity/commit/5392666)).
 - **2026-11-10**: `cc-continuity install` now pins
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=95` next to the context-window pin, so
   a fresh install always starts the rotation gate ahead of native
@@ -43,10 +48,6 @@ log:
   context ratio of a project on one line - the manual metric-file read
   in trial bookkeeping is gone
   ([commit](https://github.com/pqant/claude-continuity/commit/c0e6cdc)).
-- **2026-11-10**: `cc-continuity doctor` now verifies the rotation
-  prerequisites in `settings.json` (auto-compact override + context
-  window pin) and flags drift with the exact recommended values
-  ([commit](https://github.com/pqant/claude-continuity/commit/9462064)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional

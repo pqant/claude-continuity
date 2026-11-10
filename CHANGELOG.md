@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-11-10
+
+### Added
+
+- The session ledger now records every rotation gate decision
+  (issue #39): one compact `type: gate` entry with the action
+  (guide/deny/block/silent), the state transition, the ratio when
+  ratio-driven, and the C-text variant used (c2/c3/c9/c6). Auditing
+  gate behaviour no longer needs binary-level reverse-engineering.
+  Allowlisted passes record nothing, and a failed record write never
+  affects hook behaviour.
+
 ## [0.3.9] - 2026-11-10
 
 ### Fixed
