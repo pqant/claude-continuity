@@ -4,6 +4,20 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-11-11
+
+### Added
+
+- New `cc-continuity ledger [n]` (issue #46): the session ledger
+  finally has a CLI reader. Gate decisions (#39), state transitions
+  and prompts print newest-first as compact single lines
+  (`HH:MM:SS type key=value…`), newest N (default 20, `n <= 0` falls
+  back to 20). Values are flattened to one line and capped at 60
+  characters. Session resolution mirrors `status` (#32): live marker
+  first, newest registered session as fallback; a project with no
+  resolvable session exits 1 with a clear message. Read-only: the
+  command never writes and touches no hook path.
+
 ## [0.3.15] - 2026-11-11
 
 ### Added
