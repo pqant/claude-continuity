@@ -125,6 +125,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_rot.add_argument("--rotation-id", required=True, dest="rotation_id",
                        help="rotation id written by the Stop hook")
 
+    p_rr = sub.add_parser(
+        "rotate-retry",
+        help="self-retry tick for a deferred rotation (issue #53)")
+    p_rr.add_argument("--key", required=True,
+                      help="project key written by the rotator")
+    p_rr.add_argument("--nnn", required=True, type=int,
+                      help="deferred session number")
+    p_rr.add_argument("--pane", required=True,
+                      help="tmux pane target (TMUX_PANE)")
+    p_rr.add_argument("--session", required=True,
+                      help="Claude Code session id being rotated")
+    p_rr.add_argument("--rotation-id", required=True, dest="rotation_id",
+                      help="rotation id of the deferred rotation")
+    p_rr.add_argument("--attempt", type=int, default=1,
+                      help="self-retry attempt number")
+
     p_inst = sub.add_parser("install",
                             help="install cc-continuity (PRD §17)")
     p_inst.add_argument("--window", type=int, default=None,
@@ -1081,6 +1097,24 @@ def cmd_rotate(args: argparse.Namespace) -> int:
                        pane=args.pane, rotation_id=args.rotation_id, cfg=cfg)
 
 
+def cmd_rotate_retry(args: argparse.Namespace) -> int:
+    """Self-retry entry (issue #53) — spawned detached by the rotator."""
+    from . import rotator  # local import: rotator imports hooks.common
+    key = args.key
+    nnn = int(args.nnn)
+    try:
+        pfile = paths.project_dir(key) / "project.json"
+        root = json.loads(pfile.read_text(encoding="utf-8"))["root"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        print(f"cc-continuity rotate-retry: unreadable project record for "
+              f"{key}", file=sys.stderr)
+        return 1
+    cfg = config.load_config(cwd=root)
+    return rotator.retry_run(key=key, nnn=nnn, session_id=args.session,
+                             pane=args.pane, rotation_id=args.rotation_id,
+                             attempt=args.attempt, cfg=cfg)
+
+
 def cmd_launch(args: argparse.Namespace) -> int:
     from . import launch
     argv = list(args.claude_args)
@@ -1508,6 +1542,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_repair(args)
     if args.command == "rotate":
         return cmd_rotate(args)
+    if args.command == "rotate-retry":
+        return cmd_rotate_retry(args)
     if args.command == "launch":
         return cmd_launch(args)
     if args.command == "install":

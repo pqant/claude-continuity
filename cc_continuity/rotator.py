@@ -67,6 +67,14 @@ CLAIM_WAIT_S = 20.0
 #: Cap for the pending-prompt note appended to the C.8 continuation prompt.
 PENDING_NOTE_CAP = 800
 
+#: #53 — deferred rotation self-retry: a detached tick re-checks the
+#: session RETRY_DELAY_S after a ROTATION_DEFERRED and drives the rotation
+#: itself when the turn really ended. Bounded by RETRY_MAX_ATTEMPTS; the
+#: Stop hook stays the primary route and rotation_id is the idempotency
+#: guard. The cfg gate ``retry_deferred`` (default on) disables the path.
+RETRY_DELAY_S = 20.0
+RETRY_MAX_ATTEMPTS = 3
+
 
 
 class RotatorSpawnError(RuntimeError):
@@ -118,6 +126,96 @@ def spawn(session_id: str, pane: str, rotation_id: str) -> int:
     except OSError as e:
         raise RotatorSpawnError(f"rotator spawn failed: {e}") from e
     return proc.pid
+
+
+def spawn_retry(key: str, nnn: int, pane: str, session_id: str,
+                rotation_id: str, attempt: int) -> int:
+    """#53: spawn a bounded self-retry tick detached (mirrors spawn()).
+
+    Raises :class:`RotatorSpawnError` when the process cannot start.
+    """
+    cmd = _command() + ["rotate-retry", "--key", key, "--nnn", str(nnn),
+                        "--pane", pane, "--session", session_id,
+                        "--rotation-id", rotation_id,
+                        "--attempt", str(attempt)]
+    log_path = paths.logs_dir() / "rotator.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as logf:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                    stdout=logf, stderr=logf,
+                                    start_new_session=True)
+    except OSError as e:
+        raise RotatorSpawnError(f"rotator retry spawn failed: {e}") from e
+    return proc.pid
+
+
+def retry_run(*, key: str, nnn: int, pane: str, session_id: str,
+              rotation_id: str, attempt: int, cfg: dict) -> int:
+    """#53: re-drive a deferred rotation when the turn really ended.
+
+    The Stop hook stays the primary route. This tick fires only while the
+    state is still CHECKPOINT_VERIFIED with the SAME rotation_id — the
+    idempotency guard: any Stop re-arm (new rotation_id) or completed
+    rotation makes it a no-op. Attempts are capped by
+    RETRY_MAX_ATTEMPTS; giving up never touches state.
+    """
+    time.sleep(float(cfg.get("retry_delay_s", RETRY_DELAY_S)))
+    rec = state.load_state(key, nnn)
+    if rec["state"] != "CHECKPOINT_VERIFIED" or rec.get(
+            "rotation_id") != rotation_id:
+        log_event(f"rotator: RETRY_NOP key={key} nnn={nnn:03d} "
+                  f"attempt={attempt} (state {rec['state']!r} / rotation_id "
+                  f"{rec.get('rotation_id')!r} moved on)")
+        return 0
+    if not _idle(key, nnn):
+        cap = int(cfg.get("retry_max_attempts", RETRY_MAX_ATTEMPTS))
+        if attempt < cap:
+            spawn_retry(key, nnn, pane, session_id, rotation_id, attempt + 1)
+            log_event(f"rotator: RETRY_DEFER_AGAIN key={key} nnn={nnn:03d} "
+                      f"attempt={attempt} (still active)")
+        else:
+            log_event(f"rotator: RETRY_GIVE_UP key={key} nnn={nnn:03d} "
+                      f"attempt={attempt} (not idle; state untouched, the "
+                      "next Stop still retries)")
+        return 0
+    new_rid = secrets.token_hex(16)
+    try:
+        state.transition(key, nnn, "ROTATING", rotation_id=new_rid)
+    except state.InvalidTransitionError as e:
+        log_event(f"rotator: RETRY_NOP key={key} nnn={nnn:03d} "
+                  f"attempt={attempt} (raced): {e}")
+        return 0
+    try:
+        spawn(session_id, pane, new_rid)
+    except RotatorSpawnError as e:
+        log_event(f"rotator: ROTATION_RETRY_SPAWN_FAILED key={key} "
+                  f"nnn={nnn:03d} attempt={attempt}: {e}")
+        _defer_to_checkpoint(key, nnn,
+                             "retry spawn failed - back to verified; "
+                             "next Stop retries")
+        return 0
+    log_event(f"rotator: ROTATION_RETRY_FIRED key={key} nnn={nnn:03d} "
+              f"attempt={attempt}")
+    return 0
+
+
+def _arm_retry(key: str, nnn: int, pane: str, session_id: str,
+               rotation_id: str, cfg: dict) -> None:
+    """#53: arm the first self-retry tick after a ROTATION_DEFERRED.
+
+    Additive and never fatal: any failure is logged and the next-Stop
+    route behaves exactly as it did before #53.
+    """
+    if not cfg.get("retry_deferred", True):
+        return
+    try:
+        pid = spawn_retry(key, nnn, pane, session_id, rotation_id, 1)
+    except RotatorSpawnError as e:
+        log_event(f"rotator: RETRY_ARM_FAILED key={key} nnn={nnn:03d}: {e}")
+        return
+    log_event(f"rotator: ROTATION_RETRY_ARMED key={key} nnn={nnn:03d} "
+              f"pid={pid}")
 
 
 def spawn_successor_detached(key: str, nnn: int, session_id: str, cfg: dict,
@@ -598,6 +696,7 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
         if not _idle(key, nnn):
             _defer_to_checkpoint(key, nnn,
                                  "activity after Stop — next Stop retries")
+            _arm_retry(key, nnn, pane, session_id, rotation_id, cfg)
             return 0
         cp_id = f"cp-{nnn:03d}"
         name_new = _successor_name(key, nnn, rec["name"])
@@ -622,6 +721,7 @@ def run(*, key: str, nnn: int, session_id: str, pane: str,
             _defer_to_checkpoint(key, nnn,
                                  "input box busy — user still typing; "
                                  "next Stop retries")
+            _arm_retry(key, nnn, pane, session_id, rotation_id, cfg)
             return 0
         if not _wait_new_started(before):
             log_event("rotator: SESSIONSTART_MISSING — continuing "
