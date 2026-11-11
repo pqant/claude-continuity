@@ -4,6 +4,22 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-11-11
+
+### Added
+
+- The `🖼 image` chip in the exported HTML transcript is now clickable
+  (issue #55): clicking it opens the real pasted image in a lightbox
+  modal right on the page, with prev/next buttons and an `i / n`
+  counter (backdrop click, the close button, or Escape dismisses it).
+  The bytes come from the session JSONL's base64 blocks and are
+  embedded as `data:` URIs, so the export stays a single
+  self-contained HTML file. A folded run of chips shares one merged
+  gallery; mixed records keep their human text and trail the chip.
+  Non-whitelisted media types, non-base64 sources and over-cap
+  images (4 MB of base64 each) keep the plain non-clickable chip,
+  and pages without images are byte-identical to 0.3.21.
+
 ## [0.3.21] - 2026-11-11
 
 ### Fixed
