@@ -4,6 +4,17 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.17] - 2026-11-11
+
+### Added
+
+- `cc-continuity status [slug]` (issue #48): renders the same status
+  block (rotation line and `--json` included) for any registered
+  project, from anywhere. Slug resolution is shared with
+  `cc-continuity ratio` (one helper, identical error lines), so the
+  two commands can never point at different projects. The no-slug
+  path keeps its cwd behavior byte-identical.
+
 ## [0.3.16] - 2026-11-11
 
 ### Added
