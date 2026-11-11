@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="print the live context ratio of a project")
     p_ratio.add_argument("slug", nargs="?",
                          help="project slug (default: current project)")
+    p_ratio.add_argument("--json", action="store_true",
+                         help="machine-readable output")
 
     p_vd = sub.add_parser("validate-draft",
                           help="validate a handoff draft (PRD §10.1)")
@@ -610,6 +612,18 @@ def cmd_ratio(args: argparse.Namespace) -> int:
     if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
         print(f"{notify.project_slug(key)}: no metrics yet", file=sys.stderr)
         return 1
+    if args.json:
+        # one object for scripts and the watchdog (issue #34); failures
+        # keep the plain stderr line + rc 1 so callers only parse stdout
+        # after checking the exit code.
+        print(json.dumps({
+            "slug": notify.project_slug(key),
+            "session_id": metric.get("session_id"),
+            "ratio": ratio,
+            "ts": metric.get("ts"),
+            "stale": statusline.is_stale(metric),
+        }))
+        return 0
     print(f"{notify.project_slug(key)} {ratio}")
     return 0
 

@@ -164,6 +164,72 @@ def test_ratio_unknown_slug_exits_1(cc_home, tmp_path, monkeypatch, capsys):
     assert "nope" in capsys.readouterr().err
 
 
+# ---------------------------------------------------------- ratio --json
+
+
+def test_ratio_json_prints_single_object(cc_home, tmp_path, monkeypatch,
+                                         capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.774, session_id=SID)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)  # exactly one JSON object
+    assert obj["slug"] == "spike-repo"
+    assert obj["session_id"] == SID
+    assert obj["ratio"] == 0.774
+    assert isinstance(obj["ts"], (int, float))
+    assert obj["stale"] is False
+
+
+def test_ratio_json_stale_flag(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.5, session_id=SID, stale=True)  # 700 s old
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["stale"] is True
+
+
+def test_ratio_json_explicit_slug_from_elsewhere(cc_home, tmp_path,
+                                                 monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.4, session_id=SID)
+    elsewhere = make_repo(tmp_path, name="elsewhere-repo")
+    monkeypatch.chdir(elsewhere)
+    assert cli.main(["ratio", "--json", "spike-repo"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["slug"] == "spike-repo"
+    assert obj["ratio"] == 0.4
+
+
+def test_ratio_json_no_metrics_exits_1_plain_stderr(cc_home, tmp_path,
+                                                    monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no JSON on failure
+    assert "no metrics" in captured.err
+
+
+def test_ratio_plain_output_unchanged_after_json_flag(cc_home, tmp_path,
+                                                      monkeypatch, capsys):
+    # Default output contract must not move for scripts that parse it.
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    set_metric(0.774, session_id=SID)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", SID)
+    assert cli.main(["ratio"]) == 0
+    assert capsys.readouterr().out == "spike-repo 0.774\n"
+
+
 # ------------------------------------------------------------- Phase 4 cmds
 
 import os as _os
