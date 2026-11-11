@@ -422,12 +422,13 @@ def render_segment(ratio: float | None, record: dict | None,
     blocked_text = ((f" {blink.MARKER_BLOCKED}" if blocked else "")
                     + (f" {blink.MARKER_ASK}" if ask else "")
                     + (f" {blink.MARKER_REPLY}" if reply else "")) or None
-    # Issue #45: previous task wall time (``⏱ prev task 39m15s``) rides
-    # the ACTIVE USAGE text only (opt-in via turn_clock at the call site;
+    # Issues #45 + #51: previous task wall time, readable label and
+    # spaced units (``⏱ Previous task completion 39m 15s``). Rides the
+    # ACTIVE USAGE text only (opt-in via turn_clock at the call site;
     # rotation/handoff states keep their established forms). Appended to
     # the main text, not the marker suffix: blink substring-matches the
     # markers, this text must stay neutral.
-    prev_text = f" ⏱ prev task {prev_dur}" if prev_dur else ""
+    prev_text = f" ⏱ Previous task completion {prev_dur}" if prev_dur else ""
     if not ansi:
         if not enabled or (record is not None and record.get("off")):
             return "◆ off"

@@ -404,13 +404,20 @@ def prev_reply_clock(path, *, tail: int = 400) -> str | None:
     return f"prev reply {s} -> {e} ({_fmt_secs(secs)})"
 
 
-def _fmt_secs(secs: int) -> str:
-    """``47s`` under a minute, ``2m34s`` beyond (zero-padded seconds)."""
-    return f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+def _fmt_secs(secs: int, sep: str = "") -> str:
+    """``47s`` under a minute, ``2m34s`` beyond, ``1h2m3s`` past an hour
+    (zero-padded seconds). ``sep`` sits between units (issue #51: the
+    HUD passes ``" "``; the prompt clock keeps the compact ``""``)."""
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{sep}{secs % 60:02d}s"
+    h, rem = divmod(secs, 3600)
+    return f"{h}h{sep}{rem // 60}m{sep}{rem % 60:02d}s"
 
 
 def prev_task_duration(path, *, tail: int = 400) -> str | None:
-    """Wall time of the LAST genuine user turn as ``39m15s`` (issue #45):
+    """Wall time of the LAST genuine user turn as ``39m 15s`` (issues #45, #51):
     prompt send to final reply, the same span ``prev_reply_clock``
     reports. For the status line HUD, which shows it the moment the turn
     ends. Missing file, bad path type or no readable user/assistant pair
@@ -424,7 +431,7 @@ def prev_task_duration(path, *, tail: int = 400) -> str | None:
                - datetime.fromisoformat(str(user_ts).replace("Z", "+00:00")))
     except ValueError:
         return None
-    return _fmt_secs(max(int(dur.total_seconds()), 0))
+    return _fmt_secs(max(int(dur.total_seconds()), 0), sep=" ")
 
 
 def _meta_val(meta: dict, key: str) -> str:
