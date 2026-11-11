@@ -265,3 +265,69 @@ def test_status_human_rotation_line_no_metric(cc_home, tmp_path, monkeypatch,
     assert "ACTIVE" in lines[0]
     assert "ratio -" in lines[0]
     assert "last crossed -" in lines[0]
+
+
+# --------------------------------------- #48 status [slug] (from anywhere)
+
+
+def _seed_repo(tmp_path, hookutil, ratio=None):
+    repo = hookutil.make_repo(tmp_path)
+    hookutil.register_session(repo, session_id=hookutil.SID)
+    hookutil.set_metric(ratio if ratio is not None else 0.42,
+                        session_id=hookutil.SID)
+    return repo
+
+
+def test_status_slug_matches_cwd_output(cc_home, tmp_path, monkeypatch,
+                                        capsys):
+    from cc_continuity import cli
+    import hookutil
+    repo = _seed_repo(tmp_path, hookutil)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", hookutil.SID)
+    monkeypatch.chdir(repo)
+    assert cli.main(["status"]) == 0
+    via_cwd = capsys.readouterr().out
+    elsewhere = hookutil.make_repo(tmp_path, name="elsewhere-repo")
+    monkeypatch.chdir(elsewhere)
+    assert cli.main(["status", "spike-repo"]) == 0
+    assert capsys.readouterr().out == via_cwd  # byte-identical block
+
+
+def test_status_slug_unknown_exits_1(cc_home, tmp_path, monkeypatch, capsys):
+    from cc_continuity import cli
+    import hookutil
+    repo = _seed_repo(tmp_path, hookutil)
+    monkeypatch.chdir(repo)
+    assert cli.main(["status", "nope"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no project" in captured.err
+
+
+def test_status_slug_ambiguous_exits_1(cc_home, tmp_path, monkeypatch,
+                                       capsys):
+    from cc_continuity import cli, notify
+    import hookutil
+    repo = _seed_repo(tmp_path, hookutil)
+    other = hookutil.make_repo(tmp_path, name="other-repo")
+    hookutil.register_session(other, session_id=SID_B)
+    monkeypatch.setattr(notify, "project_slug", lambda key: "same")
+    monkeypatch.chdir(repo)
+    assert cli.main(["status", "same"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ambiguous" in captured.err
+
+
+def test_status_slug_json_carries_rotation(cc_home, tmp_path, monkeypatch,
+                                           capsys):
+    from cc_continuity import cli
+    import hookutil
+    repo = _seed_repo(tmp_path, hookutil)
+    monkeypatch.setenv("CC_CONTINUITY_SESSION", hookutil.SID)
+    elsewhere = hookutil.make_repo(tmp_path, name="elsewhere-repo")
+    monkeypatch.chdir(elsewhere)
+    assert cli.main(["status", "--json", "spike-repo"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["rotation"]["state"] == "ACTIVE"
+    assert data["session"]["session_id"] == hookutil.SID
