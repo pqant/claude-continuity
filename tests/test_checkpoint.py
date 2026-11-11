@@ -471,6 +471,23 @@ def test_render_degraded():
     assert checkpoint.headings_in_order(text) is False
 
 
+#: #52: the directive the still-alive pre-rotation agent must obey after a
+#: DEGRADED finalization. Pinned as a literal (the tests above reference the
+#: checkpoint.C7 constant and would not catch a wording drift).
+FINALIZED_DIRECTIVE = ("This file is finalized. Do not edit it and do not "
+                       "start any more work in this session; end your turn "
+                       "now.")
+
+
+def test_render_degraded_finalized_directive():
+    text = checkpoint.render_handoff(_snap(degraded=True), None, True)
+    assert FINALIZED_DIRECTIVE in text
+    assert text.count(FINALIZED_DIRECTIVE) == 1
+    # the verified path must not carry the directive
+    clean = checkpoint.render_handoff(_snap(), DRAFT_TEXT, False)
+    assert FINALIZED_DIRECTIVE not in clean
+
+
 def test_render_no_snapshot_clean_tree():
     s = _snap()
     s["git"] = {"status": [], "diff_stat": [], "staged": 0, "unstaged": 0,
