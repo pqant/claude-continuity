@@ -28,6 +28,48 @@ def test_assistant_whitespace_collapsed():
     assert b[0][1] == "a\n\nb"
 
 
+# --- issue #54: protocol plumbing must not crowd out the conversation ----
+
+
+def test_plumbing_records_dropped():
+    lines = [_rec("user", "gercek mesaj"),
+             _rec("user", "<command-name>/clear</command-name> "
+                         "<command-message>clear</command-message> "
+                         "<command-args></command-args>"),
+             _rec("user", "<task-notification>\n<task-id>bgc</task-id>\n"
+                         "</task-notification>"),
+             _rec("user", "Stop hook feedback:\nCONTINUITY: context at 67%. "
+                          "Rotation pending."),
+             _rec("user", "Base directory for this skill: /Users/x/.claude/skills/y"),
+             _rec("assistant", "No response requested."),
+             _rec("user", "devam")]
+    blocks = transcript.parse_conversation(lines)
+    assert [(r, t) for r, t, _ in blocks] == [("user", "gercek mesaj"),
+                                              ("user", "devam")]
+
+
+def test_resume_anchors_collapsed():
+    resume = ("CONTINUITY RESUME cp-223: read /Users/x/handoff.md completely, "
+              "apply the VALIDATION result, then continue... " * 5)
+    blocks = transcript.parse_conversation(
+        [_rec("user", resume),
+         _rec("user", "Continue from where you left off.")])
+    assert [t for _, t, _ in blocks] == [
+        "↻ CONTINUITY RESUME cp-223 · handoff.md", "↻ CC resume"]
+
+
+def test_image_records_become_chips():
+    # consecutive chips fold into one; human text in a record survives
+    # without the metadata lines.
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image: source: /x/1.png]"},
+                      {"type": "text",
+                       "text": "[Image: original 958x2062, displayed at 929x2000]"}]),
+        _rec("user", "[Image: source: /x/2.png]"),
+        _rec("user", "bunu gordun mu ???\n[Image: source: /x/3.png]")])
+    assert [t for _, t, _ in blocks] == ["🖼 image", "bunu gordun mu ???"]
+
+
 def test_table_fenced_and_escaping():
     md = "|a|b|\n|--|--|\n|1|b|\n\n<script>x</script>\n\n```\nprint(1)\n```\n\nplain **b** `c`"
     out = transcript.md_to_html(md)
