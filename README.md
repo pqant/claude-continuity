@@ -26,6 +26,7 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: The HUD prev-task segment is now readable at a glance: the Active Usage line reads `⏱ Previous task completion 39m 15s` (spaced units; `1h 2m 03s` and `47s` too) instead of `⏱ prev task 39m15s`, while the turn clock prompt line keeps its compact shape ([commit](https://github.com/pqant/claude-continuity/commit/12dd90b)).
 - **2026-11-11**: `cc-continuity status [slug]`: inspect any registered project from anywhere - the same block (rotation line and `--json` included), resolved through the exact slug matching `ratio` uses, so the two commands can never point at different projects ([commit](https://github.com/pqant/claude-continuity/commit/2ea65a3)).
 - **2026-11-11**: New `cc-continuity ledger [n]`: the session ledger finally has a reader. The gate decisions from #39, the state transitions and the prompts print as compact single lines (`HH:MM:SS type key=value…`), newest N (default 20), resolved the same way `status` resolves the session ([commit](https://github.com/pqant/claude-continuity/commit/d84a8ea)).
 - **2026-11-11**: `cc-continuity ratio` learned to talk to machines too:
@@ -40,11 +41,6 @@ log:
   sharing the exact ratio source of `cc-continuity ratio` so the two
   never disagree
   ([commit](https://github.com/pqant/claude-continuity/commit/18a1c84)).
-- **2026-11-10**: `turn_clock` now drives the status line HUD too: the
-  `◆ … Active Usage` segment carries `⏱ prev task 39m15s`, so the last
-  task's duration sits in the line you actually watch, updated the
-  moment the turn ends
-  ([commit](https://github.com/pqant/claude-continuity/commit/6524d4b)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
