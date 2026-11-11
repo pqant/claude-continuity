@@ -17,11 +17,23 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from cc_continuity import atomic, paths
 
-#: One conversation turn: (role, text, ISO-8601 timestamp or None).
-Block = tuple[str, str, str | None]
+
+class Block(NamedTuple):
+    """One conversation turn.
+
+    ``images`` holds embeddable ``data:`` URIs for pasted attachments
+    (issue #55); empty means no embeddable image (a plain text chip may
+    still stand). The renderers also accept plain 3-tuples.
+    """
+
+    role: str
+    text: str
+    ts: str | None
+    images: tuple[str, ...] = ()
 
 _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 _MULTI_NL = re.compile(r"\n{3,}")
@@ -40,6 +52,11 @@ _NOISE_PREFIXES = ("<local-command", "Caveat:", "<command-name>",
 #: into a single chip so the image trace survives without the bulk.
 _IMAGE_PREFIXES = ("[Image: source:", "[Image: original")
 _IMAGE_CHIP = "\U0001f5bc image"
+#: Embeddable image bounds (issue #55): whitelisted media types and a
+#: per-image base64 cap. Anything outside keeps a plain (non-clickable)
+#: chip so the single-file export stays sane.
+_IMG_MEDIA = ("image/png", "image/jpeg", "image/gif", "image/webp")
+_MAX_IMG_B64 = 4_000_000
 
 
 def md_inline(s: str) -> str:
@@ -54,6 +71,24 @@ def md_inline(s: str) -> str:
 def _is_table_start(lines: list[str], i: int) -> bool:
     return ("|" in lines[i] and i + 1 < len(lines)
             and _TABLE_SEP_RE.match(lines[i + 1] or "x"))
+
+
+def _image_uri(block: dict) -> str:
+    """Data URI for an embeddable base64 image block (empty if not).
+
+    Only whitelisted media types, ``source.type == "base64"`` and data
+    within ``_MAX_IMG_B64`` embed (issue #55).
+    """
+    src = block.get("source")
+    if not isinstance(src, dict) or src.get("type") != "base64":
+        return ""
+    media = src.get("media_type")
+    data = src.get("data")
+    if media not in _IMG_MEDIA or not isinstance(data, str) or not data:
+        return ""
+    if len(data) > _MAX_IMG_B64:
+        return ""
+    return f"data:{media};base64,{data}"
 
 
 def md_to_html(md: str) -> str:
@@ -128,8 +163,10 @@ def parse_conversation(lines: list[str]) -> list[Block]:
     never reach the output (issue #54). The CONTINUITY RESUME blob and
     CC's "Continue from where you left off." prompt collapse to one-line
     anchors; image metadata lines fold into a ``🖼 image`` chip (runs of
-    chips collapse to one). Runs of 3+ newlines in assistant text
-    collapse to exactly two.
+    chips collapse to one, their galleries merge). Embeddable base64
+    image blocks attach to the block as ``data:`` URIs for the lightbox
+    (issue #55). Runs of 3+ newlines in assistant text collapse to
+    exactly two.
     """
     out: list[Block] = []
     for raw in lines:
@@ -140,41 +177,55 @@ def parse_conversation(lines: list[str]) -> list[Block]:
         if not isinstance(rec, dict) or rec.get("type") not in ("user", "assistant"):
             continue
         content = (rec.get("message") or {}).get("content")
+        imgs: list[str] = []
         if isinstance(content, str):
             parts = [content]
         elif isinstance(content, list):
             parts = [b.get("text", "") for b in content
                      if isinstance(b, dict) and b.get("type") == "text"]
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    uri = _image_uri(b)
+                    if uri:
+                        imgs.append(uri)
         else:
             continue
         text = "\n".join(t for t in parts if t and t.strip())
+        if not text and not imgs:
+            continue
+        if text:
+            text = _REMINDER_RE.sub("", text).strip()
+        had_image = False
+        if text:
+            if text.startswith(_NOISE_PREFIXES):
+                continue
+            # Real records are "Stop hook feedback:\nCONTINUITY ...";
+            # only these injections drop, other hook feedback survives
+            # (issue #54).
+            if text[:120].replace("\n", " ").startswith(
+                    "Stop hook feedback: CONTINUITY"):
+                continue
+            if (rec["type"] == "assistant"
+                    and text.startswith("No response requested.")):
+                continue
+            # Image metadata lines become a chip; human text in a mixed
+            # record survives without them (issue #54).
+            kept = []
+            for ln in text.split("\n"):
+                if ln.startswith(_IMAGE_PREFIXES):
+                    had_image = True
+                else:
+                    kept.append(ln)
+            text = "\n".join(kept).strip()
         if not text:
-            continue
-        text = _REMINDER_RE.sub("", text).strip()
-        if not text or text.startswith(_NOISE_PREFIXES):
-            continue
-        # Real records are "Stop hook feedback:\nCONTINUITY ..."; only
-        # these injections drop, other hook feedback survives (issue #54).
-        if text[:120].replace("\n", " ").startswith(
-                "Stop hook feedback: CONTINUITY"):
-            continue
-        if (rec["type"] == "assistant"
-                and text.startswith("No response requested.")):
-            continue
-        # Image metadata lines become a chip; human text in a mixed
-        # record survives without them (issue #54).
-        kept, had_image = [], False
-        for ln in text.split("\n"):
-            if ln.startswith(_IMAGE_PREFIXES):
-                had_image = True
-            else:
-                kept.append(ln)
-        text = "\n".join(kept).strip()
-        if not text:
-            if not had_image:
+            if not had_image and not imgs:
                 continue
             text = _IMAGE_CHIP
-            if out and out[-1][1] == _IMAGE_CHIP:
+            if out and out[-1].text == _IMAGE_CHIP:
+                # Fold the run: merge the galleries into one chip.
+                if imgs:
+                    out[-1] = out[-1]._replace(
+                        images=out[-1].images + tuple(imgs))
                 continue
         if text.startswith("CONTINUITY RESUME cp-"):
             m = re.search(r"cp-(\d{3})", text)
@@ -185,7 +236,8 @@ def parse_conversation(lines: list[str]) -> list[Block]:
         if rec["type"] == "assistant":
             text = _MULTI_NL.sub("\n\n", text)
         ts = rec.get("timestamp")
-        out.append((rec["type"], text, ts if isinstance(ts, str) else None))
+        out.append(Block(rec["type"], text,
+                         ts if isinstance(ts, str) else None, tuple(imgs)))
     return out
 
 
@@ -227,6 +279,16 @@ ul,ol{margin:.45em 0;padding-left:1.5em}li{margin:.15em 0}
 table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid var(--line);padding:5px 10px}th{background:var(--hdr)}
 mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
 .block.hidden{display:none}
+.chipbtn{cursor:pointer;border:0;background:none;font:inherit;color:inherit;padding:0;text-decoration:underline dotted}
+.chipbtn:hover{text-decoration:underline}
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:60;display:flex;align-items:center;justify-content:center}
+.lb[hidden]{display:none}
+.lbb{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:92vw}
+.lbb img{max-width:92vw;max-height:80vh;border-radius:8px;background:#fff}
+.lbn{display:flex;gap:10px;align-items:center}
+.lbn button,.lbx{background:#222b;border:1px solid #555;color:#fff;border-radius:6px;padding:4px 12px;font-size:15px;cursor:pointer}
+.lbn span{color:#fff;font-size:14px}
+.lbx{position:fixed;top:14px;right:18px}
 """
 
 #: In-page search (case-insensitive ``<mark>`` hits, optional block filter
@@ -283,6 +345,38 @@ sel.disabled=all.length<2;
 var lbl=document.getElementById('slbl');
 if(lbl)lbl.textContent=all.length>1?'Sessions':'Session';
 sel.onchange=function(){if(this.value)location.href=up+this.value;};})();
+"""
+
+#: Lightbox shell for the image chips (issue #55): one fixed overlay,
+#: reused by every chip button. Injected only when images are embedded.
+_LIGHTBOX = ('<div id="lb" class="lb" hidden>'
+             '<button id="lbx" class="lbx">close</button>'
+             '<div class="lbb"><img id="lbi" alt="">'
+             '<div class="lbn"><button id="lbp">&#8249; prev</button>'
+             '<span id="lbc"></span>'
+             '<button id="lbn">next &#8250;</button></div></div></div>')
+
+#: Chip click opens the matching ``.lbg`` gallery in the overlay; prev/
+#: next cycle with an ``i / n`` counter; close button, backdrop click or
+#: Escape dismiss. ASCII only.
+_LIGHTBOX_JS = r"""
+(function(){var lb=document.getElementById('lb');if(!lb)return;
+var img=document.getElementById('lbi'),ctr=document.getElementById('lbc'),g=null,n=0;
+function hide(){lb.hidden=true;g=null;}
+function show(){if(!g)return;var a=g.querySelectorAll('img');if(!a.length){hide();return;}
+n=(n+a.length)%a.length;img.src=a[n].getAttribute('src');
+ctr.textContent=(n+1)+' / '+a.length;}
+document.addEventListener('click',function(e){var t=e.target;
+var b=t.closest?t.closest('.chipbtn'):null;
+if(b){g=document.getElementById(b.getAttribute('data-g'));n=0;
+lb.hidden=false;show();return;}
+if(t.id==='lbp'){n--;show();return;}
+if(t.id==='lbn'){n++;show();return;}
+if(t.id==='lbx'||t===lb){hide();}});
+document.addEventListener('keydown',function(e){if(lb.hidden)return;
+if(e.key==='Escape'){hide();}
+else if(e.key==='ArrowLeft'){n--;show();}
+else if(e.key==='ArrowRight'){n++;show();}});})();
 """
 
 
@@ -510,13 +604,29 @@ def render_html(blocks: list[Block], meta: dict) -> str:
                   f'<select id="s" data-cur="{cur}" data-up="{up}"></select>')
         switch_js = _SWITCH_JS
     sections = []
-    for role, text, ts in blocks:
+    galleries = []
+    for role, text, ts, *rest in blocks:
+        images = rest[0] if rest else ()
         cls = "user" if role == "user" else "asst"
         label = "User" if role == "user" else "Assistant"
+        if images:
+            # Issue #55: the chip opens a lightbox of the real pasted
+            # images; data URIs keep the export a single HTML file.
+            gid = f"lb-{len(galleries)}"
+            galleries.append(
+                f'<div class="lbg" id="{gid}" hidden>'
+                + "".join(f'<img src="{html.escape(u, quote=True)}" alt="">'
+                          for u in images) + "</div>")
+            chip = (f'<button class="chipbtn" data-g="{gid}">'
+                    f'{_IMAGE_CHIP}</button>')
+            body = chip if text == _IMAGE_CHIP else (
+                md_to_html(text) + f"<p>{chip}</p>")
+        else:
+            body = md_to_html(text)
         sections.append(
             f'<section class="block {cls}"><h2 class="{cls}">{label} '
             f'<span class="ts">{_ts_hms(ts)}</span></h2>'
-            f'<div class="body">{md_to_html(text)}</div></section>')
+            f'<div class="body">{body}</div></section>')
     return (
         '<!doctype html><html data-theme="auto"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
@@ -537,7 +647,10 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         'matching blocks only</label>\n'
         '<button id="t">theme</button><span id="stats"></span></div></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
-        f'{ext}<script>{_JS}{switch_js}</script></body>')
+        f'{"".join(galleries)}'
+        f'{_LIGHTBOX if galleries else ""}'
+        f'{ext}<script>{_JS}{switch_js}'
+        f'{_LIGHTBOX_JS if galleries else ""}</script></body>')
 
 
 def resolve_transcript_path(metric: dict | None, root: Path, sid: str | None,
@@ -589,7 +702,7 @@ def render_markdown(blocks: list[Block], meta: dict) -> str:
     """Canonical Markdown export: ``# <stem>`` title, then one section
     per block (``## User``/``## Assistant`` + local time + raw text)."""
     out = [f"# {meta.get('stem') or 'session'}", ""]
-    for role, text, ts in blocks:
+    for role, text, ts, *_ in blocks:
         label = "User" if role == "user" else "Assistant"
         clock = _ts_hms(ts)
         out.append(f"## {label}" + (f" {clock}" if clock else ""))
@@ -635,7 +748,7 @@ def export_session(jsonl_path: Path, dest_dir: Path, meta: dict,
         if oversize:
             blocks = blocks + [("assistant", "[truncated]", None)]
         first = last = None
-        for _, _, ts in blocks:
+        for _, _, ts, *_ in blocks:
             stamp = _parse_ts(ts)
             if stamp:
                 first = first or stamp
