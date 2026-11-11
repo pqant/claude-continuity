@@ -214,6 +214,7 @@ def _rotating(cc_home, tmp_path) -> dict:
     state.transition(key, nnn, "ROTATING", rotation_id=rid)
     cfg = dict(config.DEFAULTS)
     cfg["settle_ms"] = 0
+    cfg["retry_deferred"] = False  # keep the pre-#53 run() tests hermetic
     return {"repo": repo, "key": key, "nnn": nnn, "rid": rid, "cfg": cfg,
             "sid": SID}
 
@@ -531,6 +532,148 @@ def test_run_defer_tolerates_bootstrap_rotated(fake_tmux, cc_home, tmp_path,
     assert rc == 0  # a defer is not an error — and neither is the race
     # NOT rolled back: ROTATED is terminal and the rotation already completed
     assert state.load_state(key, nnn)["state"] == "ROTATED"
+
+
+# --- deferred rotation self-retry (#53) ---------------------------------------
+# After ROTATION_DEFERRED the rotator arms one detached tick per round:
+# RETRY_DELAY_S later it re-checks and fires the rotation itself ONLY when
+# the state is still CHECKPOINT_VERIFIED with the same rotation_id (the
+# Stop-driven route stays primary; the guard keeps the tick idempotent).
+
+
+def _deferred(cc_home, tmp_path) -> dict:
+    """Post-defer shape: CV keeping the rotation_id, quiet session, and the
+    self-retry switched ON."""
+    d = _rotating(cc_home, tmp_path)
+    state.transition(d["key"], d["nnn"], "CHECKPOINT_VERIFIED")
+    d["cfg"] = dict(d["cfg"], retry_deferred=True)
+    return d
+
+
+def test_selfretry_fires_when_idle(fake_tmux, cc_home, tmp_path, monkeypatch):
+    d = _deferred(cc_home, tmp_path)
+    monkeypatch.setattr(rotator, "RETRY_DELAY_S", 0.0)
+    fired = []
+    monkeypatch.setattr(rotator, "spawn",
+                        lambda sid, pane, rid: fired.append((sid, pane, rid)) or 4242)
+    rc = rotator.retry_run(key=d["key"], nnn=d["nnn"], pane="%9",
+                           session_id=d["sid"], rotation_id=d["rid"],
+                           attempt=1, cfg=d["cfg"])
+    assert rc == 0
+    rec = state.load_state(d["key"], d["nnn"])
+    assert rec["state"] == "ROTATING"
+    assert rec["rotation_id"] != d["rid"]           # a fresh rotation_id
+    assert fired == [(d["sid"], "%9", rec["rotation_id"])]
+    assert "ROTATION_RETRY_FIRED" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_selfretry_noop_when_stop_already_rotated(fake_tmux, cc_home,
+                                                  tmp_path, monkeypatch):
+    d = _deferred(cc_home, tmp_path)
+    state.transition(d["key"], d["nnn"], "ROTATING", rotation_id="rid-stop-2")
+    monkeypatch.setattr(rotator, "RETRY_DELAY_S", 0.0)
+    fired = []
+    monkeypatch.setattr(rotator, "spawn",
+                        lambda sid, pane, rid: fired.append(rid) or 4242)
+    rc = rotator.retry_run(key=d["key"], nnn=d["nnn"], pane="%9",
+                           session_id=d["sid"], rotation_id=d["rid"],
+                           attempt=1, cfg=d["cfg"])
+    assert rc == 0
+    assert fired == []
+    rec = state.load_state(d["key"], d["nnn"])
+    assert rec["state"] == "ROTATING" and rec["rotation_id"] == "rid-stop-2"
+    assert "RETRY_NOP" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_selfretry_noop_when_rotation_id_changed(fake_tmux, cc_home,
+                                                 tmp_path, monkeypatch):
+    # A fresh Stop re-armed the rotation (new rotation_id on the CV record);
+    # the old tick must stand down without touching state.
+    d = _deferred(cc_home, tmp_path)
+    state.update_fields(d["key"], d["nnn"], rotation_id="rid-stop-2")
+    monkeypatch.setattr(rotator, "RETRY_DELAY_S", 0.0)
+    fired = []
+    monkeypatch.setattr(rotator, "spawn",
+                        lambda sid, pane, rid: fired.append(rid) or 4242)
+    rotator.retry_run(key=d["key"], nnn=d["nnn"], pane="%9",
+                      session_id=d["sid"], rotation_id=d["rid"],
+                      attempt=1, cfg=d["cfg"])
+    assert fired == []
+    assert state.load_state(d["key"], d["nnn"])["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_selfretry_not_idle_reschedules_until_cap(fake_tmux, cc_home,
+                                                  tmp_path, monkeypatch):
+    d = _deferred(cc_home, tmp_path)
+    time.sleep(0.01)
+    ledger.append(paths.session_dir(d["key"], d["nnn"]),
+                  {"type": "user_prompt", "text": "user is active"})
+    monkeypatch.setattr(rotator, "RETRY_DELAY_S", 0.0)
+    armed = []
+    monkeypatch.setattr(rotator, "spawn_retry",
+                        lambda *a, **kw: armed.append(a) or 9)
+    fired = []
+    monkeypatch.setattr(rotator, "spawn", lambda *a: fired.append(a) or 1)
+    rc = rotator.retry_run(key=d["key"], nnn=d["nnn"], pane="%9",
+                           session_id=d["sid"], rotation_id=d["rid"],
+                           attempt=1, cfg=d["cfg"])
+    assert rc == 0 and fired == []
+    assert armed and armed[0][5] == 2               # attempt+1 respawn
+    assert state.load_state(d["key"], d["nnn"])["state"] == "CHECKPOINT_VERIFIED"
+
+
+def test_selfretry_gives_up_at_cap_touching_nothing(fake_tmux, cc_home,
+                                                    tmp_path, monkeypatch):
+    d = _deferred(cc_home, tmp_path)
+    time.sleep(0.01)
+    ledger.append(paths.session_dir(d["key"], d["nnn"]),
+                  {"type": "user_prompt", "text": "user is active"})
+    monkeypatch.setattr(rotator, "RETRY_DELAY_S", 0.0)
+    armed = []
+    monkeypatch.setattr(rotator, "spawn_retry",
+                        lambda *a, **kw: armed.append(a) or 9)
+    fired = []
+    monkeypatch.setattr(rotator, "spawn", lambda *a: fired.append(a) or 1)
+    rc = rotator.retry_run(key=d["key"], nnn=d["nnn"], pane="%9",
+                           session_id=d["sid"], rotation_id=d["rid"],
+                           attempt=rotator.RETRY_MAX_ATTEMPTS, cfg=d["cfg"])
+    assert rc == 0 and fired == [] and armed == []
+    assert state.load_state(d["key"], d["nnn"])["state"] == "CHECKPOINT_VERIFIED"
+    assert "RETRY_GIVE_UP" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_run_arms_selfretry_after_defer(fake_tmux, cc_home, tmp_path,
+                                        monkeypatch):
+    # Wiring: the activity-after-Stop defer arms the bounded self-retry.
+    d = _rotating(cc_home, tmp_path)
+    d["cfg"] = dict(d["cfg"], retry_deferred=True)
+    time.sleep(0.01)
+    ledger.append(paths.session_dir(d["key"], d["nnn"]),
+                  {"type": "user_prompt", "text": "user keeps typing"})
+    armed = []
+    monkeypatch.setattr(rotator, "spawn_retry",
+                        lambda k, n, p, s, r, a: armed.append((k, n, p, s, r, a)) or 9)
+    rc = rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
+                     pane="%9", rotation_id=d["rid"], cfg=d["cfg"])
+    assert rc == 0
+    assert armed == [(d["key"], d["nnn"], "%9", d["sid"], d["rid"], 1)]
+    assert "ROTATION_RETRY_ARMED" in (paths.logs_dir() / "events.log").read_text()
+
+
+def test_run_defer_stays_quiet_when_selfretry_disabled(fake_tmux, cc_home,
+                                                        tmp_path, monkeypatch):
+    # The cfg gate is honored: with retry_deferred off, no tick is armed
+    # and the next-Stop route is exactly the pre-#53 behavior.
+    d = _rotating(cc_home, tmp_path)  # _rotating ships the gate OFF
+    time.sleep(0.01)
+    ledger.append(paths.session_dir(d["key"], d["nnn"]),
+                  {"type": "user_prompt", "text": "user keeps typing"})
+
+    def boom(*a, **kw):
+        raise AssertionError("spawn_retry must not be called")
+    monkeypatch.setattr(rotator, "spawn_retry", boom)
+    assert rotator.run(key=d["key"], nnn=d["nnn"], session_id=d["sid"],
+                       pane="%9", rotation_id=d["rid"], cfg=d["cfg"]) == 0
 
 
 def test_run_retry_does_not_redrive_when_bootstrap_rotated(
