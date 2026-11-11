@@ -19,7 +19,7 @@ def test_order_roles_and_noise():
              _rec("user", "<local-command-caveat>skip"), _rec("user", "   "),
              _rec("user", "Caveat: the messages below")]
     blocks = transcript.parse_conversation(lines)
-    assert [(r, t) for r, t, _ in blocks] == [("user", "hello"), ("assistant", "hi"), ("user", "ok")]
+    assert [(r, t) for r, t, _, _ in blocks] == [("user", "hello"), ("assistant", "hi"), ("user", "ok")]
     assert blocks[0][2] == "2026-11-05T19:26:03.123Z"
 
 
@@ -44,8 +44,8 @@ def test_plumbing_records_dropped():
              _rec("assistant", "No response requested."),
              _rec("user", "devam")]
     blocks = transcript.parse_conversation(lines)
-    assert [(r, t) for r, t, _ in blocks] == [("user", "gercek mesaj"),
-                                              ("user", "devam")]
+    assert [(r, t) for r, t, _, _ in blocks] == [("user", "gercek mesaj"),
+                                                  ("user", "devam")]
 
 
 def test_resume_anchors_collapsed():
@@ -54,7 +54,7 @@ def test_resume_anchors_collapsed():
     blocks = transcript.parse_conversation(
         [_rec("user", resume),
          _rec("user", "Continue from where you left off.")])
-    assert [t for _, t, _ in blocks] == [
+    assert [t for _, t, _, _ in blocks] == [
         "↻ CONTINUITY RESUME cp-223 · handoff.md", "↻ CC resume"]
 
 
@@ -67,7 +67,93 @@ def test_image_records_become_chips():
                        "text": "[Image: original 958x2062, displayed at 929x2000]"}]),
         _rec("user", "[Image: source: /x/2.png]"),
         _rec("user", "bunu gordun mu ???\n[Image: source: /x/3.png]")])
-    assert [t for _, t, _ in blocks] == ["🖼 image", "bunu gordun mu ???"]
+    assert [t for _, t, _, _ in blocks] == ["🖼 image", "bunu gordun mu ???"]
+
+
+# --- issue #55: pasted images open in a lightbox modal --------------------
+
+
+def _img(media="image/png", data="QUJD", stype="base64"):
+    return {"type": "image",
+            "source": {"type": stype, "media_type": media, "data": data}}
+
+
+def test_image_blocks_attach_data_uris():
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image: source: /x/1.png]"},
+                      _img()])])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == ["data:image/png;base64,QUJD"]
+
+
+def test_pure_image_record_without_text_line():
+    blocks = transcript.parse_conversation([_rec("user", [_img(data="RAA=")])])
+    assert len(blocks) == 1
+    assert blocks[0][1] == "🖼 image"
+    assert list(blocks[0][3]) == ["data:image/png;base64,RAA="]
+
+
+def test_mixed_text_and_image_appends_chip():
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text",
+                       "text": "bunu gordun mu ???\n[Image: source: /x/3.png]"},
+                      _img(media="image/jpeg", data="SUVHRQ==")])])
+    assert len(blocks) == 1
+    assert blocks[0][1] == "bunu gordun mu ???"
+    assert list(blocks[0][3]) == ["data:image/jpeg;base64,SUVHRQ=="]
+
+
+def test_folded_chips_merge_galleries():
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image: source: /a]"},
+                      _img(data="QQ==")]),
+        _rec("user", [{"type": "text", "text": "[Image: original 10x10]"},
+                      _img(data="Qg==")])])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == ["data:image/png;base64,QQ==",
+                                  "data:image/png;base64,Qg=="]
+
+
+def test_oversize_and_bad_type_stay_plain_chip():
+    big = "A" * (transcript._MAX_IMG_B64 + 1)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image: source: /big]"},
+                      _img(data=big)]),
+        _rec("user", [{"type": "text", "text": "[Image: source: /tif]"},
+                      _img(media="image/tiff")]),
+        _rec("user", [{"type": "text", "text": "[Image: source: /u]"},
+                      _img(stype="url")])])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == []
+
+
+def test_render_html_chip_clickable_with_images():
+    b = [("user", "🖼 image", None, ("data:image/png;base64,QUJD",)),
+         ("user", "metin", None, ("data:image/png;base64,QkI=",))]
+    d = transcript.render_html(b, META)
+    assert d.count('class="chipbtn"') == 2
+    assert "data:image/png;base64,QUJD" in d
+    assert 'id="lb"' in d and 'id="lbi"' in d
+    assert d.index("metin") < d.rindex('class="chipbtn"')  # mixed chip trails text
+
+
+def test_render_html_plain_chip_not_clickable():
+    d = transcript.render_html([("user", "🖼 image", None)], META)
+    assert 'class="chipbtn"' not in d and 'id="lb"' not in d
+
+
+def test_render_html_folded_run_one_button_two_images():
+    b = [("user", "🖼 image", None,
+          ("data:image/png;base64,QQ==", "data:image/png;base64,Qg=="))]
+    d = transcript.render_html(b, META)
+    assert d.count('class="chipbtn"') == 1
+    assert d.count('src="data:image/png;base64') == 2
+
+
+def test_render_markdown_ignores_images():
+    b = [("user", "metin", None, ("data:image/png;base64,QUJD",))]
+    md = transcript.render_markdown(b, META)
+    assert "metin" in md and "base64" not in md
 
 
 def test_table_fenced_and_escaping():
