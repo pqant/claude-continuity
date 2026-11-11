@@ -26,6 +26,7 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: `cc-continuity status [slug]`: inspect any registered project from anywhere - the same block (rotation line and `--json` included), resolved through the exact slug matching `ratio` uses, so the two commands can never point at different projects ([commit](https://github.com/pqant/claude-continuity/commit/2ea65a3)).
 - **2026-11-11**: New `cc-continuity ledger [n]`: the session ledger finally has a reader. The gate decisions from #39, the state transitions and the prompts print as compact single lines (`HH:MM:SS type key=value…`), newest N (default 20), resolved the same way `status` resolves the session ([commit](https://github.com/pqant/claude-continuity/commit/d84a8ea)).
 - **2026-11-11**: `cc-continuity ratio` learned to talk to machines too:
   `ratio --json [slug]` prints exactly one JSON object (`slug`,
@@ -44,11 +45,6 @@ log:
   task's duration sits in the line you actually watch, updated the
   moment the turn ends
   ([commit](https://github.com/pqant/claude-continuity/commit/6524d4b)).
-- **2026-11-10**: The turn clock's reply timing moved to where the pane
-  actually renders it: every prompt line now carries the previous task
-  (`prev reply start -> end (2m34s)`) read from the transcript, so you
-  see how long the last task took the moment you send the next one
-  ([commit](https://github.com/pqant/claude-continuity/commit/b220ddf)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
