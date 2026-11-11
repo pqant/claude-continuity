@@ -4,6 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-11-11
+
+### Fixed
+
+- The exported HTML transcript no longer crowds the conversation with
+  protocol plumbing (issue #54): slash-command XML from `/clear` and
+  `/rename`, `<task-notification>` blocks, Continuity Stop-hook
+  feedback injections, skill base-directory lines and assistant
+  "No response requested." acknowledgements are dropped outright; the
+  CONTINUITY RESUME blob and CC's "Continue from where you left off."
+  prompt collapse to one-line anchors (`↻ CONTINUITY RESUME cp-NNN ·
+  handoff.md`, `↻ CC resume`); image metadata lines fold into a
+  single `🖼 image` chip (runs of chips collapse to one, human text
+  in a mixed record survives without the metadata). A 2026-11-11
+  scan of the project JSONLs counted eight such noise classes
+  totaling ~325 records that had been rendered as bulky user bubbles.
+
 ## [0.3.20] - 2026-11-11
 
 ### Fixed
