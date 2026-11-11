@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
                               help="current project/session summary")
     p_status.add_argument("--json", action="store_true",
                           help="machine-readable output")
+    p_status.add_argument("slug", nargs="?",
+                          help="project slug (default: current project)")
     sub.add_parser("statusline", help="status line entry (PRD §7)")
 
     p_hook = sub.add_parser("hook", help="hook entry (PRD §9)")
@@ -448,7 +450,14 @@ def _status_human(data: dict) -> str:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    data = collect_status()
+    cwd = None
+    if getattr(args, "slug", None):
+        _key, root, err = _project_by_slug(args.slug)
+        if err is not None:
+            print(f"cc-continuity status: {err}", file=sys.stderr)
+            return 1
+        cwd = root
+    data = collect_status(cwd=cwd)
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
@@ -563,29 +572,39 @@ def _project_record(key: str) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
+def _project_by_slug(slug: str) -> tuple[str, Path, str | None]:
+    """(key, root, error) for an explicit project slug.
+
+    The #28 matching lives here so `ratio [slug]` and `status [slug]`
+    (#48) resolve projects identically; the caller prints the error
+    with its own command prefix.
+    """
+    from . import notify  # local: keep the module import list tight
+    pdir = paths.projects_dir()
+    matches = [d.name for d in pdir.iterdir()
+               if d.is_dir() and notify.project_slug(d.name) == slug] \
+        if pdir.is_dir() else []
+    if not matches:
+        return "", Path(), f"no project {slug!r}"
+    if len(matches) > 1:
+        return "", Path(), (f"ambiguous slug {slug!r} "
+                            f"({', '.join(sorted(matches))})")
+    key = matches[0]
+    record = _project_record(key)
+    if record is None or not record.get("root"):
+        return "", Path(), f"unreadable project record for {key}"
+    return key, Path(record["root"]), None
+
+
 def cmd_ratio(args: argparse.Namespace) -> int:
     """One-shot context ratio for trial bookkeeping (issue #28)."""
     from . import notify  # local: keep the module import list tight
     if args.slug:
-        pdir = paths.projects_dir()
-        matches = [d.name for d in pdir.iterdir()
-                   if d.is_dir() and notify.project_slug(d.name) == args.slug] \
-            if pdir.is_dir() else []
-        if len(matches) != 1:
-            if not matches:
-                print(f"cc-continuity ratio: no project {args.slug!r}",
-                      file=sys.stderr)
-            else:
-                print(f"cc-continuity ratio: ambiguous slug {args.slug!r} "
-                      f"({', '.join(sorted(matches))})", file=sys.stderr)
+        key, root, err = _project_by_slug(args.slug)
+        if err is not None:
+            print(f"cc-continuity ratio: {err}", file=sys.stderr)
             return 1
-        key = matches[0]
-        record = _project_record(key)
-        if record is None or not record.get("root"):
-            print(f"cc-continuity ratio: unreadable project record for {key}",
-                  file=sys.stderr)
-            return 1
-        root = Path(record["root"])
+        record = _project_record(key)  # for the #28 session fallback
     else:
         root = project.resolve_root(Path.cwd())
         key = project.project_key_for_root(root)
