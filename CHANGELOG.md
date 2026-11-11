@@ -4,6 +4,21 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-11-11
+
+### Fixed
+
+- A DEGRADED handoff now tells the still-alive pre-rotation agent that
+  the file is frozen (issue #52): the C7 header gains the directive
+  "This file is finalized. Do not edit it and do not start any more
+  work in this session; end your turn now." Right after a DEGRADED
+  finalization on 2026-11-11 an old session reached back into the
+  finalized file and attempted edits it no longer owns; the banner
+  carried no order of its own for that agent. The sentence is pinned
+  as a literal in the tests (a wording drift fails CI); the verified
+  (non-degraded) path is untouched and verify keeps its exact-match
+  check on the same constant.
+
 ## [0.3.18] - 2026-11-11
 
 ### Changed
