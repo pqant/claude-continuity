@@ -29,6 +29,18 @@ _LIST_RE = re.compile(r"^\s*([-*]|\d+\.)\s+")
 _SEP_ROW_RE = re.compile(r"^[\s:|-]+$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 
+#: Protocol plumbing dropped outright (issue #54): slash-command XML,
+#: task notifications, skill base-directory lines (plus the pre-existing
+#: local-command/caveat noise). "Stop hook feedback:" is checked
+#: separately - only CONTINUITY-bearing injections are dropped.
+_NOISE_PREFIXES = ("<local-command", "Caveat:", "<command-name>",
+                   "<command-message>", "<command-args>",
+                   "<task-notification>", "Base directory for this skill:")
+#: Image metadata lines from pasted attachments (issue #54); they fold
+#: into a single chip so the image trace survives without the bulk.
+_IMAGE_PREFIXES = ("[Image: source:", "[Image: original")
+_IMAGE_CHIP = "\U0001f5bc image"
+
 
 def md_inline(s: str) -> str:
     """Inline markdown on escaped text: code spans, bold, italic."""
@@ -110,9 +122,14 @@ def parse_conversation(lines: list[str]) -> list[Block]:
     """Text turns of user/assistant records in order, noise removed.
 
     Unparseable JSONL lines are skipped silently; tool-use payloads,
-    system/summary records, ``<system-reminder>`` spans, and
-    local-command/caveat noise never reach the output. Runs of 3+
-    newlines in assistant text collapse to exactly two.
+    system/summary records, ``<system-reminder>`` spans, and protocol
+    plumbing (slash-command XML, task notifications, Continuity Stop-hook
+    feedback, skill base-directory lines, ``No response requested.``)
+    never reach the output (issue #54). The CONTINUITY RESUME blob and
+    CC's "Continue from where you left off." prompt collapse to one-line
+    anchors; image metadata lines fold into a ``🖼 image`` chip (runs of
+    chips collapse to one). Runs of 3+ newlines in assistant text
+    collapse to exactly two.
     """
     out: list[Block] = []
     for raw in lines:
@@ -134,8 +151,37 @@ def parse_conversation(lines: list[str]) -> list[Block]:
         if not text:
             continue
         text = _REMINDER_RE.sub("", text).strip()
-        if not text or text.startswith(("<local-command", "Caveat:")):
+        if not text or text.startswith(_NOISE_PREFIXES):
             continue
+        # Real records are "Stop hook feedback:\nCONTINUITY ..."; only
+        # these injections drop, other hook feedback survives (issue #54).
+        if text[:120].replace("\n", " ").startswith(
+                "Stop hook feedback: CONTINUITY"):
+            continue
+        if (rec["type"] == "assistant"
+                and text.startswith("No response requested.")):
+            continue
+        # Image metadata lines become a chip; human text in a mixed
+        # record survives without them (issue #54).
+        kept, had_image = [], False
+        for ln in text.split("\n"):
+            if ln.startswith(_IMAGE_PREFIXES):
+                had_image = True
+            else:
+                kept.append(ln)
+        text = "\n".join(kept).strip()
+        if not text:
+            if not had_image:
+                continue
+            text = _IMAGE_CHIP
+            if out and out[-1][1] == _IMAGE_CHIP:
+                continue
+        if text.startswith("CONTINUITY RESUME cp-"):
+            m = re.search(r"cp-(\d{3})", text)
+            tag = f"cp-{m.group(1)} " if m else ""
+            text = f"↻ CONTINUITY RESUME {tag}· handoff.md"
+        elif text.startswith("Continue from where you left off."):
+            text = "↻ CC resume"
         if rec["type"] == "assistant":
             text = _MULTI_NL.sub("\n\n", text)
         ts = rec.get("timestamp")
