@@ -4,6 +4,25 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-11-11
+
+### Fixed
+
+- A deferred rotation no longer waits forever (issue #53): when the
+  rotator deferred a rotation because the agent was still active after
+  the Stop, it relied on the next Stop event arriving - and if the turn
+  had already ended, no next Stop ever came. Observed 2026-11-11: a
+  pane idled ~16 minutes at 79% ROTATING with no way to progress. The
+  defer now arms a detached, bounded self-retry tick: a short delay
+  later it re-checks the session and, when the state is still
+  `CHECKPOINT_VERIFIED` with the same `rotation_id` and the session is
+  idle, it drives the rotation itself through the same rotator the
+  Stop hook uses. The Stop-driven route stays primary; the
+  rotation_id guard makes the tick idempotent (a fresh Stop re-arm or
+  a completed rotation stands it down), the attempt chain is capped
+  and giving up never touches state. Opt out with
+  `"retry_deferred": false` in the config.
+
 ## [0.3.19] - 2026-11-11
 
 ### Fixed
