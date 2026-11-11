@@ -71,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ratio.add_argument("--json", action="store_true",
                          help="machine-readable output")
 
+    p_ledger = sub.add_parser("ledger",
+                              help="print recent ledger entries of the "
+                                   "current session (issue #46)")
+    p_ledger.add_argument("n", nargs="?", type=int, default=20,
+                          help="how many newest entries (default 20)")
+
     p_vd = sub.add_parser("validate-draft",
                           help="validate a handoff draft (PRD §10.1)")
     p_vd.add_argument("file", help="path to handoff.draft.md")
@@ -625,6 +631,57 @@ def cmd_ratio(args: argparse.Namespace) -> int:
         }))
         return 0
     print(f"{notify.project_slug(key)} {ratio}")
+    return 0
+
+
+# ---------------------------------------------------------------- ledger
+
+
+_LEDGER_VALUE_CAP = 60
+
+
+def _ledger_line(entry: dict) -> str:
+    """One compact line per ledger entry (issue #46): ``ts type k=v...``."""
+    ts = entry.get("ts")
+    when = (time.strftime("%H:%M:%S", time.localtime(ts))
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            else "-")
+    parts = [when, str(entry.get("type") or "-")]
+    for k, v in entry.items():
+        if k in ("ts", "type"):
+            continue
+        sval = " ".join(str(v).split())
+        if len(sval) > _LEDGER_VALUE_CAP:
+            sval = sval[:_LEDGER_VALUE_CAP - 1] + "…"
+        parts.append(f"{k}={sval}")
+    return " ".join(parts)
+
+
+def cmd_ledger(args: argparse.Namespace) -> int:
+    """Tail of the current session's ledger (issue #46). Read-only.
+
+    Same session resolution as ``status`` (#32): live marker first, then
+    the newest registered session.
+    """
+    root = project.resolve_root(Path.cwd())
+    key = project.project_key_for_root(root)
+    record, _metric = _resolve_session(root, key)
+    nnn = record.get("nnn") if isinstance(record, dict) else None
+    if not isinstance(nnn, int):
+        project_record = _project_record(key)
+        for s in reversed((project_record or {}).get("sessions") or []):
+            if isinstance(s, dict) and isinstance(s.get("nnn"), int):
+                nnn = s["nnn"]
+                break
+    if not isinstance(nnn, int):
+        print(f"cc-continuity ledger: no session for {root}",
+              file=sys.stderr)
+        return 1
+    n = args.n if isinstance(args.n, int) and args.n > 0 else 20
+    entries = ledger.read(paths.session_dir(key, nnn))
+    for e in entries[-n:]:
+        if isinstance(e, dict):
+            print(_ledger_line(e))
     return 0
 
 
@@ -1408,6 +1465,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_history(args)
     if args.command == "ratio":
         return cmd_ratio(args)
+    if args.command == "ledger":
+        return cmd_ledger(args)
     if args.command == "validate-draft":
         return cmd_validate_draft(args)
     if args.command == "validate":
