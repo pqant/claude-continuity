@@ -26,6 +26,7 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: New `cc-continuity ledger [n]`: the session ledger finally has a reader. The gate decisions from #39, the state transitions and the prompts print as compact single lines (`HH:MM:SS type key=value…`), newest N (default 20), resolved the same way `status` resolves the session ([commit](https://github.com/pqant/claude-continuity/commit/d84a8ea)).
 - **2026-11-11**: `cc-continuity ratio` learned to talk to machines too:
   `ratio --json [slug]` prints exactly one JSON object (`slug`,
   `session_id`, `ratio`, `ts`, `stale`) so the watchdog and trial
@@ -48,10 +49,6 @@ log:
   (`prev reply start -> end (2m34s)`) read from the transcript, so you
   see how long the last task took the moment you send the next one
   ([commit](https://github.com/pqant/claude-continuity/commit/b220ddf)).
-- **2026-11-10**: New opt-in `turn_clock` config surfaces message timing
-  in the pane: the prompt time plus the previous reply's window and
-  wall time, matching what the transcript HTML export shows
-  ([commit](https://github.com/pqant/claude-continuity/commit/37317c8)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
