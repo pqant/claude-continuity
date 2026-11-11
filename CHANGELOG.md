@@ -4,6 +4,16 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-11-11
+
+### Added
+
+- `cc-continuity ratio --json [slug]` (issue #34) prints exactly one
+  JSON object - `slug`, `session_id`, `ratio`, `ts`, `stale` - for
+  scripts and the watchdog. The plain human line remains the default,
+  and failure paths keep the plain stderr line + exit 1 so callers
+  parse stdout only on success.
+
 ## [0.3.14] - 2026-11-11
 
 ### Added

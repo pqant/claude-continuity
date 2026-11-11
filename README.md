@@ -26,6 +26,12 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: `cc-continuity ratio` learned to talk to machines too:
+  `ratio --json [slug]` prints exactly one JSON object (`slug`,
+  `session_id`, `ratio`, `ts`, `stale`) so the watchdog and trial
+  tooling never parse a human line, while the plain output stays the
+  default
+  ([commit](https://github.com/pqant/claude-continuity/commit/fef61d6)).
 - **2026-11-11**: `cc-continuity status` gained a rotation summary line
   (`rotation ACTIVE · ratio 65.0% · last crossed rotate`): state, live
   ratio and the last threshold crossed in one line, human and `--json`,
@@ -46,11 +52,6 @@ log:
   in the pane: the prompt time plus the previous reply's window and
   wall time, matching what the transcript HTML export shows
   ([commit](https://github.com/pqant/claude-continuity/commit/37317c8)).
-- **2026-11-10**: Rotation gate decisions (guide/deny/block/silent) now
-  land in the session ledger with their ratio and C-text variant, so a
-  strange rotation is debugged from disk instead of reverse-engineering
-  the renderer
-  ([commit](https://github.com/pqant/claude-continuity/commit/5392666)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
