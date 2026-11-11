@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-11-11
+
+### Changed
+
+- The status line HUD prev-task segment is now readable (issue #51):
+  `⏱ Previous task completion 39m 15s` - full label, spaced units and
+  an hour shape (`1h 2m 03s`, `47s`) instead of `⏱ prev task 39m15s`.
+  Still opt-in via `turn_clock` and still carried on the Active Usage
+  main text only (blink marker substring-matching untouched); the turn
+  clock prompt line (#44) keeps its compact `(1h2m03s)` shape
+  byte-identical.
+
 ## [0.3.17] - 2026-11-11
 
 ### Added
