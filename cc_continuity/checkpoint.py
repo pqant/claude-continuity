@@ -44,10 +44,14 @@ TEMPLATE_HEADINGS: tuple[str, ...] = (
 REQUIRED_NONEMPTY: tuple[int, ...] = (0, 1, 3)
 MIN_REQUIRED_CHARS = 20
 
-#: Appendix C.7 (degraded checkpoint header).
+#: Appendix C.7 (degraded checkpoint header). The finalized directive
+#: (#52) addresses the still-alive pre-rotation agent that inspects the
+#: frozen file: no more edits, no more work, end the turn now.
 C7 = ("DEGRADED CHECKPOINT: the model did not produce a valid handoff; only "
       "deterministic state is available. Reconstruct intent from the user "
-      "prompts and changed files before continuing.")
+      "prompts and changed files before continuing. This file is finalized. "
+      "Do not edit it and do not start any more work in this session; end "
+      "your turn now.")
 
 
 class CheckpointError(RuntimeError):
