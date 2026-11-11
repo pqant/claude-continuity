@@ -26,6 +26,7 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: DEGRADED handoffs now freeze themselves: the banner gained a direct order for the still-alive pre-rotation agent ("This file is finalized. Do not edit it and do not start any more work in this session; end your turn now."), so a finished handoff can no longer be reached into and edited after finalization ([commit](https://github.com/pqant/claude-continuity/commit/5b2a07e)).
 - **2026-11-11**: The HUD prev-task segment is now readable at a glance: the Active Usage line reads `⏱ Previous task completion 39m 15s` (spaced units; `1h 2m 03s` and `47s` too) instead of `⏱ prev task 39m15s`, while the turn clock prompt line keeps its compact shape ([commit](https://github.com/pqant/claude-continuity/commit/12dd90b)).
 - **2026-11-11**: `cc-continuity status [slug]`: inspect any registered project from anywhere - the same block (rotation line and `--json` included), resolved through the exact slug matching `ratio` uses, so the two commands can never point at different projects ([commit](https://github.com/pqant/claude-continuity/commit/2ea65a3)).
 - **2026-11-11**: New `cc-continuity ledger [n]`: the session ledger finally has a reader. The gate decisions from #39, the state transitions and the prompts print as compact single lines (`HH:MM:SS type key=value…`), newest N (default 20), resolved the same way `status` resolves the session ([commit](https://github.com/pqant/claude-continuity/commit/d84a8ea)).
@@ -35,12 +36,6 @@ log:
   tooling never parse a human line, while the plain output stays the
   default
   ([commit](https://github.com/pqant/claude-continuity/commit/fef61d6)).
-- **2026-11-11**: `cc-continuity status` gained a rotation summary line
-  (`rotation ACTIVE · ratio 65.0% · last crossed rotate`): state, live
-  ratio and the last threshold crossed in one line, human and `--json`,
-  sharing the exact ratio source of `cc-continuity ratio` so the two
-  never disagree
-  ([commit](https://github.com/pqant/claude-continuity/commit/18a1c84)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
