@@ -395,7 +395,43 @@ def test_prev_task_duration_minutes(tmp_path):
         _rec("assistant", [{"type": "text", "text": "bitti"}],
              ts="2026-11-10T11:56:15.000Z"),
     ]) + "\n", encoding="utf-8")
-    assert transcript.prev_task_duration(f) == "39m15s"
+    assert transcript.prev_task_duration(f) == "39m 15s"
+
+
+def test_prev_task_duration_hours(tmp_path):
+    f = tmp_path / "t.jsonl"
+    # prompt 11:00:00 -> final reply 12:02:03 = 1h2m3s wall time (issue #51)
+    f.write_text("\n".join([
+        _rec("user", "task", ts="2026-11-10T11:00:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bas"}],
+             ts="2026-11-10T11:20:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T12:02:03.000Z"),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.prev_task_duration(f) == "1h 2m 03s"
+
+
+def test_prev_task_duration_seconds_stay_compact(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join([
+        _rec("user", "task", ts="2026-11-10T11:00:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T11:00:47.000Z"),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.prev_task_duration(f) == "47s"
+
+
+def test_prev_reply_clock_hours_stay_compact(tmp_path):
+    # The prompt-side clock (issue #44) keeps the compact shape even
+    # once the HUD gained spaced units (issue #51): shared _fmt_secs,
+    # sep only on the HUD path.
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join([
+        _rec("user", "task", ts="2026-11-10T11:00:00.000Z"),
+        _rec("assistant", [{"type": "text", "text": "bitti"}],
+             ts="2026-11-10T12:02:03.000Z"),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.prev_reply_clock(f).endswith("(1h2m03s)")
 
 
 def test_prev_task_duration_unreadable_returns_none(tmp_path):

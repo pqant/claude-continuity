@@ -1452,7 +1452,7 @@ def _conv(tmp_path):
 def test_render_segment_prev_dur_on_active_usage():
     assert statusline.render_segment(
         0.64, {"state": "ACTIVE"}, True, ansi=False,
-        prev_dur="39m15s") == "◆ 64% Active Usage ⏱ prev task 39m15s"
+        prev_dur="39m 15s") == "◆ 64% Active Usage ⏱ Previous task completion 39m 15s"
 
 
 def test_render_segment_prev_dur_absent_is_unchanged():
@@ -1470,7 +1470,7 @@ def test_run_shows_prev_task_when_turn_clock_on(cc_home, tmp_path):
     line = statusline.run(
         json.dumps(_payload(transcript_path=_conv(tmp_path))).encode(),
         _cfg(statusline_ansi=False, turn_clock=True))
-    assert line == "◆ 9% Active Usage ⏱ prev task 55s"
+    assert line == "◆ 9% Active Usage ⏱ Previous task completion 55s"
 
 
 def test_run_omits_prev_task_when_turn_clock_off(cc_home, tmp_path):
