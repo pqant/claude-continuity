@@ -42,6 +42,7 @@ def _setup(tmp_path, name="proj-001", nnn=1, session_id=SID_A,
     root = project.resolve_root(tmp_path)
     key = project.project_key_for_root(root)
     project.ensure_project(tmp_path)
+    project.record_session(key, name, session_id, nnn)
     state.create_session_state(key, name, nnn, session_id)
     for s in states:
         state.transition(key, nnn, s)
@@ -185,3 +186,82 @@ def test_cli_statusline_garbage_stdin_exits_zero(cc_home, tmp_path,
 def _text_stdin(text):
     import io
     return io.StringIO(text)
+
+
+# ------------------------------------------- #32 rotation summary line
+
+
+def _write_ratio_metric(root, ratio, session_id=SID_A):
+    statusline.write_metric(_metric(session_id, root,
+                                    used=int(ratio * 262144)))
+
+
+def test_status_json_rotation_summary_active(cc_home, tmp_path):
+    key, root = _setup(tmp_path)  # metric 12345/262144 = 4.7%
+    rot = cli.collect_status(cwd=tmp_path)["rotation"]
+    assert rot["state"] == "ACTIVE"
+    assert abs(rot["ratio"] - 12345 / 262144) < 1e-4
+    assert rot["last_crossed"] == "none"
+
+
+@pytest.mark.parametrize("ratio,crossed", [
+    (0.60, "warn"),     # warn 0.55 <= r < rotate 0.62
+    (0.65, "rotate"),   # rotate 0.62 <= r < hard 0.72
+    (0.75, "hard"),     # r >= hard 0.72
+])
+def test_status_rotation_last_crossed(cc_home, tmp_path, ratio, crossed):
+    key, root = _setup(tmp_path, metric=False)
+    _write_ratio_metric(root, ratio)
+    rot = cli.collect_status(cwd=tmp_path)["rotation"]
+    assert rot["last_crossed"] == crossed
+
+
+def test_status_rotation_no_metric(cc_home, tmp_path):
+    _setup(tmp_path, metric=False)
+    rot = cli.collect_status(cwd=tmp_path)["rotation"]
+    assert rot["state"] == "ACTIVE"
+    assert rot["ratio"] is None
+    assert rot["last_crossed"] is None
+
+
+def test_status_rotation_falls_back_to_registered_session(cc_home, tmp_path):
+    # Same source of truth as `ratio` (#28): when the newest-runtime scan
+    # finds nothing (marker without a matching project_dir), the newest
+    # registered session's marker answers.
+    key, root = _setup(tmp_path, metric=False)
+    statusline.write_metric({
+        "session_id": SID_A, "ts": time.time(),
+        "used_tokens": int(0.60 * 262144), "window_tokens": 262144,
+        "ratio": 0.60,
+    })
+    data = cli.collect_status(cwd=tmp_path)
+    assert data["ratio"] == 0.60
+    assert data["rotation"]["last_crossed"] == "warn"
+
+
+def test_status_human_rotation_line(cc_home, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TMUX", raising=False)
+    key, root = _setup(tmp_path, metric=False)
+    _write_ratio_metric(root, 0.65)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    lines = [l for l in out.splitlines() if l.startswith("rotation")]
+    assert len(lines) == 1
+    assert "ACTIVE" in lines[0]
+    assert "65.0%" in lines[0]
+    assert "last crossed rotate" in lines[0]
+
+
+def test_status_human_rotation_line_no_metric(cc_home, tmp_path, monkeypatch,
+                                              capsys):
+    monkeypatch.delenv("TMUX", raising=False)
+    _setup(tmp_path, metric=False)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["status"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines()
+             if l.startswith("rotation")]
+    assert len(lines) == 1
+    assert "ACTIVE" in lines[0]
+    assert "ratio -" in lines[0]
+    assert "last crossed -" in lines[0]

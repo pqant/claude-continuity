@@ -285,6 +285,22 @@ def _resolve_session(root: Path, key: str) -> tuple[dict | None, dict | None]:
     return rec, best[1]
 
 
+def _fallback_metric(record: dict | None) -> dict | None:
+    """#28 ratio fallback: newest registered session's runtime marker.
+
+    Trial runs often have no statusline yet; the project record's session
+    list is the only trustworthy pointer then. One source of truth for
+    ``ratio`` (#28) and the ``status`` rotation line (#32).
+    """
+    for s in reversed((record or {}).get("sessions") or []):
+        sid = s.get("session_id") if isinstance(s, dict) else None
+        if sid:
+            metric = statusline.read_metric(str(sid))
+            if metric:
+                return metric
+    return None
+
+
 def _late_attach(root: Path, key: str, metric: dict | None) -> dict | None:
     """Phase 28: register the running conversation when it has no record.
 
@@ -317,6 +333,8 @@ def collect_status(cwd: str | Path | None = None) -> dict:
         project_record = None
 
     record, metric = _resolve_session(root, key)
+    if not metric:
+        metric = _fallback_metric(project_record)
     data = {
         "project_key": key if project_record is not None else None,
         "project_root": str(root),
@@ -345,6 +363,42 @@ def collect_status(cwd: str | Path | None = None) -> dict:
         }
         if record.get("name"):
             data["next_name"] = naming.successor_name(record["name"])
+    # #32: one-line rotation picture (state + live ratio + last threshold
+    # crossed). Same ratio source as `ratio` (#28) via _fallback_metric.
+    crossed: str | None = None
+    r = data["ratio"]
+    t = data["thresholds"]
+    if isinstance(r, (int, float)) and not isinstance(r, bool):
+        if t["hard_ratio"] is not None and r >= t["hard_ratio"]:
+            crossed = "hard"
+        elif t["rotate_ratio"] is not None and r >= t["rotate_ratio"]:
+            crossed = "rotate"
+        elif t["warn_ratio"] is not None and r >= t["warn_ratio"]:
+            crossed = "warn"
+        else:
+            crossed = "none"
+    rot_state = (record or {}).get("state")
+    if rot_state is None and project_record is not None:
+        # Same source as the ratio fallback (#28): newest registered
+        # session. Its state lives in sessions/<nnn>/state.json.
+        for s in reversed(project_record.get("sessions") or []):
+            nnn = s.get("nnn") if isinstance(s, dict) else None
+            if not isinstance(nnn, int):
+                continue
+            try:
+                srec = json.loads(
+                    (paths.session_dir(key, nnn)
+                     / "state.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(srec, dict) and srec.get("state"):
+                rot_state = srec["state"]
+                break
+    data["rotation"] = {
+        "state": rot_state,
+        "ratio": r if crossed is not None else None,
+        "last_crossed": crossed,
+    }
     return data
 
 
@@ -373,6 +427,12 @@ def _status_human(data: dict) -> str:
     lines.append(f"thresholds warn {t['warn_ratio'] * 100:.0f}% · "
                  f"rotate {t['rotate_ratio'] * 100:.0f}% · "
                  f"hard {t['hard_ratio'] * 100:.0f}%")
+    rot = data.get("rotation") or {}
+    rot_ratio = (f"{data['ratio'] * 100:.1f}%"
+                 if isinstance(data["ratio"], (int, float))
+                 and not isinstance(data["ratio"], bool) else "-")
+    lines.append(f"rotation   {rot.get('state') or '-'} · ratio {rot_ratio}"
+                 f" · last crossed {rot.get('last_crossed') or '-'}")
     lines.append(f"next       {data['next_name'] or '—'}")
     lines.append(f"checkpoint {data['latest_checkpoint'] or '—'}")
     lines.append(f"tmux       {'yes' if data['tmux'] else 'no'}")
@@ -544,13 +604,8 @@ def cmd_ratio(args: argparse.Namespace) -> int:
     _rec, metric = _resolve_session(root, key)
     if not metric:
         # the runtime marker is statusline-owned; trial runs often have no
-        # statusline yet: fall back to the newest registered session.
-        for s in reversed((record or {}).get("sessions") or []):
-            sid = s.get("session_id") if isinstance(s, dict) else None
-            if sid:
-                metric = statusline.read_metric(str(sid))
-                if metric:
-                    break
+        # statusline yet: fall back to the newest registered session (#28).
+        metric = _fallback_metric(record)
     ratio = (metric or {}).get("ratio")
     if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
         print(f"{notify.project_slug(key)}: no metrics yet", file=sys.stderr)
