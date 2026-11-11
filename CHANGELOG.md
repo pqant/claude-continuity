@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-11-11
+
+### Added
+
+- `cc-continuity status` now carries a rotation summary line
+  (issue #32): `rotation   ACTIVE · ratio 65.0% · last crossed
+  rotate` - state, live ratio and the last threshold crossed in one
+  line, in both human and `--json` output (new `rotation` object).
+  The ratio resolves through the same fallback chain as
+  `cc-continuity ratio` (#28), so the two commands can no longer
+  disagree on the number.
+
 ## [0.3.13] - 2026-11-10
 
 ### Added

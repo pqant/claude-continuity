@@ -26,6 +26,12 @@ The five most recent updates, newest first. Each line links to its
 commit, so you can see what changed lately without digging through the
 log:
 
+- **2026-11-11**: `cc-continuity status` gained a rotation summary line
+  (`rotation ACTIVE · ratio 65.0% · last crossed rotate`): state, live
+  ratio and the last threshold crossed in one line, human and `--json`,
+  sharing the exact ratio source of `cc-continuity ratio` so the two
+  never disagree
+  ([commit](https://github.com/pqant/claude-continuity/commit/18a1c84)).
 - **2026-11-10**: `turn_clock` now drives the status line HUD too: the
   `◆ … Active Usage` segment carries `⏱ prev task 39m15s`, so the last
   task's duration sits in the line you actually watch, updated the
@@ -45,11 +51,6 @@ log:
   strange rotation is debugged from disk instead of reverse-engineering
   the renderer
   ([commit](https://github.com/pqant/claude-continuity/commit/5392666)).
-- **2026-11-10**: `cc-continuity install` now pins
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=95` next to the context-window pin, so
-  a fresh install always starts the rotation gate ahead of native
-  auto-compact (a user-set value is never overwritten)
-  ([commit](https://github.com/pqant/claude-continuity/commit/708237d)).
 ## How it works
 
 The whole flow in one picture: the automatic session loop, the optional
