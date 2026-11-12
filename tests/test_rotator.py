@@ -140,6 +140,31 @@ def test_idle_ignores_state_bookkeeping_after_stop(cc_home, tmp_path):
     assert rotator._idle(key, nnn) is True
 
 
+def test_idle_ignores_gate_bookkeeping_after_stop(cc_home, tmp_path):
+    # The Stop hook sets last_stop_ts and only THEN records the handoff
+    # gate decision (stop.py: ledger.gate after update_fields), so a
+    # valid-draft Stop writes a "gate" entry with ts > last_stop_ts.
+    # The Stop that ends the handoff turn is the LAST Stop that ever
+    # comes, so this bookkeeping must not look like activity.
+    _, key, nnn = _quiet_session(cc_home, tmp_path)
+    time.sleep(0.01)
+    ledger.gate(paths.session_dir(key, nnn), action="silent",
+                state_from="HANDOFF_REQUESTED",
+                state_to="CHECKPOINT_VERIFIED")
+    assert rotator._idle(key, nnn) is True
+
+
+def test_idle_ignores_gate_deny_bookkeeping_after_stop(cc_home, tmp_path):
+    # Same bookkeeping class with a denied call (the c9 post-handoff
+    # freeze gate logs gate entries with a tool field).
+    _, key, nnn = _quiet_session(cc_home, tmp_path)
+    time.sleep(0.01)
+    ledger.gate(paths.session_dir(key, nnn), action="deny",
+                state_from="CHECKPOINT_VERIFIED",
+                state_to="CHECKPOINT_VERIFIED", variant="c9", tool="Bash")
+    assert rotator._idle(key, nnn) is True
+
+
 # --- .started marker wait (PRD §11.6) -----------------------------------------
 
 
