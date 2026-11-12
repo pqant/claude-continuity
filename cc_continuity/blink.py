@@ -61,14 +61,63 @@ def ask_visible(text: str | None) -> bool:
                 or ASK_RE_SELECTION.search(text))
 
 
+#: Maximum height of a selection prompt (option rows through the footer);
+#: the footer anchor scan stops here (issue #62).
+_SELECTION_MAX_HEIGHT = 40
+
+
+def _selection_anchor(lines: list[str]) -> tuple[int, int] | None:
+    """(start, footer_index) of a live selection prompt, None otherwise.
+
+    Issue #62 (reproduced live 2026-11-12): CC closes the option box with
+    a border line BEFORE the footer, and a draft in the input box adds a
+    lower indented ``❯`` line, so the old last-``❯`` anchor lands on the
+    draft and the prompt disappears from the region. The footer is the
+    reliable bottom edge: scan upward for the column-0 option cursor,
+    crossing at most the one closing border. A footer quoted in scrollback
+    has no such cursor directly above it, so the 014 stranding protection
+    survives the new anchor.
+    """
+    for fi in range(len(lines) - 1, -1, -1):
+        if not ASK_RE_SELECTION.match(lines[fi]):
+            continue
+        borders = 0
+        for ci in range(fi - 1, max(-1, fi - _SELECTION_MAX_HEIGHT), -1):
+            line = lines[ci]
+            if line.startswith("❯"):
+                end = fi
+                if fi + 1 < len(lines):
+                    nxt = lines[fi + 1].strip()
+                    if nxt and set(nxt) == {INPUT_BORDER}:
+                        # layout where the box closes BELOW the footer
+                        # (pre-2026-11 CC and the pinned fixtures): keep
+                        # the border inside the region, as the old rule
+                        # did.
+                        end = fi + 1
+                return ci, end
+            stripped = line.strip()
+            if stripped and set(stripped) == {INPUT_BORDER}:
+                borders += 1
+                if borders > 1:
+                    break
+    return None
+
+
 def input_box_region_from_lines(lines: list[str]) -> list[str] | None:
-    """The input-box/dialog region: last ``❯``-prefixed line through the
-    next line consisting solely of the border glyph (None when no ``❯``).
+    """The input-box/dialog region.
+
+    A live selection prompt anchors on its footer: option cursor through
+    the footer line (``_selection_anchor``). Otherwise the region is the
+    last ``❯``-prefixed line through the next line consisting solely of
+    the border glyph (None when no ``❯``).
 
     Scrollback is never part of the region, so a quoted footer above the
-    box cannot strand ASK; while a selection prompt is open the option
-    cursor is the ``❯`` line and the footer sits inside the region.
+    box cannot strand ASK.
     """
+    anchor = _selection_anchor(lines)
+    if anchor is not None:
+        start, fi = anchor
+        return lines[start:fi + 1]
     start = None
     for i, line in enumerate(lines):
         if line.lstrip().startswith("❯"):
