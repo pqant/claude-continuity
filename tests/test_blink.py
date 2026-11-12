@@ -590,6 +590,62 @@ def test_input_box_region_none_without_prompt_marker():
     assert blink.input_box_region_from_lines(["plain text", _BORDER]) is None
 
 
+# issue #62 live repro (2026-11-12, connector pane): a selection prompt is
+# on screen while the input box holds a draft. CC closes the option box
+# with a border line BEFORE the footer, and the draft line (an indented
+# option cursor) sits below the footer, so the old last-❯ anchor lands on
+# the input box and the prompt vanishes from the region (ask_visible goes
+# blind and the blink never gates). Byte shape from the live capture.
+_SELECTION_WITH_DRAFT_LINES = [
+    "  Q-0 seed",
+    _BORDER,
+    "Shorter halves wall time but the measurement gets noisier.",
+    "❯ 1. keep 4 seeds (Recommended)",
+    "      Locked protocol stays intact, stronger proof.",
+    "  2. drop to 2 seeds",
+    "      480 jobs total, needs a judge note.",
+    "  3. Stop, discuss tomorrow",
+    "  4. Type something.",
+    "",
+    "  5. Chat about this",
+    "",
+    _BORDER,
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    "",
+    "  ❯ + where is the GPU here, walk me through v1 vs v2",
+    "",
+    _BORDER,
+]
+
+
+def test_input_box_region_anchors_prompt_above_input_draft():
+    # issue #62: with a draft in the input box the whole option box and
+    # the footer sat outside the old last-❯ region; the prompt must still
+    # gate, the draft must stay out, scrollback must stay out.
+    lines = ["chat above the box"] + _SELECTION_WITH_DRAFT_LINES
+    region = blink.input_box_region_from_lines(lines)
+    assert region is not None
+    assert region[0] == "❯ 1. keep 4 seeds (Recommended)"
+    assert "Enter to select · ↑/↓ to navigate · Esc to cancel" in region
+    assert "  ❯ + where is the GPU here, walk me through v1 vs v2" \
+        not in region
+    assert "chat above the box" not in region
+    assert blink.ask_visible("\n".join(region)) is True
+
+
+def test_input_box_region_draft_only_quoted_footer_still_blind():
+    # the 014 protection survives: a footer quoted in chat above the input
+    # box (no live option cursor directly above it) must not strand ASK.
+    lines = ["agent: press Enter to select · Esc to cancel when ready",
+             "more chat above the box",
+             "  ❯ ",
+             _BORDER,
+             "junk below"]
+    region = blink.input_box_region_from_lines(lines)
+    assert region == ["  ❯ ", _BORDER]
+    assert blink.ask_visible("\n".join(region)) is False
+
+
 def test_blinker_starts_on_pane_dialog_without_data_marker():
     r = ScriptRunner(["conn-tab", "/dev/ttys001"])
     tty = FakeTTY()

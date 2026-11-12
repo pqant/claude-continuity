@@ -634,3 +634,50 @@ def test_watch_app_background_steady_never_refires(cc_home, monkeypatch):
     # background): nothing is re-written - and holding in the background
     # never spams either.
     assert fake.made[0].rearms == 0
+
+
+# --------------------------------------------------- frontmost-tty gating
+#
+# Issue #62: iTerm2 answers the "tty of current session of current
+# window" query even while BACKGROUNDED, so the raw query kept returning
+# a stale tty and FocusWatcher dwelled the user away into a false "read"
+# (blink and bounce killed while the user was in another app). The probe
+# must gate on the frontmost app first; an unreadable app name keeps the
+# pre-#62 no-info degrade.
+
+_REAL_FRONTMOST_TTY = blink_watch._default_frontmost_tty
+# Captured at import, before the autouse _no_real_focus_probe fixture
+# wraps the module attribute: these unit tests exercise the REAL probe
+# against a faked subprocess.run (the poller-level seam pinning stays).
+
+
+def _fake_osascript(monkeypatch, *, app_out=None, app_fail=False,
+                    tty_out=None):
+    def run(argv, **kw):
+        # the real probes run subprocess with text=True: stdout is str
+        joined = " ".join(argv)
+        if "frontmost is true" in joined:
+            if app_fail:
+                raise OSError("osascript unreadable")
+            return subprocess.CompletedProcess(argv, 0, app_out or "", "")
+        return subprocess.CompletedProcess(argv, 0, tty_out or "", "")
+    monkeypatch.setattr(blink_watch.subprocess, "run", run)
+
+
+def test_frontmost_tty_none_when_another_app_is_frontmost(monkeypatch):
+    _fake_osascript(monkeypatch, app_out="Vivaldi\n",
+                    tty_out="/dev/ttys002\n")
+    assert _REAL_FRONTMOST_TTY() is None
+
+
+def test_frontmost_tty_returns_tty_when_iterm_frontmost(monkeypatch):
+    _fake_osascript(monkeypatch, app_out="iTerm2\n",
+                    tty_out="/dev/ttys002\n")
+    assert _REAL_FRONTMOST_TTY() == "/dev/ttys002"
+
+
+def test_frontmost_tty_falls_through_when_app_unreadable(monkeypatch):
+    # no-info about the frontmost app must NOT invent a suppression:
+    # the raw tty query still answers (pre-#62 degrade path).
+    _fake_osascript(monkeypatch, app_fail=True, tty_out="/dev/ttys001\n")
+    assert _REAL_FRONTMOST_TTY() == "/dev/ttys001"
