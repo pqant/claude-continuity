@@ -1,5 +1,6 @@
 """transcript.py: issue #8 - JSONL parsing, markdown rendering, HTML export."""
 
+import base64
 import json
 from datetime import datetime
 from pathlib import Path
@@ -154,6 +155,71 @@ def test_render_markdown_ignores_images():
     b = [("user", "metin", None, ("data:image/png;base64,QUJD",))]
     md = transcript.render_markdown(b, META)
     assert "metin" in md and "base64" not in md
+
+
+# --- issue #56: path-only image records read from disk at export ---------
+
+PNG1x1 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ"
+          "DwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def _png(tmp_path, name="shot.png"):
+    p = tmp_path / name
+    p.write_bytes(base64.b64decode(PNG1x1))
+    return p
+
+
+def test_path_only_record_embeds_disk_image(tmp_path):
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", f"[Image: source: {png}]")])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == [f"data:image/png;base64,{PNG1x1}"]
+
+
+def test_mixed_text_and_source_path_keeps_text(tmp_path):
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", f"bunu gordun mu ???\n[Image: source: {png}]")])
+    assert len(blocks) == 1
+    assert blocks[0][1] == "bunu gordun mu ???"
+    assert list(blocks[0][3]) == [f"data:image/png;base64,{PNG1x1}"]
+
+
+def test_unreadable_paths_stay_plain_chip(tmp_path):
+    missing = tmp_path / "gone.png"
+    adir = tmp_path / "dir.png"
+    adir.mkdir()
+    txt = tmp_path / "note.txt"
+    txt.write_bytes(b"not an image")
+    big = tmp_path / "big.png"
+    big.write_bytes(b"\x00" * (transcript._MAX_IMG_B64 + 1))
+    blocks = transcript.parse_conversation([
+        _rec("user", f"[Image: source: {missing}]"),
+        _rec("user", f"[Image: source: {adir}]"),
+        _rec("user", f"[Image: source: {txt}]"),
+        _rec("user", f"[Image: source: {big}]"),
+        _rec("user", "[Image: source: not-a-real-path]")])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == []
+
+
+def test_base64_block_prevents_disk_reread(tmp_path):
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": f"[Image: source: {png}]"},
+                      _img(data="QQ==")])])
+    assert list(blocks[0][3]) == ["data:image/png;base64,QQ=="]
+
+
+def test_multiple_source_lines_embed_in_order(tmp_path):
+    a = _png(tmp_path, "a.png")
+    b = _png(tmp_path, "b.jpg")
+    blocks = transcript.parse_conversation([
+        _rec("user", f"[Image: source: {a}]\n[Image: source: {b}]")])
+    assert [t for _, t, _, _ in blocks] == ["🖼 image"]
+    assert list(blocks[0][3]) == [f"data:image/png;base64,{PNG1x1}",
+                                  f"data:image/jpeg;base64,{PNG1x1}"]
 
 
 def test_table_fenced_and_escaping():
