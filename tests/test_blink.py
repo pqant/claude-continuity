@@ -317,9 +317,9 @@ def test_blinker_never_raises_on_broken_plumbing():
 
 
 # ------------------------------------------------- iTerm2 Dock attention
-# (issue #59): while a needs-human/BLOCKED wait is on screen the Dock icon
-# bounces via OSC 1337 RequestAttention; reply-only waits must stay silent
-# (user ruling 2026-11-12).
+# (issues #59, #60): while a wait is on screen the Dock icon bounces via
+# OSC 1337 RequestAttention; reply-ready waits bounce too unless the user
+# opts out with blink_reply_attention=false (user ruling 2026-11-12).
 
 
 def test_attention_yes_on_blocked_start_and_no_on_restore():
@@ -335,13 +335,22 @@ def test_attention_yes_on_blocked_start_and_no_on_restore():
 
 
 def test_attention_never_fires_for_reply_only_wait():
-    # A finished turn waiting for the next prompt is NOT a blocked wait.
+    # With blink_reply_attention false a finished turn waiting for the
+    # next prompt stays tab-blink only, never a Dock bounce (issue #60).
     r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
-    b = _blinker(r, tty)
+    b = _blinker(r, tty, cfg={"blink_reply_attention": False})
     b.on_text(REPLY_TEXT, 0.0)
     b.on_text(REPLY_TEXT, 0.5)
     b.on_exit()
     assert b"RequestAttention" not in tty.bytes_for("/dev/ttys001")
+
+
+def test_attention_arms_for_reply_wait_by_default():
+    # Reply-ready bounces the Dock out of the box (issue #60).
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(REPLY_TEXT, 0.0)
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
 
 
 def test_attention_yes_on_ask_marker():
@@ -360,8 +369,9 @@ def test_attention_yes_on_selection_pane():
 
 def test_attention_arms_once_mid_blink_and_disarms_when_source_clears():
     r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
-    b = _blinker(r, tty, cfg={"blink_interval": 0.5})
-    b.on_text(REPLY_TEXT, 0.0)                    # reply only: stays silent
+    b = _blinker(r, tty,
+                 cfg={"blink_interval": 0.5, "blink_reply_attention": False})
+    b.on_text(REPLY_TEXT, 0.0)                    # reply opted out: silent
     b.on_text(REPLY_TEXT + "  ⛔ BLOCKED", 0.1)   # blocked joins: arm once
     b.on_text(REPLY_TEXT + "  ⛔ BLOCKED", 0.2)   # no re-write per tick
     assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
