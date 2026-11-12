@@ -20,6 +20,14 @@ from . import config, paths
 
 OSC6_RESET = b"\x1b]6;1;bg;*;default\x07"
 
+# iTerm2 Dock bounce (issue #59): needs-human, blocked and selection
+# waits also bounce the Dock icon, so the user notices while looking at
+# another app's window. RequestAttention=yes bounces until the user
+# clicks the Dock icon or we send "no" (official iTerm2 escape docs);
+# other terminal emulators ignore the unknown OSC harmlessly.
+OSC1337_ATTENTION_ON = b"\x1b]1337;RequestAttention=yes\x07"
+OSC1337_ATTENTION_OFF = b"\x1b]1337;RequestAttention=no\x07"
+
 RED_FILL = (235, 20, 20)
 BLACK_FILL = (0, 0, 0)
 
@@ -298,6 +306,7 @@ class Blinker:
         self._original = None
         self._ttys: list[str] = []
         self._restored_logged = False
+        self._attention_armed = False
         # the sweep is deliberately NOT gated on enabled: a blink stranded
         # by a crash must heal even if blink was turned off since. With an
         # empty store it is a zero-call no-op, so "disabled restores
@@ -318,6 +327,11 @@ class Blinker:
                                          self.window_id, stored)
                 for tty in list_client_ttys(self._runner, self._bin_,
                                             self.window_id):
+                    # a crashed poller may also strand a Dock bounce:
+                    # the cancel is unconditional, a no-op when nothing
+                    # was ever armed
+                    write_tty(tty, OSC1337_ATTENTION_OFF,
+                              _open=self._tty_open)
                     write_tty(tty, OSC6_RESET, _open=self._tty_open)
                 if restored:
                     # keep the stored name on failure: the next animator
@@ -328,7 +342,7 @@ class Blinker:
         except Exception:
             pass
 
-    def _start(self, now: float) -> None:
+    def _start(self, now: float, waiting: bool = False) -> None:
         name = get_window_name(self._runner, self._bin_, self.window_id)
         if name is None:
             self._log(f"blink skip window={self.window_id} "
@@ -344,12 +358,32 @@ class Blinker:
         self._phase_own = True
         self._last_toggle = now
         self._restored_logged = False
+        self._attention_armed = False
+        self._attention(waiting)
         if self._ttys:
             self._log(f"blink start window={self.window_id} "
                       f"ttys={len(self._ttys)}")
         else:
             self._log(f"blink skip window={self.window_id} "
                       f"reason=no attached clients")
+
+    def _attention(self, waiting: bool) -> None:
+        """Dock bounce for the CURRENT tick (issue #59).
+
+        Edge-triggered: bytes only cross when the state flips. Only
+        needs-human/blocked/selection sources arm it; a reply-only wait
+        must never bounce the Dock (user ruling 2026-11-12). Cancelling
+        is harmless when iTerm2 already stopped on its own (the user
+        clicked the Dock icon): a second "no" is a no-op.
+        """
+        if waiting == self._attention_armed:
+            return
+        data = OSC1337_ATTENTION_ON if waiting else OSC1337_ATTENTION_OFF
+        for tty in self._ttys:
+            write_tty(tty, data, _open=self._tty_open)
+        self._attention_armed = waiting
+        self._log(f"attention {'on' if waiting else 'off'} "
+                  f"window={self.window_id}")
 
     def _wait_name(self, count: int) -> str:
         return "WAIT" if count <= 1 else f"WAIT[{count}]"
@@ -367,6 +401,9 @@ class Blinker:
                 write_tty(tty, self._fill, _open=self._tty_open)
 
     def _restore(self) -> None:
+        # cancel the Dock bounce BEFORE the tab reset: a wait that ended
+        # (answered, or read via focus dwell) must leave no bounce behind
+        self._attention(False)
         if self._original is not None:
             restored = rename_window(self._runner, self._bin_,
                                      self.window_id, self._original)
@@ -402,17 +439,24 @@ class Blinker:
             return
         try:
             count = sum((text or "").count(m) for m in GATE_MARKERS)
-            if pane_text is not None and ask_visible(pane_text):
+            pane_ask = pane_text is not None and ask_visible(pane_text)
+            if pane_ask:
                 count += 1
             gated = count > 0
+            # Dock bounce sources (issue #59): the blocked and ask
+            # families; a reply-only wait stays tab-blink only.
+            waiting = bool(pane_ask
+                           or (text or "").count(MARKER_BLOCKED)
+                           or (text or "").count(MARKER_ASK))
             if gated and not self._blinking:
-                self._start(now)
+                self._start(now, waiting)
                 return
             if not self._blinking:
                 return
             if not gated:
                 self._restore()
                 return
+            self._attention(waiting)
             if now - self._last_toggle >= self._interval:
                 self._last_toggle = now
                 self._phase_own = not self._phase_own
