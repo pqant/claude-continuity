@@ -192,7 +192,9 @@ def parse_conversation(lines: list[str]) -> list[Block]:
     never reach the output (issue #54). The CONTINUITY RESUME blob and
     CC's "Continue from where you left off." prompt collapse to one-line
     anchors; image metadata lines fold into a ``🖼 image`` chip (runs of
-    chips collapse to one, their galleries merge). Embeddable base64
+    chips collapse to one, their galleries merge; a chip-only record that
+    embeds nothing right behind a block with a gallery folds into it
+    instead of opening a dead chip, issue #59). Embeddable base64
     image blocks attach to the block as ``data:`` URIs for the lightbox
     (issue #55); records that only carry the ``[Image: source: <path>]``
     line read the file from disk when it is still present (issue #56).
@@ -262,6 +264,13 @@ def parse_conversation(lines: list[str]) -> list[Block]:
                     imgs.append(uri)
         if not text:
             if not had_image and not imgs:
+                continue
+            if not imgs and out and out[-1].images:
+                # CC writes one paste as two records (base64 + a path-only
+                # sibling). If the cache was pruned before the export the
+                # sibling can embed nothing; opening a dead chip right
+                # next to the live gallery is worse than folding it in
+                # (issue #59).
                 continue
             text = _IMAGE_CHIP
             if out and out[-1].text == _IMAGE_CHIP:
