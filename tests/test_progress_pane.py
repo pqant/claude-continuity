@@ -652,6 +652,99 @@ def test_animator_reply_gate_key_carries_reply_ts(cc_home, monkeypatch):
     assert any("200.0" in k for k in keys)   # second reply: fresh key
 
 
+def test_animator_injects_blocked_chip_from_ledger(cc_home, monkeypatch):
+    # Issue #63 (live 2026-11-12 scripted probe): mode 1 never spawns the
+    # blink-watch poller ("the animator owns the blink") and the animator
+    # never polled ``ledger.blocked_reason`` - an out-of-band
+    # ``signal needs-human`` arriving in the idle gap (CC does not invoke
+    # the status line while it waits) was recorded in the ledger yet
+    # stayed invisible: no chip, no tab blink, no Dock bounce. The blink
+    # poll must treat an unconsumed needs_human as a chip source the way
+    # the reply flag already does.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    written = []
+    seen = []
+
+    def blocked(sd):
+        seen.append(sd)
+        return "insan lazim"
+
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        session_dir="SD", _blocked_reason=blocked)
+    assert seen and seen[0] == "SD"
+    assert "⛔ BLOCKED" in _visible(written[-1].decode("utf-8"))
+    # the blinker gate saw the marker too (tab blink + Dock bounce source)
+    assert any("⛔ BLOCKED" in t for t, _ts, _p in fake.made[0].texts)
+
+
+def test_animator_blocked_gate_key_carries_reason(cc_home, monkeypatch):
+    # A SECOND needs_human with identical markers must read as genuinely
+    # unread: the reason rides on the watcher key (mirroring reply_id).
+    # Without it the stored blink-<win>-read would swallow every later
+    # block - the same live-bug pattern that reply_id fixed on 2026-11-08.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(progress_pane.blink, "list_client_ttys",
+                        lambda *a, **k: {"/dev/ttys001"})
+    fake = _FakeBlinkMod()
+    written = []
+    lines = []
+    box = ["A"]
+    state = {"n": 0}
+
+    def clock():
+        state["n"] += 1
+        if state["n"] == 41:
+            box[0] = "B"
+        return 116.0 if state["n"] <= 40 else 216.0
+
+    progress_pane.run_animator(
+        "12", _frames=50, _write=written.append, _now=clock,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _frontmost_tty=lambda: "/dev/ttys001", _dwell_ticks=1,
+        _focus_log=lines.append,
+        session_dir="SD", _blocked_reason=lambda sd: box[0])
+    keys = [ln.split("key=", 1)[1] for ln in lines if "key=" in ln]
+    assert any("'A'" in k for k in keys)
+    assert any("'B'" in k for k in keys)
+
+
+def test_animator_blocked_absent_no_marker(cc_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    written = []
+    called = []
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        session_dir="SD",
+        _blocked_reason=lambda sd: called.append(sd) or None)
+    assert called
+    assert "⛔ BLOCKED" not in _visible(written[-1].decode("utf-8"))
+    assert all("⛔ BLOCKED" not in t for t, _ts, _p in fake.made[0].texts)
+
+
+def test_animator_without_session_dir_skips_blocked(cc_home, monkeypatch):
+    # Off-project panes (or unresolvable sessions) read nothing: the
+    # seam is never invoked and the frame matches the pre-#63 behavior.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    written = []
+    called = []
+    progress_pane.run_animator(
+        "12", _frames=25, _write=written.append, _now=lambda: 0.0,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _blocked_reason=lambda sd: called.append(sd) or "neden")
+    assert not called
+    assert "⛔ BLOCKED" not in _visible(written[-1].decode("utf-8"))
+
+
 def test_animator_no_flag_no_marker(cc_home, monkeypatch):
     # No flag armed (default reader finds nothing): behavior is exactly
     # the pre-flag animator - zero clear calls, zero markers.
