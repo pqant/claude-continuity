@@ -511,8 +511,11 @@ def cmd_progress_pane(args: argparse.Namespace) -> int:
     win = args.window_id or progress_pane.resolve_window_id()
     # focus dwell (user directive 2026-11-07): real iTerm2 frontmost tty
     # probe; None off-iTerm2 (the watcher then disables dwell itself)
+    # app-background re-fire (issue #61): frontmost app name probe for
+    # the Dock bounce re-write
     progress_pane.run_animator(window_id=win,
-                               _frontmost_tty=blink_watch._default_frontmost_tty)
+                               _frontmost_tty=blink_watch._default_frontmost_tty,
+                               _frontmost_app=blink_watch._default_frontmost_app)
     return 0
 
 
@@ -533,7 +536,8 @@ def cmd_blink_watch(args: argparse.Namespace) -> int:
         cfg = {}
     blink_watch.watch(args.session_dir, pane_id=args.pane,
                       window_id=args.window, cfg=cfg,
-                      _frontmost_tty=blink_watch._default_frontmost_tty)
+                      _frontmost_tty=blink_watch._default_frontmost_tty,
+                      _frontmost_app=blink_watch._default_frontmost_app)
     return 0
 
 

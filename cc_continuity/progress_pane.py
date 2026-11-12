@@ -492,6 +492,7 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _check_every=40, _blink=None, _tty_open=None,
                  _runner=None, _pane_capture=None,
                  _blink_poll=20, _frontmost_tty=None,
+                 _frontmost_app=None,
                  _dwell_ticks=3, _focus_log=blink._debug_line,
                  _build_stamp=None, _build_poll=20,
                  _restart=None, _reply_flag_read=None,
@@ -630,6 +631,12 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                                  dwell_ticks=_dwell_ticks,
                                  label=window_id or "",
                                  log=_focus_log)
+    # app-background re-fire (issue #61): macOS only bounces a
+    # BACKGROUNDED app, so a still-armed bounce is re-written when the
+    # terminal leaves the foreground. The probe rides on the injected
+    # seam and runs only on the ~1 s blink-poll tick; None (the default)
+    # disables the re-fire entirely.
+    bounce = blink.AppBounce([blinker], frontmost_app=_frontmost_app)
     # Stale-build guard (issue #19): see ``_default_build_stamp``. Every
     # _build_poll frames (~1 s at 20 fps) the sources we run are re-statted;
     # a change breaks out through the SHARED exit path (restore runs once
@@ -781,6 +788,13 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                     suppressed = watcher.tick(t, src)
                 except Exception:
                     suppressed = False
+                # app-background re-fire (issue #61): on the same ~1 s
+                # cadence watch the terminal app leaving the foreground;
+                # a no-info reading never re-fires and never churns state.
+                try:
+                    bounce.tick(t)
+                except Exception:
+                    pass
             else:
                 paint_text = cur_text
                 if reply_live and blink.MARKER_REPLY not in (paint_text or ""):

@@ -104,11 +104,33 @@ def _default_frontmost_tty():
     return None
 
 
+def _default_frontmost_app():
+    """Name of the frontmost application (AppleScript); None unreadable.
+
+    Issue #61: macOS only bounces a BACKGROUNDED app, so the poller and
+    the animator re-fire a still-armed Dock bounce when the terminal
+    leaves the foreground. Any failure yields None (no info: the
+    ``AppBounce`` coordinator holds its state and never re-fires).
+    """
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to name of first '
+             'application process whose frontmost is true'],
+            capture_output=True, text=True, timeout=2.0)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
           _runner=subprocess.run, _bin_=None, _tty_open=open,
           _now=time.time, _sleep=time.sleep, _ticks=None, _blink=None,
           _state=None, _consec_fails: int = 6,
           _frontmost_tty=None, _client_ttys=None,
+          _frontmost_app=None,
           _dwell_ticks: int = 3, _reply_fade: float = 600.0,
           _settle: float | None = None,
           _focus_log=blink._debug_line) -> None:
@@ -161,6 +183,12 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                                      dwell_ticks=_dwell_ticks,
                                      label=window_id or "",
                                      log=_focus_log)
+        # app-background re-fire (issue #61): macOS swallows a bounce
+        # written while the terminal app is frontmost, so a still-armed
+        # bounce is re-written when the app leaves the foreground. The
+        # probe rides on the injected seam; None (the default) disables
+        # the re-fire entirely.
+        bounce = blink.AppBounce([blinker], frontmost_app=_frontmost_app)
     except Exception:
         return
     start = _now()
@@ -228,6 +256,10 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                 blinker.on_text("", t, pane_text=None)
             else:
                 blinker.on_text(text, t, pane_text=pane_text)
+            try:
+                bounce.tick(t)
+            except Exception:
+                pass
             i += 1
             if _ticks is not None and i >= _ticks:
                 return

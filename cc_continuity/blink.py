@@ -481,6 +481,69 @@ class Blinker:
         except Exception:
             pass
 
+    def rearm_attention(self) -> None:
+        """Re-write the Dock bounce while it is still armed (issue #61).
+
+        macOS only bounces a BACKGROUNDED app, so the edge-triggered
+        "yes" of ``_attention`` can land while the terminal is frontmost
+        and get swallowed. The caller (``AppBounce``) asks for a re-write
+        when the app leaves the foreground. Silent unless armed: a wait
+        that ended (answered, or read via focus dwell) must not come
+        back to life here.
+        """
+        if not self._attention_armed:
+            return
+        for tty in self._ttys:
+            write_tty(tty, OSC1337_ATTENTION_ON, _open=self._tty_open)
+        self._log(f"attention rearmed window={self.window_id}")
+
+
+class AppBounce:
+    """Re-fire armed Dock bounces when the terminal app leaves the foreground.
+
+    Issue #61 (verified live 2026-11-12): macOS bounces the Dock of a
+    BACKGROUNDED application only. ``Blinker._attention`` writes "yes"
+    once, at the edge where the wait opens - if the user is still inside
+    iTerm2 at that moment (another window or tab) the system swallows
+    the bytes and nothing retries when the app finally goes away. This
+    coordinator watches the frontmost app on the caller's ~1 s tick and
+    re-writes each still-armed blinker exactly on the observed
+    foreground-to-background edge. No periodic spam: holding in the
+    background re-fires nothing. A probe that yields None (or raises)
+    means "no info": state is held and nothing fires, the safe degrade
+    to the pre-#61 behavior.
+    """
+
+    # App names whose Dock is the one that bounces; anything else counts
+    # as background. Non-iTerm2 terminals receive a harmless "yes"
+    # rewrite (unknown OSC sequences are ignored there).
+    TERMINAL_APPS = frozenset({"iTerm2", "iTerm"})
+
+    def __init__(self, blinkers, *, frontmost_app=None):
+        self._blinkers = list(blinkers)
+        self._frontmost_app = frontmost_app
+        self._was_bg = None   # no observed reading yet: never fire blind
+
+    def tick(self, t: float) -> None:
+        """One ~1 s tick: re-fire each armed blinker on the bg edge."""
+        probe = self._frontmost_app
+        if probe is None:
+            return
+        try:
+            app = probe()
+        except Exception:
+            app = None
+        if app is None:
+            return
+        bg = app not in self.TERMINAL_APPS
+        if bg and self._was_bg is False:
+            for blinker in self._blinkers:
+                try:
+                    blinker.rearm_attention()
+                except Exception:
+                    pass
+        self._was_bg = bg
+
 
 class FocusWatcher:
     """Focus-dwell suppression shared by the poller and the animator.
