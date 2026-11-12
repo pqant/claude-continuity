@@ -4,6 +4,31 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.29] - 2026-11-12
+
+### Fixed
+
+- The tab blink and the Dock bounce survive a backgrounded iTerm2
+  (issue #62). Two blind spots had been killing selection prompts
+  (AskUserQuestion) while the terminal app was in the background.
+  The focus probe asked iTerm2 for its current-session tty
+  unconditionally, and iTerm2 answers that query even while
+  backgrounded, so the watcher kept believing the user was on the
+  tab and suppressed the wait seconds after it armed (live incident:
+  bounce armed at 14:47:09, cancelled at 14:47:20 while the user sat
+  in another app). The probe now checks which app is actually
+  frontmost first (the issue #61 probe); any other app means no
+  reader is present, and an unreadable app name keeps the old
+  no-info degrade.
+- A live selection prompt no longer vanishes from the pane region
+  when the input box holds a draft (issue #62). CC closes the option
+  box with a border line before the footer, and the old last-option-
+  cursor anchor landed on the draft instead, so the prompt never
+  armed the blink at all. The region now anchors on the live footer
+  and scans upward to the option cursor, crossing at most the one
+  closing border; footers quoted in scrollback keep the earlier
+  stranding protection.
+
 ## [0.3.28] - 2026-11-12
 
 ### Added
