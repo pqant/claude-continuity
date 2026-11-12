@@ -90,7 +90,18 @@ def _default_frontmost_tty():
     the only reliable "the user is looking at this tab" signal. A
     non-iTerm2 context yields None, so the reply blink self-fades after
     ``_reply_fade`` seconds instead of hanging on never-arriving focus.
+
+    Issue #62: iTerm2 answers the tty query even while BACKGROUNDED (it
+    keeps a "current window"), so the raw query kept returning the last
+    session tty and ``FocusWatcher`` dwelled the user away into a false
+    "read" - killing the tab blink and cancelling the Dock bounce while
+    the user sat in another app. Gate on the frontmost app first (the
+    issue #61 probe): any other app means no tty. An unreadable app name
+    falls through to the raw query (no-info degrade, pre-#62 path).
     """
+    app = _default_frontmost_app()
+    if app is not None and app not in blink.AppBounce.TERMINAL_APPS:
+        return None
     try:
         r = subprocess.run(
             ["osascript", "-e",
