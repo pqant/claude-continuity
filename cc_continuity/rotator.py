@@ -344,13 +344,19 @@ def _idle(key: str, nnn: int) -> bool:
     the last Stop. Entries with ``agent_id`` are subagent work and do NOT
     defer the rotation (P6-D6). ``type == "state"`` entries are our own
     transition bookkeeping (the Stop hook's CV→ROTATING move lands AFTER
-    ``last_stop_ts``) and must not count as activity either."""
+    ``last_stop_ts``) and must not count as activity either. ``type ==
+    "gate"`` is the same self-written class: the Stop hook sets
+    ``last_stop_ts`` and only then logs the handoff gate decision
+    (stop.py), so a valid-draft Stop always appends a gate entry past
+    ``last_stop_ts`` - counting it would defer the rotation forever,
+    because the Stop that ends the handoff turn is the last Stop that
+    ever comes."""
     rec = state.load_state(key, nnn)
     if rec.get("turn_active"):
         return False
     last_stop = rec.get("last_stop_ts") or 0
     for entry in ledger.read(paths.session_dir(key, nnn)):
-        if entry.get("agent_id") or entry.get("type") == "state":
+        if entry.get("agent_id") or entry.get("type") in ("state", "gate"):
             continue
         if entry.get("ts", 0) > last_stop:
             return False
