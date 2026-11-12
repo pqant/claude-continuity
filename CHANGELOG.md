@@ -4,6 +4,22 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.24] - 2026-11-12
+
+### Fixed
+
+- Auto-rotation no longer stalls forever after a verified handoff
+  (issue #57): the Stop hook sets the stop timestamp and only then
+  logs the handoff gate decision, and the rotator's idle check counted
+  that `gate` ledger entry as session activity. The rotation deferred
+  with "next Stop retries", the bounded retry ticks re-read the same
+  frozen entry and gave up, and the Stop that ends the handoff turn
+  is the last Stop that ever comes - the pane could sit in
+  `CHECKPOINT_VERIFIED` indefinitely (observed: 34 minutes idle).
+  `gate` entries are now excluded from the activity scan exactly like
+  `state` bookkeeping; a real `user_prompt` after the Stop timestamp
+  still defers the rotation.
+
 ## [0.3.23] - 2026-11-12
 
 ### Added
