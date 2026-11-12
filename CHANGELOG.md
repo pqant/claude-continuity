@@ -4,6 +4,20 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.23] - 2026-11-12
+
+### Added
+
+- The `🖼 image` chip is now clickable for records without base64 too
+  (issue #56): when a record carries only the `[Image: source: <path>]`
+  text line, the export reads that file from disk and embeds it as a
+  `data:` URI, so the pasted image opens in the lightbox as well. The
+  read happens at export time (rotation), because the
+  `~/.claude/image-cache` directory is pruned later. Missing, pruned,
+  non-whitelisted-extension or over-cap files (4 MB of base64 each)
+  keep the plain non-clickable chip, and records that already embed a
+  base64 block never re-read the path, so nothing duplicates.
+
 ## [0.3.22] - 2026-11-11
 
 ### Added
