@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.25] - 2026-11-12
+
+### Fixed
+
+- Dead image chips no longer open next to the live one in exported
+  transcripts (issue #58): one pasted image is written as two user
+  records, and when the image cache is pruned before the export the
+  sibling that carries only the `[Image: source: <path>]` line
+  embedded nothing yet still opened its own non-clickable chip. An
+  empty chip-only record that directly follows a block with a gallery
+  now folds into that gallery; with no adjacent gallery it survives
+  as a plain chip so the trace of the unrecoverable paste remains.
+
 ## [0.3.24] - 2026-11-12
 
 ### Fixed
