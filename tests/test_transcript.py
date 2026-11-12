@@ -222,6 +222,42 @@ def test_multiple_source_lines_embed_in_order(tmp_path):
                                   f"data:image/jpeg;base64,{PNG1x1}"]
 
 
+# --- issue #59: no dead chip next to a live gallery -----------------------
+
+
+def test_empty_image_record_folds_into_preceding_gallery(tmp_path):
+    # CC writes one paste as two records: one carrying the base64 block,
+    # a sibling carrying only the [Image: source: <path>] line. When the
+    # cache is pruned before the export, the sibling would open a dead
+    # chip right next to the live one; it must fold in instead.
+    gone = tmp_path / "gone.png"  # never created (pruned)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image #4] patch it now please"},
+                      _img()]),
+        _rec("user", f"[Image: source: {gone}]")])
+    assert [(r, t) for r, t, _, _ in blocks] == [("user", "[Image #4] patch it now please")]
+    assert list(blocks[0][3]) == ["data:image/png;base64,QUJD"]
+
+
+def test_recoverable_sibling_keeps_its_own_chip(tmp_path):
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "metin oncesi"}, _img(data="QQ==")]),
+        _rec("user", f"[Image: source: {png}]")])
+    assert [t for _, t, _, _ in blocks] == ["metin oncesi", "🖼 image"]
+    assert list(blocks[0][3]) == ["data:image/png;base64,QQ=="]
+    assert list(blocks[1][3]) == [f"data:image/png;base64,{PNG1x1}"]
+
+
+def test_dead_chip_survives_when_no_gallery_to_fold_into():
+    # Without an adjacent gallery the plain chip is the only trace of the
+    # unrecoverable paste; it must not disappear.
+    blocks = transcript.parse_conversation([
+        _rec("user", "duz metin"),
+        _rec("user", "[Image: source: /nowhere/x.png]")])
+    assert [t for _, t, _, _ in blocks] == ["duz metin", "🖼 image"]
+
+
 def test_table_fenced_and_escaping():
     md = "|a|b|\n|--|--|\n|1|b|\n\n<script>x</script>\n\n```\nprint(1)\n```\n\nplain **b** `c`"
     out = transcript.md_to_html(md)
