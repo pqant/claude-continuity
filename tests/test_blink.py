@@ -170,6 +170,9 @@ def _store_dict():
 
 
 GATE = "◆ 61% ok  ⛔ BLOCKED"
+ASK_TEXT = "◆ 61% ok  ⚠ ASK"
+REPLY_TEXT = "◆ 61% ok  🕐 REPLY"
+_SEL_PANE = "❯ > 1. allow once\nEnter to select · Esc to cancel"
 NO_LOG = lambda msg: None  # noqa: E731  (tests never touch the real log)
 
 
@@ -211,7 +214,8 @@ def test_phase_flip_cadence():
     # t=1.5 dark again: exactly the 0.5 s per-phase cadence.
     assert r.renames() == ["WAIT", "orig", "WAIT"]
     fill = blink.osc6_fill(blink.BLACK_FILL)
-    assert tty.bytes_for("/dev/ttys001") == fill + blink.OSC6_RESET + fill
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + fill + blink.OSC6_RESET + fill)
 
 
 def test_no_color_uses_red_fill():
@@ -219,7 +223,8 @@ def test_no_color_uses_red_fill():
     b = _blinker(r, tty, cfg={"blink_no_color": True})
     b.on_text(GATE, 0.0)
     b.on_text(GATE, 0.5)
-    assert tty.bytes_for("/dev/ttys001") == blink.osc6_fill(blink.RED_FILL)
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + blink.osc6_fill(blink.RED_FILL))
 
 
 def test_multi_waiting_panes_count_in_name():
@@ -240,7 +245,9 @@ def test_falling_edge_restores_once_to_seen_ttys():
     b.on_text("◆ 61% ok", 0.55)   # user answered: gate gone
     assert r.renames() == ["WAIT", "orig"]
     for path in ("/dev/ttys001", "/dev/ttys002"):
-        assert tty.bytes_for(path) == (blink.osc6_fill(blink.BLACK_FILL)
+        assert tty.bytes_for(path) == (blink.OSC1337_ATTENTION_ON
+                                       + blink.osc6_fill(blink.BLACK_FILL)
+                                       + blink.OSC1337_ATTENTION_OFF
                                        + blink.OSC6_RESET)
     assert store("blink_name") is None
 
@@ -262,7 +269,9 @@ def test_startup_sweep_restores_stranded_wait_once():
     r, tty = ScriptRunner(["WAIT[2]", "", "/dev/ttys001"]), FakeTTY()
     b = _blinker(r, tty, store=store)
     assert ["tmux", "rename-window", "-t", "@3", "orig"] in r.calls
-    assert tty.bytes_for("/dev/ttys001") == blink.OSC6_RESET  # unconditional
+    # the stranded bounce (if any) is cancelled first, unconditionally
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_OFF + blink.OSC6_RESET)
     assert store("blink_name") is None
     n = len(r.calls)
     b.on_text("◆ ok", 1.0)
@@ -307,6 +316,69 @@ def test_blinker_never_raises_on_broken_plumbing():
     b.on_exit()
 
 
+# ------------------------------------------------- iTerm2 Dock attention
+# (issue #59): while a needs-human/BLOCKED wait is on screen the Dock icon
+# bounces via OSC 1337 RequestAttention; reply-only waits must stay silent
+# (user ruling 2026-11-12).
+
+
+def test_attention_yes_on_blocked_start_and_no_on_restore():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0)                                  # waiting: bounce
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
+    b.on_text("◆ 61% ok", 0.1)                            # answered: cancel
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + blink.OSC1337_ATTENTION_OFF
+        + blink.OSC6_RESET)
+    assert r.renames() == ["orig"]
+
+
+def test_attention_never_fires_for_reply_only_wait():
+    # A finished turn waiting for the next prompt is NOT a blocked wait.
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(REPLY_TEXT, 0.0)
+    b.on_text(REPLY_TEXT, 0.5)
+    b.on_exit()
+    assert b"RequestAttention" not in tty.bytes_for("/dev/ttys001")
+
+
+def test_attention_yes_on_ask_marker():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(ASK_TEXT, 0.0)
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
+
+
+def test_attention_yes_on_selection_pane():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text("◆ 29% Active Usage", 0.0, pane_text=_SEL_PANE)
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
+
+
+def test_attention_arms_once_mid_blink_and_disarms_when_source_clears():
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty, cfg={"blink_interval": 0.5})
+    b.on_text(REPLY_TEXT, 0.0)                    # reply only: stays silent
+    b.on_text(REPLY_TEXT + "  ⛔ BLOCKED", 0.1)   # blocked joins: arm once
+    b.on_text(REPLY_TEXT + "  ⛔ BLOCKED", 0.2)   # no re-write per tick
+    assert tty.bytes_for("/dev/ttys001") == blink.OSC1337_ATTENTION_ON
+    b.on_text(REPLY_TEXT, 0.3)                    # blocked gone: cancel
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + blink.OSC1337_ATTENTION_OFF)
+
+
+def test_startup_sweep_cancels_a_stranded_bounce():
+    store = _store_dict()
+    store("blink_name", "orig")
+    r, tty = ScriptRunner(["WAIT[2]", "", "/dev/ttys001"]), FakeTTY()
+    _blinker(r, tty, store=store)
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_OFF + blink.OSC6_RESET)
+
+
 def test_startup_sweep_runs_even_when_disabled():
     # spec: the stale self-heal is NOT conditioned on the blink config - a
     # stranded WAIT must heal even if the user turned blink off after the
@@ -317,7 +389,8 @@ def test_startup_sweep_runs_even_when_disabled():
     r, tty = ScriptRunner(["WAIT[2]", "", "/dev/ttys001"]), FakeTTY()
     b = _blinker(r, tty, store=store, cfg={"blink": False})
     assert ["tmux", "rename-window", "-t", "@3", "orig"] in r.calls
-    assert tty.bytes_for("/dev/ttys001") == blink.OSC6_RESET
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_OFF + blink.OSC6_RESET)
     assert store("blink_name") is None
     n = len(r.calls)
     b.on_text(GATE, 1.0)   # disabled: the state machine stays inert
@@ -453,7 +526,8 @@ def test_blinker_starts_on_pane_dialog_without_data_marker():
     b.on_text("◆ 29% Active Usage", 0.0, pane_text=_DIALOG)
     b.on_text("◆ 29% Active Usage", 0.5, pane_text=_DIALOG)
     assert r.renames() == ["WAIT"]
-    assert tty.bytes_for("/dev/ttys001") == blink.osc6_fill(blink.BLACK_FILL)
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + blink.osc6_fill(blink.BLACK_FILL))
 
 
 def test_blinker_pane_falling_edge_restores():
@@ -465,7 +539,8 @@ def test_blinker_pane_falling_edge_restores():
     b.on_text("◆ 29% Active Usage", 0.6, pane_text="")       # answered
     assert r.renames() == ["WAIT", "conn-tab"]
     assert tty.bytes_for("/dev/ttys001") == (
-        blink.osc6_fill(blink.BLACK_FILL) + blink.OSC6_RESET)
+        blink.OSC1337_ATTENTION_ON + blink.osc6_fill(blink.BLACK_FILL)
+        + blink.OSC1337_ATTENTION_OFF + blink.OSC6_RESET)
     assert store("blink_name") is None
 
 
