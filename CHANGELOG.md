@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.27] - 2026-11-12
+
+### Added
+
+- The reply-ready blink now bounces the iTerm2 Dock icon too (issue
+  #60): when a turn finishes and its tab waits to be read,
+  `RequestAttention=yes` reaches the client ttys just like during
+  needs-human waits, so a finished turn catches the eye while the user
+  works in another app. Set `"blink_reply_attention": false` in the
+  config to keep turn-ends tab-blink only. The needs-human,
+  permission/selection and blocked bounces shipped in 0.3.26 are
+  unchanged.
+
 ## [0.3.26] - 2026-11-12
 
 ### Added
