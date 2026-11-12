@@ -931,12 +931,16 @@ class _BlinkProbe:
         self.store = store
         self.texts = []
         self.exits = 0
+        self.rearms = 0
 
     def on_text(self, text, now, pane_text=None):
         self.texts.append((text, now, pane_text))
 
     def on_exit(self):
         self.exits += 1
+
+    def rearm_attention(self):
+        self.rearms += 1
 
 
 class _FakeBlinkMod:
@@ -1105,6 +1109,25 @@ def test_animator_focus_dwell_silences_blinker_ticks(cc_home, monkeypatch):
     assert texts[0][0] == "◆ 61% ok  ⛔ BLOCKED"   # tick 1: still gated
     assert texts[1] == ("", 0.1, None)    # dwell reached: silence same tick
     assert texts[2] == ("", 0.2, None)    # read state holds across frames
+
+
+def test_animator_app_background_edge_refires_bounce(cc_home, monkeypatch):
+    # issue #61: on the ~1 s blink-poll cadence the animator watches the
+    # terminal app leave the foreground and re-fires the armed bounce
+    # (macOS only bounces a backgrounded app). Blink starts at frame 0
+    # (armed), the background edge lands on the next blink poll.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    fake = _FakeBlinkMod()
+    clock = (k * 0.05 for k in range(1000))
+    apps = iter(["iTerm2", "Finder"])
+    progress_pane.run_animator(
+        "12", _frames=45, _write=lambda b: None, _now=lambda: next(clock),
+        _size=lambda: _size_obj(80), _text=lambda: "◆ 61% ok  ⛔ BLOCKED",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _frontmost_app=lambda: next(apps, None))
+    # bounce ticks at i=0 (iTerm2: foreground), i=20 (Finder: edge ->
+    # re-fire once), i=40 (no info left: held).
+    assert fake.made[0].rearms == 1
 
 
 # ---------------- stable gate key under text churn (focus dwell v2 fix)

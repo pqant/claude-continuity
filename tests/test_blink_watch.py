@@ -81,12 +81,16 @@ class _Probe:
         self.store = store
         self.ticks = []
         self.exits = 0
+        self.rearms = 0
 
     def on_text(self, text, now, pane_text=None):
         self.ticks.append((text, pane_text))
 
     def on_exit(self):
         self.exits += 1
+
+    def rearm_attention(self):
+        self.rearms += 1
 
 
 class _FakeBlinkMod:
@@ -358,7 +362,17 @@ def test_spawn_never_raises_on_runner_failure(cc_home, monkeypatch):
 
 def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
                clients=frozenset(), dwell=3, fade=600.0,
-               session_dir="/sess"):
+               frontmost_app=None, session_dir="/sess"):
+    if frontmost_app is None:
+        def app_fn():
+            return None
+    elif callable(frontmost_app):
+        app_fn = frontmost_app
+    else:
+        seq = iter(frontmost_app)
+
+        def app_fn():
+            return next(seq, None)
     blink_watch.watch(
         session_dir, pane_id="%7", window_id="@7", cfg=cfg or {}, _blink=fake,
         _runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0,
@@ -367,7 +381,8 @@ def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
         _sleep=_sleep_noop, _ticks=ticks, _state=lambda d: "ACTIVE",
         _frontmost_tty=(frontmost if frontmost is not None else (lambda: None)),
         _client_ttys=clients if callable(clients) else (lambda: set(clients)),
-        _dwell_ticks=dwell, _reply_fade=fade, _focus_log=None)
+        _dwell_ticks=dwell, _reply_fade=fade, _focus_log=None,
+        _frontmost_app=app_fn)
 
 
 def test_watch_reply_ready_blinks_without_block(cc_home, monkeypatch):
@@ -585,3 +600,37 @@ def test_watch_reply_cancelled_by_auto_continue(cc_home, tmp_path,
                session_dir=tmp_path)
     text, _ = fake.made[0].ticks[0]
     assert text == ""
+
+
+# ------------------------------------------------- app-background re-bounce
+#
+# Issue #61: macOS swallows a Dock bounce written while the terminal app
+# is frontmost, so the poller re-fires a still-armed bounce when the app
+# LEAVES the foreground. Transition edge only: no per-tick spam while
+# the user stays away.
+
+
+def test_watch_app_background_edge_refires_bounce(cc_home, monkeypatch):
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
+                        lambda d: "deploy approval")
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending",
+                        lambda d, **kw: None)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, ticks=2, frontmost_app=["iTerm2", "Finder"])
+    # tick 1: still in iTerm2 (no edge); tick 2: Finder takes over: the
+    # armed bounce is re-written exactly once.
+    assert fake.made[0].rearms == 1
+
+
+def test_watch_app_background_steady_never_refires(cc_home, monkeypatch):
+    monkeypatch.setattr(blink_watch.ledger, "blocked_reason",
+                        lambda d: "deploy approval")
+    monkeypatch.setattr(blink_watch.ledger, "reply_pending",
+                        lambda d, **kw: None)
+    fake = _FakeBlinkMod(captures=[None])
+    _run_watch(fake, ticks=3,
+               frontmost_app=["Finder", "Finder", "Finder"])
+    # no OBSERVED transition (the very first reading is already
+    # background): nothing is re-written - and holding in the background
+    # never spams either.
+    assert fake.made[0].rearms == 0

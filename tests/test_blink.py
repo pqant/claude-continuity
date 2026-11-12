@@ -445,6 +445,67 @@ def test_failed_clear_keeps_stored_name_for_later_sweep():
     assert store("blink_name") == "orig"
 
 
+# ------------------------------------------- app-background re-bounce (#61)
+#
+# macOS bounces the Dock of a BACKGROUNDED app only: a "yes" written
+# while iTerm2 is frontmost gets swallowed by the system (verified live
+# 2026-11-12) and the edge-triggered single write is never retried when
+# the user leaves the app. AppBounce re-writes a still-armed bounce via
+# Blinker.rearm_attention, once per observed foreground-to-background
+# edge (no periodic spam).
+
+
+class _RearmRecorder:
+    """Blinker-shaped recorder counting AppBounce's re-fire calls."""
+
+    def __init__(self):
+        self.rearms = 0
+
+    def rearm_attention(self):
+        self.rearms += 1
+
+
+def test_rearm_attention_rewrites_yes_when_armed():
+    # While a wait arms the bounce, a background transition must write
+    # "yes" a second time (the first one was swallowed on-foreground).
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.on_text(GATE, 0.0)         # waiting: bounce armed
+    b.rearm_attention()          # app left the foreground: re-fire
+    assert tty.bytes_for("/dev/ttys001") == (
+        blink.OSC1337_ATTENTION_ON + blink.OSC1337_ATTENTION_ON)
+
+
+def test_rearm_attention_silent_when_disarmed():
+    # No wait open (nothing armed): a re-fire must not write a single
+    # byte - the bounce stays exactly as cancelled.
+    r, tty = ScriptRunner(["orig", "/dev/ttys001"]), FakeTTY()
+    b = _blinker(r, tty)
+    b.rearm_attention()
+    assert tty.files == {}
+
+
+def test_app_bounce_fires_only_on_background_edge():
+    rec = _RearmRecorder()
+    apps = iter(["iTerm2", "Finder", "Finder", "iTerm2", "Finder", None])
+    bounce = blink.AppBounce([rec], frontmost_app=lambda: next(apps))
+    for k in range(6):
+        bounce.tick(k / 10.0)
+    # the two observed frontmost->background transitions fire; holding
+    # in the background (and the no-info reading) never re-fires.
+    assert rec.rearms == 2
+
+
+def test_app_bounce_probe_none_never_fires():
+    # No focus info (probe yields None): nothing is known, so nothing
+    # fires and the state is held (safe degrade to the pre-#61 behavior).
+    rec = _RearmRecorder()
+    bounce = blink.AppBounce([rec], frontmost_app=lambda: None)
+    for k in range(4):
+        bounce.tick(k / 10.0)
+    assert rec.rearms == 0
+
+
 # ------------------------- AskUserQuestion / selection prompt (issue #11 follow-up)
 #
 # Live bug 2026-11-07 (connector-177): the AskUserQuestion dialog sat open
