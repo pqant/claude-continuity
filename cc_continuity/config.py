@@ -257,6 +257,19 @@ def blink_reply(cfg: dict) -> bool:
     return v if isinstance(v, bool) else True
 
 
+def blink_reply_attention(cfg: dict) -> bool:
+    """Whether the reply-ready blink also bounces the iTerm2 Dock (issue #60).
+
+    ``blink_reply_attention``: explicit false keeps the turn-end blink
+    tab-only; needs-human and blocked waits keep bouncing the Dock either
+    way. A missing key or any non-bool value degrades to True (user
+    ruling 2026-11-12: try it on by default, flip the key if it feels
+    noisy).
+    """
+    v = cfg.get("blink_reply_attention", True)
+    return v if isinstance(v, bool) else True
+
+
 def blink_reply_settle(cfg: dict) -> float:
     """Seconds a finished turn stays quiet before the reply blink arms.
 

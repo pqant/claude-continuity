@@ -298,6 +298,7 @@ class Blinker:
         self._log = log if log is not None else _debug_line
         self.enabled = config.blink_enabled(cfg)
         self._interval = config.blink_interval(cfg)
+        self._reply_attention = config.blink_reply_attention(cfg)
         self._fill = osc6_fill(
             RED_FILL if config.blink_no_color(cfg) else BLACK_FILL)
         self._blinking = False
@@ -370,11 +371,11 @@ class Blinker:
     def _attention(self, waiting: bool) -> None:
         """Dock bounce for the CURRENT tick (issue #59).
 
-        Edge-triggered: bytes only cross when the state flips. Only
-        needs-human/blocked/selection sources arm it; a reply-only wait
-        must never bounce the Dock (user ruling 2026-11-12). Cancelling
-        is harmless when iTerm2 already stopped on its own (the user
-        clicked the Dock icon): a second "no" is a no-op.
+        Edge-triggered: bytes only cross when the state flips.
+        Needs-human/blocked/selection sources always arm it; a reply-only
+        wait arms too while blink_reply_attention is on (issue #60).
+        Cancelling is harmless when iTerm2 already stopped on its own
+        (the user clicked the Dock icon): a second "no" is a no-op.
         """
         if waiting == self._attention_armed:
             return
@@ -443,11 +444,14 @@ class Blinker:
             if pane_ask:
                 count += 1
             gated = count > 0
-            # Dock bounce sources (issue #59): the blocked and ask
-            # families; a reply-only wait stays tab-blink only.
+            # Dock bounce sources (issues #59, #60): the blocked and ask
+            # families always arm; the reply marker arms too unless
+            # blink_reply_attention is off.
             waiting = bool(pane_ask
                            or (text or "").count(MARKER_BLOCKED)
-                           or (text or "").count(MARKER_ASK))
+                           or (text or "").count(MARKER_ASK)
+                           or (self._reply_attention
+                               and (text or "").count(MARKER_REPLY)))
             if gated and not self._blinking:
                 self._start(now, waiting)
                 return
