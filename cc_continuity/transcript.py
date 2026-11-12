@@ -11,6 +11,7 @@ finalize, validation, or resume (P9-D7). Stdlib only, English strings.
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
@@ -57,6 +58,11 @@ _IMAGE_CHIP = "\U0001f5bc image"
 #: chip so the single-file export stays sane.
 _IMG_MEDIA = ("image/png", "image/jpeg", "image/gif", "image/webp")
 _MAX_IMG_B64 = 4_000_000
+#: Path-only records (issue #56): extension -> media type for reading a
+#: pasted image whose file is still sitting under ``.claude/image-cache``
+#: (the directory is pruned later, so only the export can catch it).
+_IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".gif": "image/gif", ".webp": "image/webp"}
 
 
 def md_inline(s: str) -> str:
@@ -87,6 +93,29 @@ def _image_uri(block: dict) -> str:
     if media not in _IMG_MEDIA or not isinstance(data, str) or not data:
         return ""
     if len(data) > _MAX_IMG_B64:
+        return ""
+    return f"data:{media};base64,{data}"
+
+
+def _image_from_path(path: str) -> str:
+    """Data URI for a pasted image whose file is still on disk (issue #56).
+
+    Some records keep only the ``[Image: source: <path>]`` text line and
+    no base64 block; the bytes live under ``.claude/image-cache`` until
+    pruned, so the export (which runs at rotation time, minutes after the
+    paste) reads them best-effort. Non-whitelisted extensions, anything
+    unreadable, and data past ``_MAX_IMG_B64`` return an empty string so
+    the chip stays plain.
+    """
+    p = Path(path)
+    try:
+        media = _IMG_MIME.get(p.suffix.lower())
+        if media is None or not p.is_file():
+            return ""
+        data = base64.b64encode(p.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    if not data or len(data) > _MAX_IMG_B64:
         return ""
     return f"data:{media};base64,{data}"
 
@@ -165,8 +194,9 @@ def parse_conversation(lines: list[str]) -> list[Block]:
     anchors; image metadata lines fold into a ``🖼 image`` chip (runs of
     chips collapse to one, their galleries merge). Embeddable base64
     image blocks attach to the block as ``data:`` URIs for the lightbox
-    (issue #55). Runs of 3+ newlines in assistant text collapse to
-    exactly two.
+    (issue #55); records that only carry the ``[Image: source: <path>]``
+    line read the file from disk when it is still present (issue #56).
+    Runs of 3+ newlines in assistant text collapse to exactly two.
     """
     out: list[Block] = []
     for raw in lines:
@@ -211,12 +241,25 @@ def parse_conversation(lines: list[str]) -> list[Block]:
             # Image metadata lines become a chip; human text in a mixed
             # record survives without them (issue #54).
             kept = []
+            src_paths: list[str] = []
             for ln in text.split("\n"):
                 if ln.startswith(_IMAGE_PREFIXES):
                     had_image = True
+                    # Path-only records (issue #56): collect the disk path
+                    # unless a base64 block already embeds this record.
+                    if not imgs and ln.startswith("[Image: source:"):
+                        p = ln.split("source:", 1)[1].strip()
+                        if p.endswith("]"):
+                            p = p[:-1].strip()
+                        if p:
+                            src_paths.append(p)
                 else:
                     kept.append(ln)
             text = "\n".join(kept).strip()
+            for p in src_paths:
+                uri = _image_from_path(p)
+                if uri:
+                    imgs.append(uri)
         if not text:
             if not had_image and not imgs:
                 continue
