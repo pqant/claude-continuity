@@ -4,6 +4,25 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.30] - 2026-11-12
+
+### Fixed
+
+- An out-of-band `cc-continuity signal needs-human` now reaches the
+  animated pane while the session idles (issue #63). In progress
+  mode 1 the animator owns the blink (the waiting-blink poller is
+  deliberately not spawned), but the animator's ~1 s tick only
+  consulted the rendered status-line text, the reply flag and the
+  pane capture; it never read `ledger.blocked_reason`. The push
+  reached the phone, yet the tab never blinked and the Dock never
+  bounced during the wait, because status-line renders only happen
+  at tool boundaries. The tick now polls the ledger the way the
+  reply flag does, painting the blocked chip with a reason-carrying
+  gate key; the pane resolves its session directory with the same
+  lookup `signal` writes to (writer and reader can no longer
+  disagree), and an unresolvable directory keeps the pre-fix
+  behaviour for off-project panes.
+
 ## [0.3.29] - 2026-11-12
 
 ### Fixed
