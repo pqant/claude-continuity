@@ -496,7 +496,9 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                  _dwell_ticks=3, _focus_log=blink._debug_line,
                  _build_stamp=None, _build_poll=20,
                  _restart=None, _reply_flag_read=None,
-                 _reply_flag_clear=None, _reply_pending=None) -> None:
+                 _reply_flag_clear=None, _reply_pending=None,
+                 session_dir: str | None = None,
+                 _blocked_reason=None) -> None:
     """Animate the progress line at ~20 fps until any I/O fails.
 
     Each frame is ``\\x1b[H\\x1b[2K`` + a full-width ``_frame``
@@ -668,6 +670,19 @@ def run_animator(window_id: str | None = None, *, _frames=None,
     reply_read = (_reply_pending if _reply_pending is not None
                   else (lambda sd, settle, now_: ledger.reply_pending(
                       sd, settle=settle, now=now_)))
+    # needs_human self-poll (issue #63, live bug 2026-11-12): mode 1 never
+    # spawns the blink_watch poller (spawn skips mode 1 - "the animator
+    # owns the blink"), and CC never re-renders the status line while it
+    # waits, so an out-of-band ``cc-continuity signal needs-human`` landed
+    # in the ledger invisible: the chip only appears via a status-line
+    # render, and no render comes in the idle gap. The blink poll consults
+    # the ledger's unconsumed needs_human reason directly (same single
+    # truth the poller uses) and injects MARKER_BLOCKED into both the
+    # painted frame and the gate; dwell/read semantics ride the existing
+    # FocusWatcher path. No session_dir (or a raising read) = no source.
+    blocked_read = (_blocked_reason if _blocked_reason is not None
+                    else (lambda sd: ledger.blocked_reason(sd)))
+    blocked_reason = ""
     _KEEP_REPLY = object()   # ledger unreadable this poll: change nothing
     _HOLD_REPLY = object()   # reply too young: keep the flag, stay dark
     reply_live = False
@@ -764,9 +779,21 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                         else:
                             reply_live = True
                             reply_id = repr(r)
+                if session_dir:
+                    try:
+                        rsn = blocked_read(session_dir)
+                    except Exception:
+                        rsn = None
+                    blocked_reason = rsn or ""
+                else:
+                    blocked_reason = ""
                 paint_text = cur_text
                 if reply_live and blink.MARKER_REPLY not in (paint_text or ""):
                     paint_text = (paint_text or "") + " " + blink.MARKER_REPLY
+                if (blocked_reason and blink.MARKER_BLOCKED
+                        not in (paint_text or "")):
+                    paint_text = ((paint_text or "") + " "
+                                  + blink.MARKER_BLOCKED)
                 # gate-stable key over both gate sources: what re-arms
                 # the blink is WHICH markers are painted and whether a
                 # dialog is present, never the raw text. Raw text would
@@ -781,9 +808,13 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 # identical markers; the ts never churns for the same
                 # reply, so the dwell-stability intent of the
                 # gate-stable key survives.
+                # issue #63: the unconsumed needs_human reason ("" when
+                # none) rides the key exactly like reply_id - a new
+                # block under identical markers reads as fresh unread.
                 src = "|".join(repr(p) for p in (gate,
                                                  pane_text is not None,
-                                                 reply_id) if p)
+                                                 reply_id,
+                                                 blocked_reason) if p)
                 try:
                     suppressed = watcher.tick(t, src)
                 except Exception:
@@ -799,6 +830,10 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                 paint_text = cur_text
                 if reply_live and blink.MARKER_REPLY not in (paint_text or ""):
                     paint_text = (paint_text or "") + " " + blink.MARKER_REPLY
+                if (blocked_reason and blink.MARKER_BLOCKED
+                        not in (paint_text or "")):
+                    paint_text = ((paint_text or "") + " "
+                                  + blink.MARKER_BLOCKED)
             if suppressed:
                 # hold the suppression across the frames between polls:
                 # re-feeding the gated text every frame would re-start

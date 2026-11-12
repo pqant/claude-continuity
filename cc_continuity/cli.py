@@ -509,11 +509,25 @@ def cmd_progress_pane(args: argparse.Namespace) -> int:
     on the next render.
     """
     win = args.window_id or progress_pane.resolve_window_id()
+    # issue #63: the animator polls this session's ledger for the
+    # unconsumed needs_human reason (the mode-0 blink_watch poller never
+    # spawns in mode 1). Resolve the live session exactly the way
+    # cmd_signal resolves it, so writer and reader can never diverge;
+    # unresolvable = no poll (pre-#63 behavior).
+    sdir = None
+    try:
+        root = project.resolve_root(Path.cwd())
+        key = project.project_key_for_root(root)
+        rec, _ = _resolve_session(root, key)
+        if rec is not None:
+            sdir = str(paths.session_dir(key, int(rec["nnn"])))
+    except Exception:
+        sdir = None
     # focus dwell (user directive 2026-11-07): real iTerm2 frontmost tty
     # probe; None off-iTerm2 (the watcher then disables dwell itself)
     # app-background re-fire (issue #61): frontmost app name probe for
     # the Dock bounce re-write
-    progress_pane.run_animator(window_id=win,
+    progress_pane.run_animator(window_id=win, session_dir=sdir,
                                _frontmost_tty=blink_watch._default_frontmost_tty,
                                _frontmost_app=blink_watch._default_frontmost_app)
     return 0
