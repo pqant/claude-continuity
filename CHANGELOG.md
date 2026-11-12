@@ -4,6 +4,22 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.26] - 2026-11-12
+
+### Added
+
+- Needs-human and blocked waits now also bounce the iTerm2 Dock icon
+  (issue #59), so the state is visible while the user works in another
+  app's window: an unconsumed `needs_human` ledger reason (a
+  `signal needs-human` or a watchdog stall), a permission or selection
+  prompt, or the blocked marker arm `RequestAttention=yes` on the
+  client ttys via OSC 1337. The bounce is cancelled with `no` when the
+  wait is answered or the tab has been read (focus dwell), and a
+  crashed poller's stranded bounce is healed by the startup sweep. The
+  reply-ready blink deliberately stays tab-only: a bounce on every
+  finished reply would be noise. Emulators without the OSC ignore the
+  bytes.
+
 ## [0.3.25] - 2026-11-12
 
 ### Fixed
