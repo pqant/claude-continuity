@@ -4,6 +4,21 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.28] - 2026-11-12
+
+### Added
+
+- A Dock bounce is no longer swallowed by macOS (issue #61): the
+  system only bounces a BACKGROUNDED application, so the
+  edge-triggered `RequestAttention=yes` written while iTerm2 is
+  frontmost (the user still on another window or tab) vanished with
+  no way to notice the wait later. The session poller and the pane
+  animator now watch the frontmost app on their ~1 s blink tick
+  (`AppBounce` with a `System Events` AppleScript probe) and re-write
+  a still-armed bounce exactly once per foreground-to-background
+  transition. Holding in the background re-fires nothing, and probe
+  failures hold state (safe degrade to the pre-fix behavior).
+
 ## [0.3.27] - 2026-11-12
 
 ### Added
