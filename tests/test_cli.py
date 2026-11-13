@@ -686,6 +686,84 @@ def test_configure_without_flags_is_error(cc_home, capsys):
     assert "nothing to change" in capsys.readouterr().err
 
 
+def _show_lines(capsys):
+    """Parse 'key value' lines of configure --show into a dict."""
+    return dict(line.split(" ", 1)
+                for line in capsys.readouterr().out.splitlines() if line)
+
+
+def test_configure_show_defaults_only(cc_home, capsys):
+    # No config file at all: the view is the pure defaults.
+    assert cli.main(["configure", "--show"]) == 0
+    lines = _show_lines(capsys)
+    assert lines["warn_ratio"] == "0.55"
+    assert lines["rotate_ratio"] == "0.62"
+    assert lines["window_tokens"] == "262144"
+    assert lines["progress_type"] == "0"
+    assert lines["turn_clock"] == "false"
+
+
+def test_configure_show_file_overlay(cc_home, capsys):
+    # File values win; keys the file omits still show their defaults;
+    # the installer stamp block never appears.
+    (cc_home / "config.json").write_text(json.dumps(
+        {"turn_clock": True, "progress_type": 1,
+         "install": {"version": "9.9.9", "installed_at": "x",
+                     "settings_backup": "/tmp/y"}}),
+        encoding="utf-8")
+    assert cli.main(["configure", "--show"]) == 0
+    out = capsys.readouterr().out
+    lines = dict(line.split(" ", 1)
+                 for line in out.splitlines() if line)
+    assert lines["turn_clock"] == "true"
+    assert lines["progress_type"] == "1"
+    assert lines["warn_ratio"] == "0.55"  # default still filled in
+    assert "install" not in lines
+    assert "installed_at" not in out
+
+
+def test_configure_show_json(cc_home, capsys):
+    (cc_home / "config.json").write_text(
+        json.dumps({"unattended": True, "install": {"version": "9.9.9"}}),
+        encoding="utf-8")
+    assert cli.main(["configure", "--show", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["unattended"] is True
+    assert data["hard_ratio"] == 0.72  # defaulted in
+    assert "install" not in data
+    assert list(data) == sorted(data)  # deterministic key order
+
+
+def test_configure_show_missing_file_note(cc_home, capsys):
+    # Missing config file is not an error: defaults print, rc 0, and a
+    # one-line note goes to stderr (stdout stays pure data).
+    assert cli.main(["configure", "--show"]) == 0
+    cap = capsys.readouterr()
+    assert "warn_ratio 0.55" in cap.out
+    assert "no config file" in cap.err.lower()
+    assert not (cc_home / "config.json").exists()
+
+
+def test_configure_show_never_writes(cc_home):
+    cfg_path = cc_home / "config.json"
+    cfg_path.write_text(json.dumps({"turn_clock": True}), encoding="utf-8")
+    before_bytes = cfg_path.read_bytes()
+    before_ns = cfg_path.stat().st_mtime_ns
+    assert cli.main(["configure", "--show"]) == 0
+    assert cfg_path.read_bytes() == before_bytes
+    assert cfg_path.stat().st_mtime_ns == before_ns
+    assert cli.main(["configure", "--show", "--json"]) == 0
+    assert cfg_path.read_bytes() == before_bytes
+    assert cfg_path.stat().st_mtime_ns == before_ns
+
+
+def test_configure_show_conflict_with_change_flags(cc_home, capsys):
+    assert cli.main(["configure", "--show", "--ntfy",
+                     "https://ntfy.sh/t"]) == 1
+    assert "--show" in capsys.readouterr().err
+    assert not (cc_home / "config.json").exists()
+
+
 def test_signal_needs_human_pushes_and_records(cc_home, tmp_path, monkeypatch):
     from cc_continuity import notify
     repo = make_repo(tmp_path)
