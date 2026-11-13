@@ -48,6 +48,11 @@ DEFAULTS: dict = {
     "notify_enabled": False,
     "unattended": False,
     "statusline_ansi": True,
+    # Per-turn timestamp pane switch (issue #43). Listed here so
+    # `configure --show` (issue #49) always reports the effective value;
+    # turn_clock() has always treated a missing key as False, so this is
+    # value-identical for every existing code path.
+    "turn_clock": False,
     # Progress display (Phase 12): 0 = statusline shimmer (default, today's
     # look), 1 = separate tmux pane (true 50 ms), 2 = statusline
     # "breathing". Missing/invalid values degrade to 0 via progress_mode().

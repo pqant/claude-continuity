@@ -171,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg.add_argument("--watchdog-enabled", default=None,
                        choices=["true", "false"],
                        help="enable/disable the watchdog daemon")
+    p_cfg.add_argument("--show", action="store_true",
+                       help="print the effective config (read-only) and exit")
+    p_cfg.add_argument("--json", action="store_true",
+                       help="with --show: one JSON object for scripts")
 
     p_wd = sub.add_parser("watchdog",
                           help="LLM watchdog daemon (Phase 10)")
@@ -1182,6 +1186,28 @@ def cmd_configure(args: argparse.Namespace) -> int:
     """P9-D2: post-install config changes — no reinstall needed."""
     from . import atomic, install, paths
     cfg_path = paths.config_path()
+    if args.show:
+        if (args.ntfy is not None or args.unattended
+                or args.watchdog_health is not None
+                or args.watchdog_enabled is not None):
+            print("cc-continuity configure: --show is read-only (cannot "
+                  "combine with change flags)", file=sys.stderr)
+            return 1
+        missing = not cfg_path.is_file()
+        # The installer stamp block is noise when asking "what does this
+        # session actually run on?" (issue #49); never written here.
+        shown = {k: v for k, v in config.load_config().items()
+                 if k != "install"}
+        if args.json:
+            print(json.dumps(shown, sort_keys=True))
+        else:
+            for key in sorted(shown):
+                val = shown[key]
+                print(key, val if isinstance(val, str) else json.dumps(val))
+        if missing:
+            print("cc-continuity configure: no config file yet (showing "
+                  "the built-in defaults)", file=sys.stderr)
+        return 0
     cfg: dict = {}
     if cfg_path.is_file():
         try:
