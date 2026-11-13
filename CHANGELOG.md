@@ -4,6 +4,20 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.31] - 2026-11-12
+
+### Added
+
+- `cc-continuity configure --show` prints the effective config the
+  way the code sees it (issue #49): one sorted `key value` line per
+  setting, defaults filled in where `config.json` omits them, and the
+  installer stamp block left out as noise. `--json` prints a single
+  sorted JSON object for scripts. A missing config file is not a dead
+  end: the defaults-only view prints with a one-line note on stderr
+  instead of failing. The command never writes anything, so "is
+  turn_clock on?" no longer needs `cat config.json` and knowing which
+  keys the code reads.
+
 ## [0.3.30] - 2026-11-12
 
 ### Fixed
