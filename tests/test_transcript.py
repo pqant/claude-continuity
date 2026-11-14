@@ -139,13 +139,15 @@ def test_render_html_chip_clickable_with_images():
 
 
 def test_render_html_plain_chip_is_dark_icon_without_text():
-    # Issue #64: the trace of a pruned image is a dark icon button, never
-    # the old "🖼 image" wording; nothing opens so no lightbox is injected.
+    # Issue #64: the trace of a pruned image is a dark icon chip, never the
+    # old "🖼 image" wording. Issue #66: clicking it explains itself, so the
+    # overlay is injected even on a gallery-free page.
     d = transcript.render_html([("user", "🖼 image", None)], META)
     assert "chipbtn" in d
     assert "🖼" not in d and "🖼 image" not in d
     assert "<svg" in d
-    assert 'id="lb"' not in d
+    assert 'id="lb"' in d
+    assert "data-note=" in d
 
 
 def test_render_html_folded_run_one_thumbnail_per_image():
@@ -168,27 +170,30 @@ def test_render_html_embed_chip_is_a_thumbnail():
     assert '<img class="chipimg" src="data:image/png;base64,QUJD"' in d
 
 
-def test_render_html_plain_icon_chip_not_clickable():
-    # Issue #65: the dark icon chip is a static trace. On a page that also
-    # has an embedded gallery (lightbox injected), it must not be a button
-    # and must carry no data-g/data-i that could open the lightbox.
+def test_render_html_plain_icon_chip_opens_note():
+    # Issue #66: the icon chip is clickable again, but it carries a reason,
+    # never a gallery. On a page that also has an embedded gallery it must
+    # not hold data-g/data-i (that is the #65 stale-image trap).
     b = [("user", "🖼 image", None, ("data:image/png;base64,QUJD",)),
          ("assistant", "🖼 image", None)]
     d = transcript.render_html(b, META)
     assert 'id="lb"' in d  # page has a lightbox (the tempting stale source)
-    assert '<span class="chipbtn imgicon" role="img"' in d
-    assert '<button class="chipbtn imgicon"' not in d
-    frag = d[d.index('<span class="chipbtn imgicon"'):]
+    assert '<button class="chipbtn imgicon"' in d
+    frag = d[d.index('<button class="chipbtn imgicon"'):]
     frag = frag[:frag.index(">")]
+    assert "data-note=" in frag
     assert "data-g" not in frag and "data-i" not in frag
+    assert 'data-note="This image could not be embedded' in d
 
 
-def test_lightbox_js_guards_icon_chip_clicks():
-    # Issue #65: the click handler must bail out before un-hiding the
-    # overlay when the chip has no data-g, and when the gallery element
-    # cannot be found (otherwise the stale img.src flashes on screen).
+def test_lightbox_js_note_branch():
+    # Issue #66: the click handler branches on data-note when data-g is
+    # absent; the note branch must clear the stale gallery reference and
+    # hide the image element before showing the overlay. The #65 guard for
+    # broken gallery references stays.
     js = transcript._LIGHTBOX_JS
-    assert "if(!gid)return" in js
+    assert "b.getAttribute('data-note')" in js
+    assert "g=null;img.hidden=true" in js
     assert "getElementById(gid);if(!g)return" in js
 
 
