@@ -430,7 +430,8 @@ n=(n+a.length)%a.length;img.src=a[n].getAttribute('src');
 ctr.textContent=(n+1)+' / '+a.length;}
 document.addEventListener('click',function(e){var t=e.target;
 var b=t.closest?t.closest('.chipbtn'):null;
-if(b){g=document.getElementById(b.getAttribute('data-g'));
+if(b){var gid=b.getAttribute('data-g');if(!gid)return;
+g=document.getElementById(gid);if(!g)return;
 n=parseInt(b.getAttribute('data-i')||'0',10)||0;
 lb.hidden=false;show();return;}
 if(t.id==='lbp'){n--;show();return;}
@@ -710,8 +711,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
             # Issue #64: a pruned image's trace is a dark icon chip,
             # never the emoji+"image" wording.
             has_chips = True
-            body = (f'<button class="chipbtn imgicon" aria-label="image">'
-                    f'{_IMG_ICON}</button>')
+            body = (f'<span class="chipbtn imgicon" role="img" aria-label="image">'
+                    f'{_IMG_ICON}</span>')
         else:
             body = md_to_html(text)
         sections.append(
