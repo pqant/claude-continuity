@@ -53,6 +53,13 @@ _NOISE_PREFIXES = ("<local-command", "Caveat:", "<command-name>",
 #: into a single chip so the image trace survives without the bulk.
 _IMAGE_PREFIXES = ("[Image: source:", "[Image: original")
 _IMAGE_CHIP = "\U0001f5bc image"
+#: Dark filled photo glyph for chips whose image could not be embedded
+#: (issue #64): it replaces the old emoji+"image" text trace with a solid
+#: icon that is obvious at a glance. The pulse comes from _CHIP_PULSE_JS.
+_IMG_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16'
+             'a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1'
+             '2-2zm0 2v9.6l4.3-4.3 4.2 4.2L16 9l4 4V6H4zm11 2.5A1.5 1.5 0 '
+             '1 1 13.5 9 1.5 1.5 0 0 1 15 8.5z" fill="#1b1f24"/></svg>')
 #: Embeddable image bounds (issue #55): whitelisted media types and a
 #: per-image base64 cap. Anything outside keeps a plain (non-clickable)
 #: chip so the single-file export stays sane.
@@ -331,8 +338,11 @@ ul,ol{margin:.45em 0;padding-left:1.5em}li{margin:.15em 0}
 table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid var(--line);padding:5px 10px}th{background:var(--hdr)}
 mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
 .block.hidden{display:none}
-.chipbtn{cursor:pointer;border:0;background:none;font:inherit;color:inherit;padding:0;text-decoration:underline dotted}
-.chipbtn:hover{text-decoration:underline}
+.chipbtn{cursor:pointer;border:0;background:none;font:inherit;color:inherit;padding:0;margin:2px 8px 2px 2px;position:relative;display:inline-flex;vertical-align:middle}
+.chipbtn img.chipimg{width:76px;height:auto;border-radius:7px;border:1px solid var(--line);display:block}
+.chipbtn.imgicon{width:76px;height:54px;align-items:center;justify-content:center;background:#e6edf3;border:1px solid #b1bac4;border-radius:7px}
+.chipbtn.imgicon svg{width:26px;height:26px;display:block}
+.imgbadge{position:absolute;top:-7px;left:-7px;min-width:18px;height:18px;padding:0 3px;border-radius:9px;background:#1b1f24;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg);box-shadow:0 1px 3px rgba(0,0,0,.4)}
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:60;display:flex;align-items:center;justify-content:center}
 .lb[hidden]{display:none}
 .lbb{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:92vw}
@@ -420,7 +430,8 @@ n=(n+a.length)%a.length;img.src=a[n].getAttribute('src');
 ctr.textContent=(n+1)+' / '+a.length;}
 document.addEventListener('click',function(e){var t=e.target;
 var b=t.closest?t.closest('.chipbtn'):null;
-if(b){g=document.getElementById(b.getAttribute('data-g'));n=0;
+if(b){g=document.getElementById(b.getAttribute('data-g'));
+n=parseInt(b.getAttribute('data-i')||'0',10)||0;
 lb.hidden=false;show();return;}
 if(t.id==='lbp'){n--;show();return;}
 if(t.id==='lbn'){n++;show();return;}
@@ -429,6 +440,19 @@ document.addEventListener('keydown',function(e){if(lb.hidden)return;
 if(e.key==='Escape'){hide();}
 else if(e.key==='ArrowLeft'){n--;show();}
 else if(e.key==='ArrowRight'){n++;show();}});})();
+"""
+
+#: Continuous pulse for every image chip (issue #64): a JS timer keeps the
+#: thumbnails blinking even when the OS "reduce motion" setting suppresses
+#: CSS keyframe animations. The phase lives in the closure so all chips
+#: pulse in sync. Injected whenever the export contains at least one chip.
+#: ASCII only.
+_CHIP_PULSE_JS = r"""
+(function(){var els=document.querySelectorAll('.chipbtn');if(!els.length)return;
+var ph=0;setInterval(function(){ph+=0.11;var s=0.5+0.5*Math.sin(ph);
+var o=(0.32+0.68*s).toFixed(3),sc=(0.94+0.06*s).toFixed(3);
+for(var i=0;i<els.length;i++){els[i].style.opacity=o;
+els[i].style.transform='scale('+sc+')';}},45);})();
 """
 
 
@@ -657,6 +681,7 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         switch_js = _SWITCH_JS
     sections = []
     galleries = []
+    has_chips = False
     for role, text, ts, *rest in blocks:
         images = rest[0] if rest else ()
         cls = "user" if role == "user" else "asst"
@@ -664,15 +689,29 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         if images:
             # Issue #55: the chip opens a lightbox of the real pasted
             # images; data URIs keep the export a single HTML file.
+            # Issue #64: the gallery shows as one thumbnail per image
+            # (numbered to match the lightbox counter), all pulsing via
+            # _CHIP_PULSE_JS so they are obvious at a glance.
             gid = f"lb-{len(galleries)}"
             galleries.append(
                 f'<div class="lbg" id="{gid}" hidden>'
                 + "".join(f'<img src="{html.escape(u, quote=True)}" alt="">'
                           for u in images) + "</div>")
-            chip = (f'<button class="chipbtn" data-g="{gid}">'
-                    f'{_IMAGE_CHIP}</button>')
-            body = chip if text == _IMAGE_CHIP else (
-                md_to_html(text) + f"<p>{chip}</p>")
+            thumbs = "".join(
+                f'<button class="chipbtn" data-g="{gid}" data-i="{k}"'
+                f' aria-label="image {k + 1} of {len(images)}">'
+                f'<img class="chipimg" src="{html.escape(u, quote=True)}"'
+                f' alt=""><span class="imgbadge">{k + 1}</span></button>'
+                for k, u in enumerate(images))
+            has_chips = True
+            body = thumbs if text == _IMAGE_CHIP else (
+                md_to_html(text) + f"<p>{thumbs}</p>")
+        elif text == _IMAGE_CHIP:
+            # Issue #64: a pruned image's trace is a dark icon chip,
+            # never the emoji+"image" wording.
+            has_chips = True
+            body = (f'<button class="chipbtn imgicon" aria-label="image">'
+                    f'{_IMG_ICON}</button>')
         else:
             body = md_to_html(text)
         sections.append(
@@ -702,7 +741,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'{"".join(galleries)}'
         f'{_LIGHTBOX if galleries else ""}'
         f'{ext}<script>{_JS}{switch_js}'
-        f'{_LIGHTBOX_JS if galleries else ""}</script></body>')
+        f'{_LIGHTBOX_JS if galleries else ""}'
+        f'{_CHIP_PULSE_JS if has_chips else ""}</script></body>')
 
 
 def resolve_transcript_path(metric: dict | None, root: Path, sid: str | None,
