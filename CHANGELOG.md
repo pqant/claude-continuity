@@ -4,6 +4,22 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.35] - 2026-11-14
+
+### Added
+
+- Clicking the dark icon chip (the trace a non-embeddable
+  image leaves behind) now opens a small note that says why
+  the image is missing: its source file may have been
+  removed from disk, exceeded the 4 MB embed cap, or uses an
+  unsupported format (issue #66). The chip returns to being
+  a real button with that reason in `data-note` (same
+  styling, same synced pulse); the note branch clears any
+  previous gallery selection and hides the image row, so it
+  can never flash a stale image (the #65 guarantee holds).
+  On a gallery-free page the overlay is now injected too,
+  since the note alone is worth opening.
+
 ## [0.3.34] - 2026-11-14
 
 ### Fixed
