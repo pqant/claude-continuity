@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.36] - 2026-11-14
+
+### Fixed
+
+- The lightbox prev/next row no longer shows when there is
+  nothing to navigate (issue #67): it appeared under the
+  icon chip's note text and beside single-image galleries,
+  because the author rule `.lbn{display:flex}` overrode the
+  UA `[hidden]{display:none}` so the JS toggle did nothing.
+  An explicit `.lbn[hidden]` rule now backs the toggle, and
+  `show()` hides the row whenever the open gallery holds
+  fewer than 2 images; the i / n counter is unchanged.
+
 ## [0.3.35] - 2026-11-14
 
 ### Added
