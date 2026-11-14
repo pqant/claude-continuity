@@ -348,6 +348,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
 .lbb{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:92vw}
 .lbb img{max-width:92vw;max-height:80vh;border-radius:8px;background:#fff}
 .lbn{display:flex;gap:10px;align-items:center}
+.lbn[hidden]{display:none}
 .lbn button,.lbx{background:#222b;border:1px solid #555;color:#fff;border-radius:6px;padding:4px 12px;font-size:15px;cursor:pointer}
 .lbn span{color:#fff;font-size:14px}
 .lbx{position:fixed;top:14px;right:18px}
@@ -436,7 +437,8 @@ var note=document.getElementById('lbnote'),row=document.querySelector('.lbn');
 function hide(){lb.hidden=true;g=null;if(note)note.hidden=true;img.hidden=false;if(row)row.hidden=false;}
 function show(){if(!g)return;var a=g.querySelectorAll('img');if(!a.length){hide();return;}
 n=(n+a.length)%a.length;img.src=a[n].getAttribute('src');
-ctr.textContent=(n+1)+' / '+a.length;}
+ctr.textContent=(n+1)+' / '+a.length;
+if(row)row.hidden=a.length<2;}
 document.addEventListener('click',function(e){var t=e.target;
 var b=t.closest?t.closest('.chipbtn'):null;
 if(b){var gid=b.getAttribute('data-g');
