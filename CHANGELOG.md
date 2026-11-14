@@ -4,6 +4,21 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.34] - 2026-11-14
+
+### Fixed
+
+- Clicking the dark icon chip (the trace a non-embeddable
+  image leaves behind) no longer opens the lightbox showing
+  a stale image from an earlier gallery on the page (issue
+  #65). The click handler un-hid the overlay before it
+  noticed the chip carries no `data-g`, so the overlay
+  appeared with the previous `img.src` still in place. The
+  chip now renders as a non-interactive span (same styling,
+  same synced pulse) and the handler bails out before
+  un-hiding when a chip has no gallery; numbered thumbnails
+  still open the lightbox at the exact clicked index.
+
 ## [0.3.33] - 2026-11-14
 
 ### Added
