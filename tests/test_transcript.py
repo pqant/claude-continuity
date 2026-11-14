@@ -168,6 +168,30 @@ def test_render_html_embed_chip_is_a_thumbnail():
     assert '<img class="chipimg" src="data:image/png;base64,QUJD"' in d
 
 
+def test_render_html_plain_icon_chip_not_clickable():
+    # Issue #65: the dark icon chip is a static trace. On a page that also
+    # has an embedded gallery (lightbox injected), it must not be a button
+    # and must carry no data-g/data-i that could open the lightbox.
+    b = [("user", "🖼 image", None, ("data:image/png;base64,QUJD",)),
+         ("assistant", "🖼 image", None)]
+    d = transcript.render_html(b, META)
+    assert 'id="lb"' in d  # page has a lightbox (the tempting stale source)
+    assert '<span class="chipbtn imgicon" role="img"' in d
+    assert '<button class="chipbtn imgicon"' not in d
+    frag = d[d.index('<span class="chipbtn imgicon"'):]
+    frag = frag[:frag.index(">")]
+    assert "data-g" not in frag and "data-i" not in frag
+
+
+def test_lightbox_js_guards_icon_chip_clicks():
+    # Issue #65: the click handler must bail out before un-hiding the
+    # overlay when the chip has no data-g, and when the gallery element
+    # cannot be found (otherwise the stale img.src flashes on screen).
+    js = transcript._LIGHTBOX_JS
+    assert "if(!gid)return" in js
+    assert "getElementById(gid);if(!g)return" in js
+
+
 def test_render_html_pulse_timer_tracks_chips():
     # Issue #64: the pulse runs from a JS setInterval (OS "reduce motion"
     # kills CSS keyframes but not a timer); no chips -> no timer code.
