@@ -4,6 +4,21 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.32] - 2026-11-14
+
+### Added
+
+- `cc-continuity completion zsh|bash` prints a shell completion
+  script for the whole command tree (issue #50). The script is
+  generated from the very argparse tree `build_parser` produces, so
+  a subcommand added upstream shows up on the next Tab for free;
+  level-1 subcommands and their action subcommands are offered.
+  Install with one eval line in `~/.zshrc`:
+  `eval "$(cc-continuity completion zsh)"`. An unsupported shell
+  exits 1 with a clear stderr line naming the supported ones
+  instead of printing a half-script, and the output is
+  deterministic run to run so the generated text can be diffed.
+
 ## [0.3.31] - 2026-11-12
 
 ### Added
