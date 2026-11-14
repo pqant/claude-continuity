@@ -138,17 +138,46 @@ def test_render_html_chip_clickable_with_images():
     assert d.index("metin") < d.rindex('class="chipbtn"')  # mixed chip trails text
 
 
-def test_render_html_plain_chip_not_clickable():
+def test_render_html_plain_chip_is_dark_icon_without_text():
+    # Issue #64: the trace of a pruned image is a dark icon button, never
+    # the old "🖼 image" wording; nothing opens so no lightbox is injected.
     d = transcript.render_html([("user", "🖼 image", None)], META)
-    assert 'class="chipbtn"' not in d and 'id="lb"' not in d
+    assert "chipbtn" in d
+    assert "🖼" not in d and "🖼 image" not in d
+    assert "<svg" in d
+    assert 'id="lb"' not in d
 
 
-def test_render_html_folded_run_one_button_two_images():
+def test_render_html_folded_run_one_thumbnail_per_image():
+    # Issue #64: a merged gallery renders one thumbnail per image, numbered
+    # to match the lightbox "i / n" counter (user: "3 image varsa 3 tane").
     b = [("user", "🖼 image", None,
           ("data:image/png;base64,QQ==", "data:image/png;base64,Qg=="))]
     d = transcript.render_html(b, META)
-    assert d.count('class="chipbtn"') == 1
-    assert d.count('src="data:image/png;base64') == 2
+    assert d.count('class="chipbtn"') == 2
+    assert 'data-i="0"' in d and 'data-i="1"' in d
+    assert '<span class="imgbadge">1</span>' in d
+    assert '<span class="imgbadge">2</span>' in d
+    assert d.count('src="data:image/png;base64') == 4  # thumbs + hidden gallery
+
+
+def test_render_html_embed_chip_is_a_thumbnail():
+    # Issue #64: the inline element shows the real image (data URI), not text.
+    b = [("user", "🖼 image", None, ("data:image/png;base64,QUJD",))]
+    d = transcript.render_html(b, META)
+    assert '<img class="chipimg" src="data:image/png;base64,QUJD"' in d
+
+
+def test_render_html_pulse_timer_tracks_chips():
+    # Issue #64: the pulse runs from a JS setInterval (OS "reduce motion"
+    # kills CSS keyframes but not a timer); no chips -> no timer code.
+    b = [("user", "🖼 image", None, ("data:image/png;base64,QUJD",))]
+    d = transcript.render_html(b, META)
+    assert "setInterval" in d
+    d_plain = transcript.render_html([("user", "selam", None)], META)
+    assert "setInterval" not in d_plain
+    d_icon = transcript.render_html([("user", "🖼 image", None)], META)
+    assert "setInterval" in d_icon
 
 
 def test_render_markdown_ignores_images():
