@@ -351,6 +351,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
 .lbn button,.lbx{background:#222b;border:1px solid #555;color:#fff;border-radius:6px;padding:4px 12px;font-size:15px;cursor:pointer}
 .lbn span{color:#fff;font-size:14px}
 .lbx{position:fixed;top:14px;right:18px}
+#lbnote{color:#fff;font-size:15px;max-width:60ch;text-align:center;background:#222b;border:1px solid #555;border-radius:8px;padding:14px 18px;margin:0}
 """
 
 #: In-page search (case-insensitive ``<mark>`` hits, optional block filter
@@ -411,9 +412,16 @@ sel.onchange=function(){if(this.value)location.href=up+this.value;};})();
 
 #: Lightbox shell for the image chips (issue #55): one fixed overlay,
 #: reused by every chip button. Injected only when images are embedded.
+#: Why an image chip has no embeddable image (issue #66): shown by the
+#: lightbox overlay when the dark icon chip is clicked. One fixed English
+#: string; the icon chip carries it in data-note. ASCII only.
+_IMG_NOTE = ("This image could not be embedded in the export. Its source "
+             "file may have been removed from disk, exceeded the 4 MB "
+             "embed cap, or uses an unsupported format.")
 _LIGHTBOX = ('<div id="lb" class="lb" hidden>'
              '<button id="lbx" class="lbx">close</button>'
              '<div class="lbb"><img id="lbi" alt="">'
+             '<p id="lbnote" hidden></p>'
              '<div class="lbn"><button id="lbp">&#8249; prev</button>'
              '<span id="lbc"></span>'
              '<button id="lbn">next &#8250;</button></div></div></div>')
@@ -424,16 +432,22 @@ _LIGHTBOX = ('<div id="lb" class="lb" hidden>'
 _LIGHTBOX_JS = r"""
 (function(){var lb=document.getElementById('lb');if(!lb)return;
 var img=document.getElementById('lbi'),ctr=document.getElementById('lbc'),g=null,n=0;
-function hide(){lb.hidden=true;g=null;}
+var note=document.getElementById('lbnote'),row=document.querySelector('.lbn');
+function hide(){lb.hidden=true;g=null;if(note)note.hidden=true;img.hidden=false;if(row)row.hidden=false;}
 function show(){if(!g)return;var a=g.querySelectorAll('img');if(!a.length){hide();return;}
 n=(n+a.length)%a.length;img.src=a[n].getAttribute('src');
 ctr.textContent=(n+1)+' / '+a.length;}
 document.addEventListener('click',function(e){var t=e.target;
 var b=t.closest?t.closest('.chipbtn'):null;
-if(b){var gid=b.getAttribute('data-g');if(!gid)return;
-g=document.getElementById(gid);if(!g)return;
+if(b){var gid=b.getAttribute('data-g');
+if(gid){g=document.getElementById(gid);if(!g)return;
 n=parseInt(b.getAttribute('data-i')||'0',10)||0;
+if(note)note.hidden=true;img.hidden=false;if(row)row.hidden=false;
 lb.hidden=false;show();return;}
+var nt=b.getAttribute('data-note');if(nt){g=null;img.hidden=true;
+if(note){note.textContent=nt;note.hidden=false;}
+if(row)row.hidden=true;lb.hidden=false;return;}
+return;}
 if(t.id==='lbp'){n--;show();return;}
 if(t.id==='lbn'){n++;show();return;}
 if(t.id==='lbx'||t===lb){hide();}});
@@ -711,8 +725,9 @@ def render_html(blocks: list[Block], meta: dict) -> str:
             # Issue #64: a pruned image's trace is a dark icon chip,
             # never the emoji+"image" wording.
             has_chips = True
-            body = (f'<span class="chipbtn imgicon" role="img" aria-label="image">'
-                    f'{_IMG_ICON}</span>')
+            body = (f'<button class="chipbtn imgicon" '
+                    f'data-note="{html.escape(_IMG_NOTE)}" '
+                    f'aria-label="image could not be embedded">{_IMG_ICON}</button>')
         else:
             body = md_to_html(text)
         sections.append(
@@ -740,9 +755,9 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<button id="t">theme</button><span id="stats"></span></div></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'{"".join(galleries)}'
-        f'{_LIGHTBOX if galleries else ""}'
+        f'{_LIGHTBOX if galleries or has_chips else ""}'
         f'{ext}<script>{_JS}{switch_js}'
-        f'{_LIGHTBOX_JS if galleries else ""}'
+        f'{_LIGHTBOX_JS if galleries or has_chips else ""}'
         f'{_CHIP_PULSE_JS if has_chips else ""}</script></body>')
 
 
