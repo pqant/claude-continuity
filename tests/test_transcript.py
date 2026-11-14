@@ -186,6 +186,15 @@ def test_render_html_plain_icon_chip_opens_note():
     assert 'data-note="This image could not be embedded' in d
 
 
+def test_lightbox_note_nav_row_hidden():
+    # Issue #67: the prev/next row must not show for the note view or a
+    # single-image gallery. The author rule .lbn{display:flex} beats the UA
+    # [hidden] style, so an explicit author [hidden] rule is required too.
+    assert ".lbn[hidden]{display:none}" in transcript._CSS
+    js = transcript._LIGHTBOX_JS
+    assert "row.hidden=a.length<2" in js
+
+
 def test_lightbox_js_note_branch():
     # Issue #66: the click handler branches on data-note when data-g is
     # absent; the note branch must clear the stale gallery reference and
