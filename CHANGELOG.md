@@ -4,6 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.33] - 2026-11-14
+
+### Added
+
+- The transcript export now shows pasted images as blinking
+  thumbnails instead of the plain `image` text chip (issue #64).
+  Every embeddable image renders inline as a small thumbnail with
+  a numbered badge (1, 2, 3, ...), and all thumbnails pulse in
+  sync (sinusoidal opacity plus a slight scale) on a ~45 ms JS
+  `setInterval` tick. The pulse is plain JS, not a CSS keyframe
+  animation, so macOS "reduce motion" settings cannot silence it.
+  Clicking a thumbnail opens the lightbox at that exact image via
+  a per-thumbnail index.
+- An image that could not be embedded (missing file or above the
+  size cap) renders as a solid dark photo icon chip, dropping the
+  old emoji-plus-word text trace that was easy to scan past.
+
 ## [0.3.32] - 2026-11-14
 
 ### Added
