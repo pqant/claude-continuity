@@ -1130,3 +1130,72 @@ def test_notify_claimed_passes_prev_and_handoff(cc_home, tmp_path,
     assert captured["prev"] == "proj-99"
     assert captured["handoff_path"].endswith(
         "sessions/099/checkpoint/handoff.md")
+
+
+# ------------------------------------------------------- completion (#50)
+
+
+def _registered_subcommands():
+    """Top-level subcommand names from the live argparse tree."""
+    sub = next(a for a in cli.build_parser()._actions
+               if isinstance(a, argparse._SubParsersAction))
+    return list(sub.choices)
+
+
+def test_completion_zsh_lists_every_subcommand(capsys):
+    # The zsh script must offer every subcommand the CLI really registers.
+    assert cli.main(["completion", "zsh"]) == 0
+    out = capsys.readouterr().out
+    assert "#compdef cc-continuity" in out
+    for name in _registered_subcommands():
+        assert name in out
+
+
+def test_completion_bash_lists_every_subcommand(capsys):
+    assert cli.main(["completion", "bash"]) == 0
+    out = capsys.readouterr().out
+    assert "complete -F" in out
+    for name in _registered_subcommands():
+        assert name in out
+
+
+def test_completion_unknown_shell_exits_1(capsys):
+    # Clear stderr line naming the bad shell and the supported ones; no
+    # partial script on stdout; rc 1 (not argparse's rc 2).
+    assert cli.main(["completion", "fish"]) == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert "fish" in cap.err
+    assert "bash" in cap.err and "zsh" in cap.err
+
+
+def test_completion_scripts_are_deterministic(capsys):
+    # Same tree -> byte-identical script every run (no set/dict iteration
+    # order leaking into the output).
+    assert cli.main(["completion", "bash"]) == 0
+    first = capsys.readouterr().out
+    assert cli.main(["completion", "bash"]) == 0
+    assert capsys.readouterr().out == first
+    assert cli.main(["completion", "zsh"]) == 0
+    zfirst = capsys.readouterr().out
+    assert cli.main(["completion", "zsh"]) == 0
+    assert capsys.readouterr().out == zfirst
+
+
+def test_completion_scripts_match_parse_args(capsys):
+    # Generated from the same argparse tree the CLI builds: the level-1
+    # token list in the bash script must equal the parser's real commands,
+    # and each must parse without "invalid choice" (a rename in the tree
+    # that a hardcoded script missed fails here).
+    import re
+    assert cli.main(["completion", "bash"]) == 0
+    out = capsys.readouterr().out
+    tokens = re.findall(r'compgen -W "([^"]*)"', out)[0].split()
+    assert set(tokens) == set(_registered_subcommands())
+    parser = cli.build_parser()
+    for token in tokens:
+        try:
+            parser.parse_args([token])
+        except SystemExit:
+            err = capsys.readouterr().err
+            assert "invalid choice" not in err
