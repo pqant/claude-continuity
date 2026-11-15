@@ -3,7 +3,7 @@ on:
   push:
     tags: ["v*"]
 permissions:
-  contents: read
+  contents: write # the GitHub Release step (issue #33); PyPI keeps id-token
   id-token: write
 jobs:
   publish:
@@ -15,6 +15,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Extract the release notes (fail fast before any upload)
+        run: >-
+          python tools/changelog_notes.py "${GITHUB_REF_NAME#v}"
+          > "$RUNNER_TEMP/notes.md"
       - run: python -m pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Create (or refresh) the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
