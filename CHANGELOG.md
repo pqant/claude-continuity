@@ -4,6 +4,18 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.42] - 2026-11-15
+
+### Added
+
+- A tag push now opens its own GitHub Release. The release workflow
+  extracts the matching `## [<version>]` section from this changelog with
+  a stdlib-only `tools/changelog_notes.py` helper (a missing or empty
+  section stops the run before any upload) and publishes it as the
+  release notes, so the PyPI upload and the GitHub Release come from a
+  single workflow run; re-runs refresh the notes instead of failing
+  (issue #33). The manual `gh release create` step is retired.
+
 ## [0.3.41] - 2026-11-17
 
 ### Fixed
