@@ -4,7 +4,20 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
-## [0.3.38] - 2026-11-16
+## [0.3.39] - 2026-11-16
+
+### Changed
+
+- The transcript fold arrows are anchored (issue #70). Both
+  triangles now center against the full header width, so the
+  arrow sits at the true screen center instead of drifting
+  left over the theme button (the controls row spans only
+  the left half of the header grid). They carry a red tint
+  (a deeper red in light theme, a lighter red in dark
+  theme), and the reopen arrow shares the same centered
+  slot when the panel is folded, so the button no longer
+  jumps when toggling.
+
 
 ### Changed
 
