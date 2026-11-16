@@ -321,6 +321,9 @@ button:hover{border-color:var(--muted)}
 select{padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:13px;max-width:340px}
 select:disabled{opacity:.55}
 #stats{font-size:12px;color:var(--muted);min-width:140px}
+header .hdmini{display:none;align-items:center;gap:10px;font-size:13px}
+header.mini .hd{display:none}
+header.mini .hdmini{display:flex}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
 section.block{padding:6px 14px 12px;margin:10px 0;border-radius:10px}
 section.block.user{background:var(--userbg)}
@@ -382,6 +385,12 @@ const bt=document.getElementById('t'),root=document.documentElement;
 const modes=['auto','light','dark'];let i=+(localStorage.getItem('th')||0);
 root.dataset.theme=modes[i];bt.textContent='theme: '+modes[i];
 bt.onclick=()=>{i=(i+1)%3;root.dataset.theme=modes[i];localStorage.setItem('th',i);bt.textContent='theme: '+modes[i];};
+var hdEl=document.querySelector('header'),pb=document.getElementById('panelbtn'),ps=document.getElementById('panelsbtn');
+function hcGet(){try{return localStorage.getItem('hc')==='1'}catch(e){return false}}
+function hcSet(v){hdEl.classList.toggle('mini',v);try{localStorage.setItem('hc',v?'1':'0')}catch(e){}}
+if(hcGet())hdEl.classList.add('mini');
+ps.onclick=function(){hcSet(!hdEl.classList.contains('mini'))};
+pb.onclick=function(){hcSet(false)};
 """
 
 
@@ -754,7 +763,9 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'{switch}\n'
         '<div class="row2"><label><input type="checkbox" id="f"> '
         'matching blocks only</label>\n'
-        '<button id="t">theme</button><span id="stats"></span></div></div></header>\n'
+        f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn">panel up</button></div></div>\n'
+        f'<div class="hdmini" hidden><span class="v">&#8250; {_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>'
+        f'<button id="panelbtn">panel down</button></div></header>\n'
         f'<main>{"".join(sections)}</main>\n'
         f'{"".join(galleries)}'
         f'{_LIGHTBOX if galleries or has_chips else ""}'
