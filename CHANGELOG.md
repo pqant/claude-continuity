@@ -4,7 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
-## [0.3.37] - 2026-11-15
+## [0.3.38] - 2026-11-16
+
+### Changed
+
+- The transcript density view (issue #68) got its acceptance
+  polish (issue #69). The two panel toggles are plain filled
+  triangles now: the up-triangle in the controls row folds
+  the header panel into the slim bar, the down-triangle on
+  the bar brings it back, and the words live in tooltips.
+  Collapse and expand ease over 180 ms instead of snapping.
+  With the 2-column mode on, the folded bar only takes the
+  width of the left column, so the strip above the content
+  stops stretching full width. The fold arrow sits centered
+  in the controls row and carries the theme accent color.
+  And the "2-column · 75%" mode opens enabled by default
+  now; unchecking it is still remembered in your browser.
+
 
 ### Added
 
