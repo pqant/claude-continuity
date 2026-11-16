@@ -325,7 +325,7 @@ header .hdmini{display:none;align-items:center;gap:10px;font-size:13px}
 header.mini .hd{max-height:0;opacity:0;overflow:hidden;pointer-events:none}
 header.mini .hdmini{display:flex}
 body.split header.mini .hdmini{width:calc(50% - 36px)}
-#panelsbtn{position:absolute;left:50%;transform:translateX(-50%)}
+#panelsbtn,#panelbtn{position:absolute;left:50%;transform:translateX(-50%)}
 #panelsbtn,#panelbtn{color:#d1242f}
 [data-theme=dark] #panelsbtn,[data-theme=dark] #panelbtn{color:#ff7b72}
 main.split{max-width:none;columns:2;column-gap:28px;zoom:.75}
