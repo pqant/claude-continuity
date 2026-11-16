@@ -324,6 +324,8 @@ select:disabled{opacity:.55}
 header .hdmini{display:none;align-items:center;gap:10px;font-size:13px}
 header.mini .hd{display:none}
 header.mini .hdmini{display:flex}
+main.split{max-width:none;columns:2;column-gap:28px;zoom:.75}
+main.split .block{break-inside:avoid}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
 section.block{padding:6px 14px 12px;margin:10px 0;border-radius:10px}
 section.block.user{background:var(--userbg)}
@@ -391,6 +393,10 @@ function hcSet(v){hdEl.classList.toggle('mini',v);try{localStorage.setItem('hc',
 if(hcGet())hdEl.classList.add('mini');
 ps.onclick=function(){hcSet(!hdEl.classList.contains('mini'))};
 pb.onclick=function(){hcSet(false)};
+var mn=document.querySelector('main'),sp=document.getElementById('sp');
+function spGet(){try{return localStorage.getItem('sp')==='1'}catch(e){return false}}
+var spOn=spGet();sp.checked=spOn;mn.classList.toggle('split',spOn);
+sp.onchange=function(){mn.classList.toggle('split',sp.checked);try{localStorage.setItem('sp',sp.checked?'1':'0')}catch(e){}};
 """
 
 
@@ -763,6 +769,7 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'{switch}\n'
         '<div class="row2"><label><input type="checkbox" id="f"> '
         'matching blocks only</label>\n'
+        '<label><input type="checkbox" id="sp"> 2-column &#183; 75%</label>\n'
         f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn">panel up</button></div></div>\n'
         f'<div class="hdmini" hidden><span class="v">&#8250; {_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>'
         f'<button id="panelbtn">panel down</button></div></header>\n'
