@@ -4,6 +4,23 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.37] - 2026-11-15
+
+### Added
+
+- The transcript export gained two density controls in the
+  header panel (issue #68). "panel up" folds the meta panel
+  into a slim one-line bar (session name + "panel down") so
+  the conversation starts at the top of the screen; "panel
+  down" restores the full panel. A "2-column · 75%" checkbox
+  in the controls row re-flows the blocks into two balanced
+  columns at reduced zoom, spanning the full window width;
+  message blocks never split across the column break and
+  chronology is untouched. Both choices persist in the
+  browser (localStorage), and search, theme, sessions
+  switcher and the image lightbox behave identically in
+  every state.
+
 ## [0.3.36] - 2026-11-14
 
 ### Fixed
