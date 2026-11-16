@@ -748,6 +748,9 @@ def test_density_collapsible_header():
     assert "transition:max-height .18s ease,opacity .18s ease" in d
     assert "header.mini .hdmini{display:flex}" in d
     assert "body.split header.mini .hdmini{width:calc(50% - 36px)}" in d
+    assert "flex-wrap:wrap;position:relative}" in d
+    assert "#panelsbtn{position:absolute;left:50%;transform:translateX(-50%)}" in d
+    assert "#panelsbtn,#panelbtn{color:var(--asstfg)}" in d
 
 
 def test_density_split_checkbox_and_css():
