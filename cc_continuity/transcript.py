@@ -313,7 +313,7 @@ header{position:sticky;top:0;background:var(--hdr);border-bottom:1px solid var(-
 .hd{font-size:13px;color:var(--muted);display:grid;overflow:hidden;max-height:600px;transition:max-height .18s ease,opacity .18s ease;grid-template-columns:max-content 1fr max-content 1fr;gap:6px 14px;align-items:center}
 .hd .k{font-weight:600;color:var(--fg)}
 .hd .v{color:var(--fg);font-weight:600;padding-left:2px}
-.row2{display:flex;gap:12px;align-items:center;margin-top:6px;grid-column:1/3;flex-wrap:wrap;position:relative}
+.row2{display:flex;gap:12px;align-items:center;margin-top:6px;grid-column:1/3;flex-wrap:wrap}
 .qbox{width:360px;max-width:100%;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px}
 label{font-size:13px;color:var(--fg);font-weight:600;white-space:nowrap}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:13px}
@@ -326,7 +326,8 @@ header.mini .hd{max-height:0;opacity:0;overflow:hidden;pointer-events:none}
 header.mini .hdmini{display:flex}
 body.split header.mini .hdmini{width:calc(50% - 36px)}
 #panelsbtn{position:absolute;left:50%;transform:translateX(-50%)}
-#panelsbtn,#panelbtn{color:var(--asstfg)}
+#panelsbtn,#panelbtn{color:#d1242f}
+[data-theme=dark] #panelsbtn,[data-theme=dark] #panelbtn{color:#ff7b72}
 main.split{max-width:none;columns:2;column-gap:28px;zoom:.75}
 main.split .block{break-inside:avoid}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
