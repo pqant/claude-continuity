@@ -736,3 +736,33 @@ def test_prev_task_duration_unreadable_returns_none(tmp_path):
     f.write_text(_rec("user", "hi") + "\n", encoding="utf-8")
     assert transcript.prev_task_duration(f) is None  # no reply yet
     assert transcript.prev_task_duration(None) is None
+
+
+def test_density_collapsible_header():
+    d = transcript.render_html([("user", "hello", None)], META)
+    assert '<div class="hdmini" hidden>' in d
+    assert "claude-continuity-166 (cp-166)" in d
+    assert 'id="panelbtn"' in d
+    assert 'id="panelsbtn"' in d
+    assert "header.mini .hd{display:none}" in d
+    assert "header.mini .hdmini{display:flex}" in d
+
+
+def test_density_split_checkbox_and_css():
+    b = [("user", "x", None, ("data:image/png;base64,AAA",))]
+    d = transcript.render_html(b, META)
+    assert 'id="sp"' in d
+    assert "2-column" in d
+    assert "main.split{max-width:none;columns:2" in d
+    assert "main.split .block{break-inside:avoid}" in d
+    assert "zoom:.75" in d
+    assert "<main>" in d
+    assert d.index("</main>") < d.index('id="lb"')
+
+
+def test_density_js_persistence_guards():
+    d = transcript.render_html([("user", "hello", None)], META)
+    for needle in ("localStorage.getItem('hc')", "localStorage.getItem('sp')",
+                   "localStorage.setItem('hc'", "localStorage.setItem('sp'"):
+        assert needle in d
+    assert d.count("try{") >= 2
