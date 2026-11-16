@@ -310,7 +310,7 @@ _CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.6 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;background:var(--hdr);border-bottom:1px solid var(--line);padding:10px 22px;z-index:9;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.hd{font-size:13px;color:var(--muted);display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:6px 14px;align-items:center}
+.hd{font-size:13px;color:var(--muted);display:grid;overflow:hidden;max-height:600px;transition:max-height .18s ease,opacity .18s ease;grid-template-columns:max-content 1fr max-content 1fr;gap:6px 14px;align-items:center}
 .hd .k{font-weight:600;color:var(--fg)}
 .hd .v{color:var(--fg);font-weight:600;padding-left:2px}
 .row2{display:flex;gap:12px;align-items:center;margin-top:6px;grid-column:1/3;flex-wrap:wrap}
@@ -322,8 +322,9 @@ select{padding:6px 10px;border:1px solid var(--line);border-radius:8px;backgroun
 select:disabled{opacity:.55}
 #stats{font-size:12px;color:var(--muted);min-width:140px}
 header .hdmini{display:none;align-items:center;gap:10px;font-size:13px}
-header.mini .hd{display:none}
+header.mini .hd{max-height:0;opacity:0;overflow:hidden;pointer-events:none}
 header.mini .hdmini{display:flex}
+body.split header.mini .hdmini{width:calc(50% - 36px)}
 main.split{max-width:none;columns:2;column-gap:28px;zoom:.75}
 main.split .block{break-inside:avoid}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
@@ -394,9 +395,9 @@ if(hcGet())hdEl.classList.add('mini');
 ps.onclick=function(){hcSet(!hdEl.classList.contains('mini'))};
 pb.onclick=function(){hcSet(false)};
 var mn=document.querySelector('main'),sp=document.getElementById('sp');
-function spGet(){try{return localStorage.getItem('sp')==='1'}catch(e){return false}}
-var spOn=spGet();sp.checked=spOn;mn.classList.toggle('split',spOn);
-sp.onchange=function(){mn.classList.toggle('split',sp.checked);try{localStorage.setItem('sp',sp.checked?'1':'0')}catch(e){}};
+function spGet(){try{return localStorage.getItem('sp')!=='0'}catch(e){return true}}
+var spOn=spGet();sp.checked=spOn;mn.classList.toggle('split',spOn);document.body.classList.toggle('split',spOn);
+sp.onchange=function(){mn.classList.toggle('split',sp.checked);document.body.classList.toggle('split',sp.checked);try{localStorage.setItem('sp',sp.checked?'1':'0')}catch(e){}};
 """
 
 
@@ -770,10 +771,10 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         '<div class="row2"><label><input type="checkbox" id="f"> '
         'matching blocks only</label>\n'
         '<label><input type="checkbox" id="sp"> 2-column &#183; 75%</label>\n'
-        f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn">panel up</button></div></div>\n'
+        f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn" title="panel up">&#9650;</button></div></div>\n'
         f'<div class="hdmini" hidden><span class="v">&#8250; {_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>'
-        f'<button id="panelbtn">panel down</button></div></header>\n'
-        f'<main>{"".join(sections)}</main>\n'
+        f'<button id="panelbtn" title="panel down">&#9660;</button></div></header>\n'
+        f'<main class="split">{"".join(sections)}</main>\n'
         f'{"".join(galleries)}'
         f'{_LIGHTBOX if galleries or has_chips else ""}'
         f'{ext}<script>{_JS}{switch_js}'

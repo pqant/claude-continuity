@@ -742,10 +742,12 @@ def test_density_collapsible_header():
     d = transcript.render_html([("user", "hello", None)], META)
     assert '<div class="hdmini" hidden>' in d
     assert "claude-continuity-166 (cp-166)" in d
-    assert 'id="panelbtn"' in d
-    assert 'id="panelsbtn"' in d
-    assert "header.mini .hd{display:none}" in d
+    assert '<button id="panelbtn" title="panel down">&#9660;</button>' in d
+    assert '<button id="panelsbtn" title="panel up">&#9650;</button>' in d
+    assert "header.mini .hd{max-height:0;opacity:0;overflow:hidden;pointer-events:none}" in d
+    assert "transition:max-height .18s ease,opacity .18s ease" in d
     assert "header.mini .hdmini{display:flex}" in d
+    assert "body.split header.mini .hdmini{width:calc(50% - 36px)}" in d
 
 
 def test_density_split_checkbox_and_css():
@@ -756,7 +758,10 @@ def test_density_split_checkbox_and_css():
     assert "main.split{max-width:none;columns:2" in d
     assert "main.split .block{break-inside:avoid}" in d
     assert "zoom:.75" in d
-    assert "<main>" in d
+    assert '<main class="split">' in d
+    assert "return localStorage.getItem('sp')!=='0'" in d
+    assert "document.body.classList.toggle('split',spOn)" in d
+    assert "document.body.classList.toggle('split',sp.checked)" in d
     assert d.index("</main>") < d.index('id="lb"')
 
 
