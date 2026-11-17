@@ -4,6 +4,28 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.41] - 2026-11-17
+
+### Fixed
+
+- The status line ratio metric is now written under the session
+  the pane's hooks actually run as (issue #71, the #42 follow-up).
+  After a dead-sid auto-resume Claude Code renders the status line
+  with the abandoned startup sid while the hooks keep firing as the
+  resumed conversation's sid, so the metric landed on the stale
+  sid: the revived pane kept showing a ratio (e.g. `99.0%`) while
+  the tracked record never moved (`state ROTATED`) - measurement
+  without reaction. The hook entry now stamps a pane-scoped
+  binding (`runtime/panes/pane-<TMUX_PANE>.json` with the sid, the
+  pane and a timestamp) on every hook event, and the status line
+  retargets the metric (and the rendered record) onto it when the
+  binding is fresh (same 10-minute gate as metrics), names a
+  different BOOTSTRAPPING/ACTIVE session, is not off, and is not
+  older than the payload record's creation (same-pane sequential
+  launches never inherit a previous session's binding). Outside
+  tmux, and in every healthy pane (binding sid equals the payload
+  sid), the write stays byte-identical to 0.3.40.
+
 ## [0.3.40] - 2026-11-16
 
 ### Fixed
