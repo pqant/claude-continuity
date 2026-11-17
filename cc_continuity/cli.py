@@ -14,9 +14,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -78,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "current session (issue #46)")
     p_ledger.add_argument("n", nargs="?", type=int, default=20,
                           help="how many newest entries (default 20)")
+
+    p_log = sub.add_parser("log",
+                           help="tail a root log file with local-time "
+                                "stamps (issue #35)")
+    p_log.add_argument("kind", choices=["blink", "errors"])
+    p_log.add_argument("--lines", type=int, default=20,
+                       help="how many newest lines (default 20)")
+    p_log.add_argument("--follow", action="store_true",
+                       help="keep streaming appended lines")
 
     p_vd = sub.add_parser("validate-draft",
                           help="validate a handoff draft (PRD §10.1)")
@@ -747,6 +758,78 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     for e in entries[-n:]:
         if isinstance(e, dict):
             print(_ledger_line(e))
+    return 0
+
+
+_LOG_STAMP = re.compile(
+    r"^(?P<open>\[?)(?P<iso>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+    r"(?P<offset>Z|[+-]\d{2}:\d{2})(?P<close>\]?)")
+
+
+def render_log_line(line, tz=None):
+    """Rewrite an offset-bearing leading stamp into local time (issue #35).
+
+    errors.log stamps carry ``+00:00`` (UTC) and get converted; blink.log
+    stamps are naive local ``time.strftime`` output and MUST pass through
+    byte-identical (converting a naive stamp would double-shift it), and
+    so do untimestamped traceback continuation lines.
+    """
+    match = _LOG_STAMP.match(line)
+    if not match:
+        return line
+    offset = "+00:00" if match.group("offset") == "Z" else match.group("offset")
+    try:
+        stamp = datetime.fromisoformat(match.group("iso") + offset)
+    except ValueError:
+        return line
+    local = stamp.astimezone(tz)
+    return (f"{match.group('open')}{local.isoformat()}{match.group('close')}"
+            + line[match.end():])
+
+
+def follow_lines(path, offset, poll=0.5, max_lines=None):
+    """Yield whole lines appended to ``path`` after ``offset`` (issue #35).
+
+    ``tail -f`` semantics for ``log --follow``: polls for growth, yields
+    only newline-terminated lines (a torn partial write is kept in the
+    buffer until complete), and tolerates a missing file by waiting for
+    it to appear. ``max_lines`` bounds the stream (tests).
+    """
+    emitted = 0
+    buf = b""
+    while max_lines is None or emitted < max_lines:
+        chunk = b""
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(offset)
+                chunk = fh.read()
+        except OSError:
+            pass
+        if chunk:
+            offset += len(chunk)
+            *complete, buf = (buf + chunk).split(b"\n")
+            for raw in complete:
+                yield raw.decode("utf-8", "replace")
+                emitted += 1
+                if max_lines is not None and emitted >= max_lines:
+                    return
+        time.sleep(poll)
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    """Read-only tail of the root ``logs/`` files (issue #35).
+
+    ``blink``/``errors`` are global (not per-session); stamps render in
+    local time, newest last. A missing file is an empty success.
+    """
+    path = paths.logs_dir() / f"{args.kind}.log"
+    n = args.lines if isinstance(args.lines, int) and args.lines > 0 else 20
+    data = path.read_bytes() if path.is_file() else b""
+    for line in data.decode("utf-8", "replace").splitlines()[-n:]:
+        print(render_log_line(line))
+    if args.follow:
+        for line in follow_lines(path, len(data)):
+            print(render_log_line(line), flush=True)
     return 0
 
 
@@ -1678,6 +1761,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ratio(args)
     if args.command == "ledger":
         return cmd_ledger(args)
+    if args.command == "log":
+        return cmd_log(args)
     if args.command == "validate-draft":
         return cmd_validate_draft(args)
     if args.command == "validate":
