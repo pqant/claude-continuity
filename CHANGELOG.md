@@ -4,6 +4,15 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.45] - 2026-11-17
+
+### Added
+
+- The README opens with a badges row: live shields.io counters for forks,
+  stars, open issues and the last commit, each linking to the matching
+  GitHub page, plus Code of conduct, Contributions and Security badges
+  linking into the community files (issue #73).
+
 ## [0.3.44] - 2026-11-17
 
 ### Fixed
