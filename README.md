@@ -8,6 +8,13 @@
 [![Contributions](https://img.shields.io/badge/CONTRIBUTIONS-WELCOME-%23e0559a?logo=git&labelColor=%23333333)](CONTRIBUTING.md)
 [![Security](https://img.shields.io/badge/SECURITY-POLICY-%234c1?logo=github&labelColor=%23333333)](SECURITY.md)
 
+[![PyPI](https://img.shields.io/pypi/v/cc-continuity?label=PYPI&logo=pypi&logoColor=white&labelColor=%23333333&color=%23007ec6)](https://pypi.org/project/cc-continuity/)
+[![Downloads](https://img.shields.io/pypi/dm/cc-continuity?label=DOWNLOADS&logo=pypi&logoColor=white&labelColor=%23333333&color=%23007ec6)](https://pypi.org/project/cc-continuity/)
+[![License](https://img.shields.io/github/license/pqant/claude-continuity?label=LICENSE&logo=github&labelColor=%23333333&color=%234c1)](LICENSE)
+[![CI](https://github.com/pqant/claude-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/pqant/claude-continuity/actions/workflows/ci.yml)
+[![Python versions](https://img.shields.io/pypi/pyversions/cc-continuity?label=PYTHON&logo=python&logoColor=white&labelColor=%23333333&color=%233776ab)](https://pypi.org/project/cc-continuity/)
+[![Good first issues](https://img.shields.io/github/issues/pqant/claude-continuity/good%20first%20issue?label=GOOD%20FIRST%20ISSUES&logo=github&labelColor=%23333333&color=%237057ff)](https://github.com/pqant/claude-continuity/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+
 Zero-touch session rotation and supervision for Claude Code.
 
 **Why it exists.** Long sessions die when the context window fills up, and local LLMs make it worse: their window is fixed and small, and the built-in compaction (`/compact`, auto-compact) is a lossy one-shot summary. With a small model it silently drops decisions, rejected approaches and the exact stopping point, and every compaction then summarizes a summary, so the drift compounds. cc-continuity exists to give long work room to breathe inside the window: at a safe threshold it rotates the session with a structured, validated handoff instead of a lossy summary.
