@@ -1,5 +1,13 @@
 # cc-continuity
 
+[![Forks](https://img.shields.io/github/forks/pqant/claude-continuity?label=FORKS&logo=github&labelColor=%23333333&color=%23ff8c00)](https://github.com/pqant/claude-continuity/forks)
+[![Stars](https://img.shields.io/github/stars/pqant/claude-continuity?label=STARS&logo=github&labelColor=%23333333&color=%234c1)](https://github.com/pqant/claude-continuity/stargazers)
+[![Issues](https://img.shields.io/github/issues/pqant/claude-continuity?label=ISSUES&logo=github&labelColor=%23333333&color=%23007ec6)](https://github.com/pqant/claude-continuity/issues)
+[![Last commit](https://img.shields.io/github/last-commit/pqant/claude-continuity?label=LAST%20COMMIT&logo=github&labelColor=%23333333&color=%23e0559a)](https://github.com/pqant/claude-continuity/commits/main)
+[![Code of conduct](https://img.shields.io/badge/CODE%20OF%20CONDUCT-ENFORCED-%239146ff?logo=contributorcovenant&labelColor=%23333333)](CODE_OF_CONDUCT.md)
+[![Contributions](https://img.shields.io/badge/CONTRIBUTIONS-WELCOME-%23e0559a?logo=git&labelColor=%23333333)](CONTRIBUTING.md)
+[![Security](https://img.shields.io/badge/SECURITY-POLICY-%234c1?logo=github&labelColor=%23333333)](SECURITY.md)
+
 Zero-touch session rotation and supervision for Claude Code.
 
 **Why it exists.** Long sessions die when the context window fills up, and local LLMs make it worse: their window is fixed and small, and the built-in compaction (`/compact`, auto-compact) is a lossy one-shot summary. With a small model it silently drops decisions, rejected approaches and the exact stopping point, and every compaction then summarizes a summary, so the drift compounds. cc-continuity exists to give long work room to breathe inside the window: at a safe threshold it rotates the session with a structured, validated handoff instead of a lossy summary.
