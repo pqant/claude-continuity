@@ -782,6 +782,148 @@ def test_restart_does_not_reuse_fresh_bootstrap(cc_home, capsys, tmp_path):
     assert _project_record(repo)["counter"] == 3
 
 
+# --- issue #42: dead-sid auto-resume must revive the stalled successor ----
+# plain `claude` (CC native auto-resume on lastSessionId) can bring back a
+# DEAD conversation after a rotation edge: the rotated-away one (zombie A) or
+# the stalled successor itself (zombie B, the a1b1e9bf shape). The resume/
+# fork branch must not silently re-attach onto a dead record; it routes
+# through the stalled-successor machinery (same index, C.4, monitoring
+# takeover). Live records keep today's re-attach behavior byte-identical.
+
+
+def test_resume_dead_old_sid_revives_stalled_successor(cc_home, capsys,
+                                                       tmp_path, monkeypatch):
+    # Zombie A: lastSessionId == the rotated-away conversation while the
+    # project carries a stalled BOOTSTRAPPING successor. The live
+    # conversation anchors to the chain tip (same index, no bump), gets the
+    # C.4 handoff, and leaves no duplicate sid behind.
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    old_sid = state.load_state(key, nnn)["session_id"]
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id=old_sid,
+                                            source="resume")) == 0
+    out = _stdout_json(capsys)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("CONTINUITY BOOTSTRAP: you are spike-repo-002, "
+                          "continuing spike-repo-001. VALIDATION: OK")
+    pref = _project_record(repo)
+    assert pref["counter"] == 2                     # NO index minted
+    rec2 = state.load_state(key, 2)
+    assert rec2["session_id"] == old_sid            # anchored to the tip
+    assert rec2["state"] == "ACTIVE"                # monitoring takes over
+    assert state.load_state(key, 1)["state"] == "ROTATED"
+    assert state.load_state(key, 1)["session_id"] is None  # no duplicate sid
+    starts = [e for e in ledger.read(paths.session_dir(key, 2))
+              if e["type"] == "session_start"]
+    assert starts[-1]["reused"] and starts[-1]["source"] == "resume"
+
+
+def test_resume_dead_successor_own_sid_redelivers_c4(cc_home, capsys,
+                                                     tmp_path, monkeypatch):
+    # Zombie B (a1b1e9bf): the stalled successor's OWN dead sid is
+    # auto-resumed. Same index, sid unchanged, C.4 (re)delivered, ACTIVE.
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-stuck",
+                                            source="resume")) == 0
+    out = _stdout_json(capsys)
+    assert "VALIDATION: OK" in out["hookSpecificOutput"]["additionalContext"]
+    pref = _project_record(repo)
+    assert pref["counter"] == 2                     # no re-registration
+    rec2 = state.load_state(key, 2)
+    assert rec2["session_id"] == "sid-stuck"        # same sid re-announced
+    assert rec2["state"] == "ACTIVE"
+    starts = [e for e in ledger.read(paths.session_dir(key, 2))
+              if e["type"] == "session_start"]
+    assert starts[-1]["reused"]
+
+
+def test_fork_dead_successor_own_sid_redelivers_c4(cc_home, capsys,
+                                                   tmp_path, monkeypatch):
+    # Same contract for source=fork (CC forks share the dead-sid exposure).
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-stuck",
+                                            source="fork")) == 0
+    out = _stdout_json(capsys)
+    assert "VALIDATION: OK" in out["hookSpecificOutput"]["additionalContext"]
+    assert state.load_state(key, 2)["state"] == "ACTIVE"
+
+
+def test_resume_live_successor_not_revived(cc_home, capsys, tmp_path,
+                                           monkeypatch):
+    # Guard (regression vector 1): a LIVE successor (fresh metric) resumed
+    # by its own sid keeps today's silent re-attach: no C.4 re-delivery, no
+    # state change, no extra session_start entry.
+    from cc_continuity import bootstrap
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=False)      # rotator-driven, alive
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-stuck",
+                                            source="resume")) == 0
+    assert _stdout_json(capsys) is None
+    rec2 = state.load_state(key, 2)
+    assert rec2["state"] == "BOOTSTRAPPING"
+    starts = [e for e in ledger.read(paths.session_dir(key, 2))
+              if e["type"] == "session_start"]
+    assert len(starts) == 1                         # only the claim entry
+
+
+def test_resume_young_stalled_successor_left_alone(cc_home, capsys, tmp_path):
+    # Guard (regression vector 3): a just-spawned BOOTSTRAPPING successor
+    # (production REUSE_MIN_AGE_S) may be mid-rotation; a dead-sid resume
+    # must not steal it.
+    repo = make_repo(tmp_path)
+    key, nnn = _verified_session(repo)
+    _stuck_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id="sid-stuck",
+                                            source="resume")) == 0
+    assert _stdout_json(capsys) is None
+    assert state.load_state(key, 2)["state"] == "BOOTSTRAPPING"
+
+
+def test_resume_terminal_without_successor_stays_reattach(cc_home, capsys,
+                                                          tmp_path):
+    # Documented residual: a terminal record with no stalled successor
+    # (admin close_dead shape, not a rotation) keeps today's re-attach-only
+    # behavior; no registration, no index minted.
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    state.close_dead(key, nnn, "test")
+    capsys.readouterr()
+    assert run_hook("SessionStart", payload("SessionStart", repo,
+                                            session_id=SID,
+                                            source="resume")) == 0
+    assert _stdout_json(capsys) is None
+    assert _project_record(repo)["counter"] == 1
+    assert state.load_state(key, nnn)["state"] == "ROTATED"
+
+
 # ---------- blink_watch spawn wiring (live bug 2026-11-07)
 
 

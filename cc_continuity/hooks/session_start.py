@@ -82,7 +82,17 @@ def handle(ctx: HookContext) -> dict | None:
         # the field stays stale (dead pane) and every nudge/digest
         # CAPTURE_FAILED while the session looks fine.
         if ctx.session is not None:
-            # Re-attach only: no registration, no state change, no output.
+            # LIVE conversations: re-attach only (no registration, no state
+            # change, no output). Issue #42: when the resolved record's sid
+            # is DEAD (native auto-resume of a dead lastSessionId) the
+            # conversation instead anchors to the stalled chain tip and
+            # (re)receives the C.4 handoff.
+            revived = _revive_dead_anchor(ctx)
+            if revived is not None:
+                rkey, rnnn, text = revived
+                bootstrap.record_tmux_session(rkey, rnnn)
+                _spawn_watch(ctx, key=rkey, nnn=rnnn)
+                return session_start_output(text)
             bootstrap.record_tmux_session(ctx.session["project_key"],
                                           int(ctx.session["nnn"]))
             _spawn_watch(ctx)
@@ -157,6 +167,47 @@ def handle(ctx: HookContext) -> dict | None:
     except Exception:
         _step("startup", "failed", t0)
         log_error(f"SessionStart(startup): registration failed for {session_id}")
+        return None
+
+
+def _revive_dead_anchor(ctx: HookContext) -> "tuple[str, int, str] | None":
+    """Issue #42: CC's native auto-resume can bring back a DEAD conversation
+    (dead lastSessionId after a rotation edge). Re-attaching such a
+    conversation to its dead record leaves it unmonitored forever; instead,
+    anchor it to the stalled BOOTSTRAPPING chain tip (the same-index reuse
+    guards of ``try_reuse_stalled``, including its age gate: a rotator-
+    driven young successor is never stolen, a fresh metric is left alone)
+    and (re)deliver C.4. Self-resume has no rotator to drive the successor
+    home, so the legal BOOTSTRAPPING -> ACTIVE edge hands it to the normal
+    monitoring. Returns ``(key, nnn, bootstrap_text)`` or None (= today's
+    re-attach behavior; every failure path fails open to None).
+    """
+    try:
+        sid = ctx.payload.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            return None
+        if not statusline.is_stale(statusline.read_metric(sid)):
+            return None  # live conversation: ordinary re-attach
+        key = ctx.session["project_key"]
+        old_nnn = int(ctx.session["nnn"])
+        with lock.held(key):
+            res = bootstrap.try_reuse_stalled(
+                key, new_session_id=sid, cfg=ctx.cfg,
+                source="fork" if ctx.event == "fork" else "resume",
+                allow_same_sid=True)
+            if res is None:
+                return None
+            rnnn = int(res["new_nnn"])
+            if rnnn != old_nnn:
+                # The terminal record must not keep claiming the live sid
+                # (find_session_by_id would become ambiguous).
+                state.update_fields_unlocked(key, old_nnn, session_id=None)
+        try:
+            state.transition(key, rnnn, "ACTIVE")
+        except state.InvalidTransitionError:
+            pass
+        return key, rnnn, res["bootstrap_text"]
+    except Exception:
         return None
 
 

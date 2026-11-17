@@ -396,3 +396,59 @@ def test_write_started_marker(cc_home):
     p = bootstrap.write_started("sid-marker")
     assert p == paths.runtime_dir() / "sid-marker.started"
     assert p.is_file()
+
+
+# --- issue #42: stalled-successor re-announce (same-sid auto-resume) -------
+# CC native auto-resume can bring back the stalled successor's OWN dead sid;
+# try_reuse_stalled refuses that (sid equality), so the hook opt-in
+# (allow_same_sid=True) re-announces: same index, sid unchanged, C.4 again.
+
+
+def _stalled_successor(repo, key, nnn):
+    """001 -> ROTATING, claim into 002 BOOTSTRAPPING (sid 'sid-stuck')."""
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    cfg = config.load_config(cwd=repo)
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id="sid-stuck", cfg=cfg,
+                                  source="startup")
+    assert res is not None
+    return res
+
+
+def test_try_reuse_stalled_same_sid_refused_by_default(cc_home, tmp_path,
+                                                       monkeypatch):
+    from hookutil import set_metric
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    _stalled_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    cfg = config.load_config(cwd=repo)
+    with lock.held(key):
+        assert bootstrap.try_reuse_stalled(key, new_session_id="sid-stuck",
+                                           cfg=cfg, source="startup") is None
+
+
+def test_try_reuse_stalled_same_sid_optin_reannounces(cc_home, tmp_path,
+                                                      monkeypatch):
+    from hookutil import set_metric
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    _stalled_successor(repo, key, nnn)
+    set_metric(0.0, "sid-stuck", stale=True)
+    cfg = config.load_config(cwd=repo)
+    with lock.held(key):
+        res = bootstrap.try_reuse_stalled(key, new_session_id="sid-stuck",
+                                          cfg=cfg, source="resume",
+                                          allow_same_sid=True)
+    assert res is not None and res["reused"]
+    assert res["new_name"] == "spike-repo-002"
+    rec2 = state.load_state(key, 2)
+    assert rec2["session_id"] == "sid-stuck"        # unchanged (own sid)
+    assert rec2["state"] == "BOOTSTRAPPING"         # hook advances ACTIVE
+    assert "CONTINUITY BOOTSTRAP" in res["bootstrap_text"]
+    pref = json.loads((paths.project_dir(key) / "project.json")
+                      .read_text(encoding="utf-8"))
+    assert pref["counter"] == 2                     # no index minted
+    starts = [e for e in ledger.read(paths.session_dir(key, 2))
+              if e["type"] == "session_start"]
+    assert starts[-1]["reused"] and starts[-1]["source"] == "resume"

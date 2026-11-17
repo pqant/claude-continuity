@@ -304,7 +304,8 @@ REUSE_MIN_AGE_S = 60.0
 
 
 def try_reuse_stalled(key: str, *, new_session_id: str, cfg: dict,
-                      source: str = "startup") -> dict | None:
+                      source: str = "startup",
+                      allow_same_sid: bool = False) -> dict | None:
     """Re-attach a fresh startup to a STALLED successor — same index.
 
     The 2026-11-03 connector incident: the rotator's RESUME Enter was
@@ -317,6 +318,10 @@ def try_reuse_stalled(key: str, *, new_session_id: str, cfg: dict,
     ``successor`` unset, older than ``REUSE_MIN_AGE_S``, and its sid must be
     dead (statusline metric absent/stale — never reported / long silent). A
     live successor (fresh metric) is left alone; a plain register follows.
+
+    ``allow_same_sid`` (issue #42): CC's native auto-resume can bring back
+    the stalled successor's OWN dead sid; with the opt-in the sid-equality
+    refusal is lifted and the record is re-announced (sid unchanged).
 
     On success the record keeps its nnn/name; only the sid changes (state +
     project.json), one ``session_start`` ledger entry is appended, and the
@@ -336,7 +341,8 @@ def try_reuse_stalled(key: str, *, new_session_id: str, cfg: dict,
     rec = state.load_state(key, nnn)
     if (rec is None or rec["state"] != "BOOTSTRAPPING"
             or rec.get("successor")
-            or rec.get("session_id") == new_session_id):
+            or (rec.get("session_id") == new_session_id
+                and not allow_same_sid)):
         return None
     try:
         created = datetime.fromisoformat(rec["created"])
@@ -351,10 +357,12 @@ def try_reuse_stalled(key: str, *, new_session_id: str, cfg: dict,
     if not pred_name or pred is None:
         return None
     old_nnn = int(pred["nnn"])
-    # Re-attach: same nnn/name, new sid everywhere.
-    state.update_fields_unlocked(key, nnn, session_id=new_session_id)
-    last["session_id"] = new_session_id
-    atomic.atomic_write_json(pfile, pref)
+    # Re-attach: same nnn/name, new sid everywhere. A re-announce (issue
+    # #42, own sid) has nothing to move: same guards, C.4 rebuilt below.
+    if rec.get("session_id") != new_session_id:
+        state.update_fields_unlocked(key, nnn, session_id=new_session_id)
+        last["session_id"] = new_session_id
+        atomic.atomic_write_json(pfile, pref)
     cp_dir = paths.session_dir(key, old_nnn) / "checkpoint"
     root = Path(pref["root"])
     status, details = validate.validate_checkpoint(cp_dir, cfg, root=root)
