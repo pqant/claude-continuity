@@ -4,6 +4,17 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.43] - 2026-11-17
+
+### Added
+
+- `cc-continuity log [blink|errors]` tails the root `logs/` files read-only:
+  newest last, default 20 lines, `--lines N` to resize, `--follow` to keep
+  streaming appends. Stamps render in local time: explicit-offset UTC stamps
+  (`errors.log`) are converted while naive local stamps (`blink.log`, written
+  by `time.strftime`) and untimestamped traceback continuation lines pass
+  through byte-identical, so nothing shifts twice (issue #35).
+
 ## [0.3.42] - 2026-11-15
 
 ### Added
