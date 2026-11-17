@@ -105,11 +105,14 @@ def test_mixed_text_and_image_appends_chip():
 
 
 def test_folded_chips_merge_galleries():
+    # Two GENUINE back-to-back pastes (distinct timestamps, issue #72
+    # realism) merge their galleries; an identical-timestamp pair would be
+    # one paste's echo and folds instead.
     blocks = transcript.parse_conversation([
         _rec("user", [{"type": "text", "text": "[Image: source: /a]"},
-                      _img(data="QQ==")]),
+                      _img(data="QQ==")], ts="2026-11-17T10:00:01.100Z"),
         _rec("user", [{"type": "text", "text": "[Image: original 10x10]"},
-                      _img(data="Qg==")])])
+                      _img(data="Qg==")], ts="2026-11-17T10:00:09.200Z")])
     assert [t for _, t, _, _ in blocks] == ["🖼 image"]
     assert list(blocks[0][3]) == ["data:image/png;base64,QQ==",
                                   "data:image/png;base64,Qg=="]
@@ -306,14 +309,71 @@ def test_empty_image_record_folds_into_preceding_gallery(tmp_path):
     assert list(blocks[0][3]) == ["data:image/png;base64,QUJD"]
 
 
-def test_recoverable_sibling_keeps_its_own_chip(tmp_path):
+def test_recoverable_sibling_of_same_paste_folds(tmp_path):
+    # Issue #72: the sibling is CC's echo of the SAME paste - connector-255
+    # proved both records carry the identical timestamp string. While the
+    # image cache is still on disk the sibling embeds the same images and
+    # every thumbnail rendered twice in a second User block; the echo must
+    # fold just like the pruned sibling does.
     png = _png(tmp_path)
     blocks = transcript.parse_conversation([
-        _rec("user", [{"type": "text", "text": "metin oncesi"}, _img(data="QQ==")]),
-        _rec("user", f"[Image: source: {png}]")])
-    assert [t for _, t, _, _ in blocks] == ["metin oncesi", "🖼 image"]
+        _rec("user", [{"type": "text", "text": "metin oncesi"}, _img(data="QQ==")],
+             ts="2026-11-17T10:49:03.973Z"),
+        _rec("user", f"[Image: source: {png}]",
+             ts="2026-11-17T10:49:03.973Z")])
+    assert [(r, t) for r, t, _, _ in blocks] == [("user", "metin oncesi")]
     assert list(blocks[0][3]) == ["data:image/png;base64,QQ=="]
+
+
+def test_sibling_with_different_timestamp_keeps_its_own_chip(tmp_path):
+    # A genuine second paste carries a later timestamp: even with the same
+    # image count it is NOT an echo and keeps its own chip.
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "first paste"}, _img(data="QQ==")],
+             ts="2026-11-17T10:49:03.973Z"),
+        _rec("user", f"[Image: source: {png}]",
+             ts="2026-11-17T10:49:41.120Z")])
+    assert [t for _, t, _, _ in blocks] == ["first paste", "🖼 image"]
     assert list(blocks[1][3]) == [f"data:image/png;base64,{PNG1x1}"]
+
+
+def test_same_timestamp_different_count_keeps_its_own_chip(tmp_path):
+    # Count guard: an adjacent recoverable chip with a DIFFERENT image
+    # count is not the echo of the gallery next to it, even at the same
+    # timestamp; it survives as its own chip.
+    png = _png(tmp_path)
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "two images here"},
+                      _img(data="QQ=="), _img(data="Qg==")],
+             ts="2026-11-17T10:49:03.973Z"),
+        _rec("user", f"[Image: source: {png}]",
+             ts="2026-11-17T10:49:03.973Z")])
+    assert [t for _, t, _, _ in blocks] == ["two images here", "🖼 image"]
+    assert list(blocks[1][3]) == [f"data:image/png;base64,{PNG1x1}"]
+
+
+def test_mixed_text_base64_record_folds_sibling_echo(tmp_path):
+    # connector-255 reproduction: text + 3 base64 images, then the isMeta
+    # sibling (identical timestamp) repeating the same three images as
+    # [Image: source:] lines while the cache exists. One User block,
+    # original gallery intact, no duplicate thumbnails.
+    a = _png(tmp_path, "a.png")
+    b = _png(tmp_path, "b.png")
+    c = _png(tmp_path, "c.png")
+    ts = "2026-11-17T10:49:03.973Z"
+    blocks = transcript.parse_conversation([
+        _rec("user", [{"type": "text", "text": "[Image #6] fix the readme now"},
+                      _img(data="QQ=="), _img(data="Qg=="), _img(data="Qw==")],
+             ts=ts),
+        _rec("user", f"[Image: source: {a}]\n[Image: source: {b}]\n"
+                     f"[Image: source: {c}]", ts=ts)])
+    assert [(r, t) for r, t, _, _ in blocks] == [
+        ("user", "[Image #6] fix the readme now")]
+    assert list(blocks[0][3]) == [
+        "data:image/png;base64,QQ==",
+        "data:image/png;base64,Qg==",
+        "data:image/png;base64,Qw=="]
 
 
 def test_dead_chip_survives_when_no_gallery_to_fold_into():

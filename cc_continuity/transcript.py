@@ -279,6 +279,16 @@ def parse_conversation(lines: list[str]) -> list[Block]:
                 # next to the live gallery is worse than folding it in
                 # (issue #59).
                 continue
+            rec_ts = rec.get("timestamp")
+            if (imgs and out and out[-1].images
+                    and isinstance(rec_ts, str)
+                    and out[-1].ts == rec_ts
+                    and len(out[-1].images) == len(imgs)):
+                # While the image cache is on disk, CC's isMeta sibling of
+                # a paste embeds the very same images the base64 record
+                # already showed. Same timestamp plus equal image count
+                # marks the same paste, not a second one (issue #72).
+                continue
             text = _IMAGE_CHIP
             if out and out[-1].text == _IMAGE_CHIP:
                 # Fold the run: merge the galleries into one chip.
