@@ -4,6 +4,21 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.46] - 2026-11-17
+
+### Added
+
+- A second badges row under the title covers the package side: PyPI
+  version and monthly-download counters, the MIT license, live CI
+  status, supported Python versions and a good-first-issues counter
+  that links to the labeled contributor on-ramp (issue #74).
+
+### Changed
+
+- pyproject.toml now declares its PyPI classifiers (Development
+  Status, MIT license, Python 3.11/3.12/3.13), which feeds the
+  Python-versions badge and enriches the PyPI project page.
+
 ## [0.3.45] - 2026-11-17
 
 ### Added
