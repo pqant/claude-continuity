@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import atomic, blink, config, ledger, naming, paths, transcript
@@ -376,6 +377,92 @@ def find_session_by_id(session_id: str | None) -> dict | None:
     return None
 
 
+#: Issue #71: states where the pane's tracked session still consumes the
+#: metric (BOOTSTRAPPING waiting for its claim, ACTIVE watched by gates).
+_RETARGET_STATES = frozenset({"BOOTSTRAPPING", "ACTIVE"})
+
+
+def _pane_binding():
+    """``(path, pane)`` of this process's pane binding, or ``(None, None)``."""
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if not pane:
+        return None, None
+    safe = re.sub(r"[^A-Za-z0-9%_.-]", "_", pane)[:64]
+    return paths.runtime_dir() / "panes" / f"pane-{safe}.json", pane
+
+
+def stamp_pane_binding(session_id: object) -> None:
+    """Record which sid the current pane's hooks run as (issue #71).
+
+    After a dead-sid auto-resume (#42) CC's status line payload keeps the
+    abandoned startup sid while the hooks keep firing as the resumed
+    conversation's sid. ``hooks.common.run_event`` stamps this binding on
+    every hook event; ``run`` retargets the metric onto it so the gate
+    stops starving. Pane-scoped (TMUX_PANE), so panes can never hijack
+    each other's metric. Fail-open (the hook never notices).
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return
+    path, pane = _pane_binding()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic.atomic_write_json(path, {"pane": pane,
+                                        "session_id": session_id,
+                                        "ts": time.time()})
+    except OSError:
+        pass
+
+
+def _pane_bound_sid(payload_sid):
+    """The bound sid to retarget this render's metric to, or None.
+
+    Redirect only when ALL of: we are in a tmux pane, the binding is fresh
+    (< STALE_SECONDS, same gate as metrics), it names a different sid, and
+    the bound record is BOOTSTRAPPING/ACTIVE and not off. The payload
+    record's state is deliberately NOT a gate: a plain startup registers
+    in ACTIVE (Phase 5), so the abandoned zombie record looks healthy
+    locally - the pane's hooks are the trusted authority on which
+    conversation is live (CC renders the status line with the stale sid,
+    issue #42 evidence). The binding must not predate the payload record's
+    creation (same-pane sequential claude must not inherit the previous
+    session's binding). Any doubt -> None -> today's byte-identical write.
+    """
+    if not payload_sid:
+        return None
+    path, _pane = _pane_binding()
+    if path is None:
+        return None
+    try:
+        binding = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(binding, dict):
+        return None
+    sid = binding.get("session_id")
+    ts = binding.get("ts")
+    if (not isinstance(sid, str) or not sid or sid == payload_sid
+            or not isinstance(ts, (int, float)) or isinstance(ts, bool)
+            or time.time() - ts > STALE_SECONDS):
+        return None
+    bound = find_session_by_id(sid)
+    if (not isinstance(bound, dict) or bound.get("off")
+            or bound.get("state") not in _RETARGET_STATES):
+        return None
+    payload_rec = find_session_by_id(payload_sid)
+    if isinstance(payload_rec, dict):
+        created = payload_rec.get("created")
+        if isinstance(created, str):
+            try:
+                created_ts = datetime.fromisoformat(created).timestamp()
+            except ValueError:
+                return None  # unparseable: stay on today's behavior
+            if ts < created_ts:
+                return None
+    return sid
+
+
 def render_segment(ratio: float | None, record: dict | None,
                    enabled: bool, blocked: str | None = None,
                    *, ansi: bool = True,
@@ -654,10 +741,17 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     if enabled:
         window = cfg.get("window_tokens") or 0
         metric = extract_metric(payload, window)
+        # issue #71: the pane's hook-stamped binding names the sid the
+        # session is actually tracked under; a zombie render (abandoned
+        # startup sid) must write under it, else the gate starves.
+        bound = (_pane_bound_sid(payload.get("session_id"))
+                 if payload is not None else None)
         if metric is not None:
+            if bound is not None:
+                metric = dict(metric, session_id=bound)
             write_metric(metric)
         if payload is not None:
-            record = find_session_by_id(payload.get("session_id"))
+            record = find_session_by_id(bound or payload.get("session_id"))
 
     ratio = metric["ratio"] if metric is not None else None
     blocked = None

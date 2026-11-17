@@ -240,3 +240,34 @@ def test_notify_claimed_rows_1_and_6(cc_home, monkeypatch):
            "validation": "MISMATCH"}
     common.notify_claimed(dict(notify.config.DEFAULTS), "k1", res)
     assert fired == ["session_started"]
+
+
+# ------------------------------------------ issue #71: pane binding stamp
+
+
+def test_hook_stamps_pane_binding(cc_home, tmp_path, monkeypatch):
+    from hookutil import SID, payload, run_hook
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    run_hook("PostToolUse", payload("PostToolUse", repo))
+    binding = json.loads(
+        (cc_home / "runtime" / "panes" / "pane-%7.json").read_text(
+            encoding="utf-8"))
+    assert binding["session_id"] == SID and binding["pane"] == "%7"
+    assert isinstance(binding["ts"], (int, float))
+
+
+def test_disabled_hook_stamps_no_binding(cc_home, tmp_path, monkeypatch):
+    from hookutil import payload, run_hook
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setenv("CC_CONTINUITY", "0")
+    run_hook("PostToolUse", payload("PostToolUse", repo))
+    assert not (cc_home / "runtime" / "panes" / "pane-%7.json").exists()
+
+
+def test_no_tmux_no_binding(cc_home, tmp_path):
+    from hookutil import payload, run_hook
+    repo = make_repo(tmp_path)
+    run_hook("PostToolUse", payload("PostToolUse", repo))
+    assert not (cc_home / "runtime" / "panes" / "pane-%7.json").exists()

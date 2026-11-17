@@ -1485,3 +1485,135 @@ def test_run_unreadable_transcript_omits_prev_task(cc_home):
         json.dumps(_payload(transcript_path="/nonexistent/x.jsonl")).encode(),
         _cfg(statusline_ansi=False, turn_clock=True))
     assert line == "◆ 9% Active Usage"
+
+
+# ------------------------------- issue #71: pane-bound metric retargeting
+#
+# Zombie pane (the #42 follow-up): after a dead-sid auto-resume the
+# statusline payload keeps the ABANDONED startup sid while the hooks keep
+# firing as the resumed conversation's sid; the hook entry stamps a
+# ``runtime/panes/pane-<TMUX_PANE>.json`` binding and the metric must be
+# written under the bound sid, else the gate starves (no reaction).
+
+SID_BOUND = "11111111-7777-8888-9999-000000000071"
+
+
+def _write_binding(pane, session_id, ts):
+    d = paths.runtime_dir() / "panes"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"pane-{pane}.json").write_text(
+        json.dumps({"pane": pane, "session_id": session_id, "ts": ts}),
+        encoding="utf-8")
+
+
+def _zombie_payload(repo, session_id):
+    return {
+        "session_id": session_id,
+        "cwd": str(repo),
+        "context_window": {
+            "context_window_size": 262144,
+            "current_usage": {
+                "input_tokens": 131072,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+        },
+    }
+
+
+def test_run_redirects_metric_to_pane_bound_sid(cc_home, tmp_path, monkeypatch):
+    from cc_continuity import ledger
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, _n_start = register_session(repo)  # abandoned startup record
+    _key, n_bound = register_session(repo, SID_BOUND)
+    state.transition(key, n_bound, "ACTIVE")
+    # the blocked marker sits on the BOUND session only: the rendered line
+    # proves the whole render switched to the bound record, not just the file.
+    ledger.append(paths.session_dir(key, n_bound),
+                  {"type": "needs_human", "reason": "drop db?"})
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    line = statusline.run(
+        json.dumps(_zombie_payload(repo, SID)).encode(),
+        dict(config.DEFAULTS, statusline_ansi=False))
+    assert line == "◆ 50% Active Usage ⛔ BLOCKED"
+    assert (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID}.json").exists()
+
+
+def test_run_binding_same_sid_writes_under_payload_sid(cc_home, tmp_path,
+                                                       monkeypatch):
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    register_session(repo)
+    _write_binding("%1", SID, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID}.json").exists()
+
+
+def test_run_stale_binding_does_not_redirect(cc_home, tmp_path, monkeypatch):
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, _ = register_session(repo)
+    _k2, n_bound = register_session(repo, SID_BOUND)
+    state.transition(key, n_bound, "ACTIVE")
+    _write_binding("%1", SID_BOUND, time.time() - 601.0)
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+
+
+def test_run_binding_terminal_target_does_not_redirect(cc_home, tmp_path,
+                                                       monkeypatch):
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, _ = register_session(repo)
+    _k2, n_bound = register_session(repo, SID_BOUND)
+    state.close_dead(key, n_bound, "test")
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+
+
+def test_run_binding_to_bootstrapping_target_redirects(cc_home, tmp_path,
+                                                        monkeypatch):
+    # plain startup registers in ACTIVE (Phase 5), so the payload record's
+    # state is NOT the zombie signature - the pane binding is. A not-yet
+    # claimed BOOTSTRAPPING target (the F2 shape) must accept the metric.
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    register_session(repo)                       # payload record: ACTIVE
+    register_session(repo, SID_BOUND)            # target: BOOTSTRAPPING
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID}.json").exists()
+
+
+def test_run_binding_from_previous_session_does_not_redirect(cc_home,
+                                                             tmp_path,
+                                                             monkeypatch):
+    # same-pane sequential claude: the fresh BOOTSTRAPPING record must not
+    # inherit the previous session's (still fresh) binding.
+    from hookutil import SID, make_repo, register_session
+    repo = make_repo(tmp_path)
+    key, _ = register_session(repo)
+    _k2, n_bound = register_session(repo, SID_BOUND)
+    state.transition(key, n_bound, "ACTIVE")
+    _write_binding("%1", SID_BOUND, time.time() - 30.0)  # predates the record
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()

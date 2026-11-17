@@ -156,6 +156,9 @@ def run_event(event: str, text: str | bytes, handlers: dict[str, Handler]) -> in
         if _is_disabled(cfg, session):
             return 0
         _export_session_env(payload.get("session_id"))
+        # issue #71: tell the status line which sid THIS pane's hooks run
+        # as (zombie panes keep rendering under the abandoned startup sid).
+        statusline.stamp_pane_binding(payload.get("session_id"))
         handler = handlers.get(event)
         if handler is None:
             return 0
