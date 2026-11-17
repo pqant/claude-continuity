@@ -4,6 +4,30 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.40] - 2026-11-16
+
+### Fixed
+
+- A plain `claude` launch that auto-resumes a DEAD conversation
+  after a rotation no longer runs unmonitored (issue #42).
+  Claude Code remembers the last opened conversation per project
+  (lastSessionId); when that conversation is the rotated-away
+  one (or the stalled successor itself, the dead-sid shape), the
+  SessionStart resume/fork branch used to re-attach it silently
+  to the dead record: no ratio movement from the terminal state,
+  the C.4 handoff never delivered, and `request-rotation` from
+  such a conversation refused with "already past". Now, when the
+  resumed sid is not live (`statusline.is_stale`), the hook
+  routes the conversation through the stalled-successor reuse
+  machinery (same guards as the 2026-11-03 restart reuse,
+  including its age gate): the live conversation anchors to the
+  chain tip under the SAME index, receives the C.4 bootstrap
+  text, and advances BOOTSTRAPPING to ACTIVE so the normal
+  monitoring drives rotation. A fresh metric keeps the ordinary
+  re-attach path byte-identical, and every failure path falls
+  back to today's behavior.
+
+
 ## [0.3.39] - 2026-11-16
 
 ### Changed
