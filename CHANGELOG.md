@@ -4,6 +4,19 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.44] - 2026-11-17
+
+### Fixed
+
+- A pasted image no longer shows up twice in transcript exports. Claude
+  Code writes one paste as two records (the base64 record plus an
+  `isMeta` sibling carrying the same `[Image: source: ...]` lines); while
+  the image cache was still on disk the sibling embedded the very same
+  images and opened as a second User block repeating the whole gallery.
+  A sibling whose timestamp and image count both match the block before
+  it is the same paste and is now folded away; a genuine second paste
+  carries its own timestamp and keeps its own gallery (issue #72).
+
 ## [0.3.43] - 2026-11-17
 
 ### Added
