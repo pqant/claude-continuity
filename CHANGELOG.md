@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.48] - 2026-11-18
+
+### Added
+
+- `doctor` gained a `config-sanity` check: the rotation gate order `0 < warn_ratio <= rotate_ratio <= hard_ratio < 1`, a plausible `window_tokens` (>= 32768) and an http(s) `notify_endpoint`. A typo like warn 0.80 / rotate 0.75 used to invert the gate silently and rotations fired late or never; the check is warn-only (the values stay the user's call) and names the offending values in its detail (issue #36).
+
 ## [0.3.47] - 2026-11-18
 
 ### Added
