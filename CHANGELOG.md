@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.47] - 2026-11-18
+
+### Added
+
+- `history --json` prints the session chain as one JSON array with stable keys (`nnn`, `name`, `session_id`, `created`, `state`) for machine consumption; the state is read from `sessions/<nnn>/state.json` with the same fallback the status rotation line uses, a project without a record prints `[]`, and an unreadable state is reported as null while the default human output stays unchanged (issue #38).
+
 ## [0.3.46] - 2026-11-17
 
 ### Added
