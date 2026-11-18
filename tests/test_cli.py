@@ -122,6 +122,69 @@ def test_history_n_limits_output(cc_home, tmp_path, monkeypatch, capsys):
     assert "spike-repo-001" not in out
 
 
+# --json (issue #38): the session chain as one JSON array on stdout,
+# stable keys (nnn, name, session_id, created, state); the state reads
+# sessions/<nnn>/state.json exactly like the #32 status fallback.
+
+
+def test_history_json_prints_chain_array_with_state(cc_home, tmp_path,
+                                                    monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    sdir = paths.session_dir(key, nnn)
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "state.json").write_text(json.dumps({"state": "ACTIVE"}),
+                                     encoding="utf-8")
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    # The real SessionStart hook seeds state.json; drop it so session 2
+    # exercises the "no state on disk yet" path.
+    (paths.session_dir(key2, nnn2) / "state.json").unlink(missing_ok=True)
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["nnn"] for r in rows] == [1, 2]
+    assert set(rows[0]) == {"nnn", "name", "session_id", "created", "state"}
+    assert rows[0]["state"] == "ACTIVE"
+    assert rows[0]["session_id"] == SID
+    assert rows[0]["name"] == "spike-repo-001"
+    assert rows[1]["state"] is None
+    assert rows[1]["name"] == "spike-repo-002"
+
+
+def test_history_json_empty_array_without_project(cc_home, tmp_path,
+                                                  monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == []
+    assert captured.err == ""
+
+
+def test_history_json_honors_n(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    register_session(repo, session_id=SID)
+    register_session(repo, session_id="22222222-2222-2222-2222-222222222222")
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "--json", "-n", "1"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["name"] for r in rows] == ["spike-repo-002"]
+
+
+def test_history_json_unreadable_state_is_none(cc_home, tmp_path,
+                                               monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo, session_id=SID)
+    sdir = paths.session_dir(key, nnn)
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "state.json").write_text("{broken", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["state"] is None
+
+
 # -------------------------------------------------------------------- ratio
 
 

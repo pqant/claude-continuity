@@ -67,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist = sub.add_parser("history", help="session chain for this project")
     p_hist.add_argument("-n", type=int, default=20,
                         help="show at most N most recent sessions (default 20)")
+    p_hist.add_argument("--json", action="store_true",
+                        help="print the session chain as one JSON array")
 
     p_ratio = sub.add_parser("ratio",
                              help="print the live context ratio of a project")
@@ -604,6 +606,9 @@ def cmd_history(args: argparse.Namespace) -> int:
     key = project.project_key_for_root(root)
     pfile = paths.project_dir(key) / "project.json"
     if not pfile.is_file():
+        if getattr(args, "json", False):
+            print("[]")
+            return 0
         print(f"No cc-continuity project for {root} "
               f"(a project registers itself on its first hook).")
         return 0
@@ -613,6 +618,25 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"cc-continuity history: unreadable project record: {e}",
               file=sys.stderr)
         return 1
+    if getattr(args, "json", False):
+        rows = []
+        for s in (record.get("sessions") or [])[-args.n:]:
+            if not isinstance(s, dict):
+                continue
+            nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
+            try:
+                srec = json.loads(
+                    (paths.session_dir(key, nnn)
+                     / "state.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                srec = None
+            st = (srec.get("state") if isinstance(srec, dict)
+                  and isinstance(srec.get("state"), str) else None)
+            rows.append({"nnn": nnn, "name": s.get("name"),
+                         "session_id": s.get("session_id"),
+                         "created": s.get("created"), "state": st})
+        print(json.dumps(rows))
+        return 0
     for s in (record.get("sessions") or [])[-args.n:]:
         nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
         print(f"{nnn:03d}  {s.get('name')}  {s.get('session_id')}  "
