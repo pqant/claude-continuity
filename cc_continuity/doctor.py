@@ -137,6 +137,37 @@ def run_doctor(home: Path, runner=subprocess.run,
         isinstance(cfg.get("window_tokens"), int)
     add("config", cfg_ok, str(cfg_path))
 
+    # 6a: config-sanity (issue #36): the rotation gate order plus window
+    #     and endpoint plausibility. Warn-only — the values are the user's
+    #     call, but an inverted gate must not pass silently.
+    from . import config  # local: doctor stays import-light
+    problems = []
+    ratios = {}
+    for k in ("warn_ratio", "rotate_ratio", "hard_ratio"):
+        v = (cfg or {}).get(k, config.DEFAULTS[k])
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            problems.append(f"{k}={v!r} (number expected)")
+            v = None
+        ratios[k] = v
+    if all(v is not None for v in ratios.values()):
+        if not (0 < ratios["warn_ratio"] <= ratios["rotate_ratio"]
+                <= ratios["hard_ratio"] < 1):
+            problems.append(
+                "gate order broken: " + " ".join(
+                    f"{k}={ratios[k]}" for k in
+                    ("warn_ratio", "rotate_ratio", "hard_ratio")))
+    win = (cfg or {}).get("window_tokens", config.DEFAULTS["window_tokens"])
+    if isinstance(win, bool) or not isinstance(win, int) or win < 32768:
+        problems.append(f"window_tokens={win} (>= 32768 expected)")
+    ep = (cfg or {}).get("notify_endpoint",
+                        config.DEFAULTS["notify_endpoint"])
+    if ep and not str(ep).startswith(("http://", "https://")):
+        problems.append(f"notify_endpoint={ep} (http(s) scheme expected)")
+    add("config-sanity", True,
+        "; ".join(problems) if problems else
+        "gate order, window and endpoint plausible",
+        warning=bool(problems))
+
     # 6b: curl (P9-P11 — notify needs it; install refuses without it)
     curl = which("curl")
     add("curl", curl is not None, curl or "not on PATH")

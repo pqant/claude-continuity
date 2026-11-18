@@ -134,6 +134,66 @@ def test_rotation_env_warns_when_env_missing(fake_home):
     assert c.ok and c.warning
 
 
+def _set_cfg(home, **kv):
+    cfg_path = home / ".claude-continuity" / "config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg.update(kv)
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+
+# config-sanity (issue #36): the gate order warn <= rotate <= hard and the
+# window/endpoint plausibility are warn-only - the values are the user's
+# call, but an inverted gate must not pass silently.
+
+
+def test_config_sanity_all_green_on_defaults(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "config-sanity")
+    assert c.ok and not c.warning
+
+
+def test_config_sanity_warns_on_inverted_thresholds(fake_home):
+    # the trial typo shape: warn above rotate fires rotations late or never
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    _set_cfg(h, warn_ratio=0.80, rotate_ratio=0.75, hard_ratio=0.85)
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "config-sanity")
+    assert c.ok and c.warning  # warn-only: the values are the user's call
+    assert "warn_ratio=0.8" in c.detail and "rotate_ratio=0.75" in c.detail
+
+
+def test_config_sanity_accepts_equal_thresholds(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    _set_cfg(h, warn_ratio=0.75, rotate_ratio=0.75, hard_ratio=0.75)
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "config-sanity")
+    assert c.ok and not c.warning
+
+
+def test_config_sanity_warns_on_implausible_window(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    _set_cfg(h, window_tokens=4096)
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "config-sanity")
+    assert c.ok and c.warning
+    assert "window_tokens=4096" in c.detail
+
+
+def test_config_sanity_warns_on_bad_endpoint_scheme(fake_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    _set_cfg(h, notify_enabled=False, notify_endpoint="ftp://example/x")
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "config-sanity")
+    assert c.ok and c.warning
+    assert "notify_endpoint" in c.detail
+
+
 def test_stale_lock_warns(fake_home, cc_home):
     h = fake_home
     install.install(h, window=262144, runner=FakeRun())
