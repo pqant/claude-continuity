@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.50] - 2026-11-19
+
+### Fixed
+
+- The Stop hook now consumes a handoff draft a WARNED session wrote on its own: after the c1 warning the model wrote `handoff.draft.md`, but the draft was only ever read in HANDOFF_REQUESTED, so the session idled at the prompt with a finished handoff on disk. A turn end in WARNED with a draft present now advances through the normal HANDOFF_REQUESTED path - a valid draft finalizes silently (no red Stop error line), an invalid one takes the existing guidance ladder; BOOTSTRAPPING/ACTIVE sessions never rotate on a self-written draft (issue #76).
+
 ## [0.3.49] - 2026-11-19
 
 ### Added
