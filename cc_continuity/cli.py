@@ -278,6 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="generic Stop/Notification hook push "
                                "(issue #7)")
     p_nt.add_argument("kind", choices=["stop", "notification"])
+    p_nt.add_argument("--dry-run", action="store_true",
+                      help="render the push, send nothing (issue #37)")
 
     p_ne = sub.add_parser("notify-emit",
                           help="emit one queued notify spec (internal, "
@@ -1001,15 +1003,7 @@ def cmd_signal(args: argparse.Namespace) -> int:
             event, fields = "task_done", {"summary": args.text}
         title, body, prio = notify.build_message(event, slug=slug, nnn=nnn,
                                                  **fields)
-        on = notify.enabled(cfg)
-        print("cc-continuity: dry run (nothing sent, nothing recorded)")
-        print(f"enabled: {on}"
-              + ("" if on else " — would NOT send (disabled or bad config)"))
-        print(f"title: {title}")
-        print(f"priority: {prio}")
-        print("body:")
-        for ln in body.splitlines():
-            print(f"  {ln}")
+        _print_dry_run(notify.enabled(cfg), title, body, prio)
         return 0
     if args.kind == "needs-human":
         sent = notify.safe_send(cfg, "needs_human", slug=slug, nnn=nnn,
@@ -1026,6 +1020,19 @@ def cmd_signal(args: argparse.Namespace) -> int:
           + (" — push sent" if sent else
              " — push not sent (disabled or failed; see errors.log)"))
     return 0
+
+
+def _print_dry_run(on: bool, title: str, body: str, prio: str) -> None:
+    """Shared --dry-run render (issue #30 contract): the exact push to
+    stdout, nothing sent, nothing recorded (re-used by notify #37)."""
+    print("cc-continuity: dry run (nothing sent, nothing recorded)")
+    print(f"enabled: {on}"
+          + ("" if on else " — would NOT send (disabled or bad config)"))
+    print(f"title: {title}")
+    print(f"priority: {prio}")
+    print("body:")
+    for ln in body.splitlines():
+        print(f"  {ln}")
 
 
 def cmd_notify(args: argparse.Namespace) -> int:
@@ -1048,7 +1055,7 @@ def cmd_notify(args: argparse.Namespace) -> int:
     if not isinstance(payload, dict):
         payload = {}
     cfg = config.load_config()
-    if not notify.enabled(cfg):
+    if not getattr(args, "dry_run", False) and not notify.enabled(cfg):
         return 0
     sid = (str(payload.get("session_id") or "").strip()
            or os.environ.get("CC_CONTINUITY_SESSION", "").strip())
@@ -1067,9 +1074,18 @@ def cmd_notify(args: argparse.Namespace) -> int:
             return 0
         digest = hashlib.sha1(msg.encode("utf-8")).hexdigest()[:10]
         bucket = int(time.time() // 60)  # B8: one push per minute
-        if notify.dedup_seen(f"notification:{sid}:{digest}:{bucket}"):
+        if (not getattr(args, "dry_run", False)
+                and notify.dedup_seen(f"notification:{sid}:{digest}:{bucket}")):
             return 0
         fields = {"msg": msg}
+    if getattr(args, "dry_run", False):
+        # issue #37: render the exact push; the minute bucket is NOT
+        # burned and no spec/spawn happens (same contract as #30).
+        title, body, prio = notify.build_message(
+            event, slug=slug, nnn=nnn, source="cli", sid=sid or None,
+            repo=cwd, **fields)
+        _print_dry_run(notify.enabled(cfg), title, body, prio)
+        return 0
     notify.safe_send(cfg, event, slug=slug, nnn=nnn, wait=False,
                      source="cli", sid=sid or None, repo=cwd, **fields)
     return 0
@@ -1532,8 +1548,24 @@ def cmd_watchdog(args: argparse.Namespace, home: Path | None = None,
     if action == "status":
         out = host.status("watchdog", home)
         print("watchdog: not loaded" if out is None else out.rstrip())
+        print(_watchdog_heartbeat_note())  # issue #37
         return 0
     return 2
+
+
+def _watchdog_heartbeat_note() -> str:
+    """Issue #37: age of the daemon's last full tick. ``watchdogd.
+    run_forever`` stamps ``runtime/watchdog-beat.json`` after every tick;
+    a missing or corrupt stamp reads as never."""
+    try:
+        data = json.loads((paths.runtime_dir() / "watchdog-beat.json")
+                          .read_text(encoding="utf-8"))
+        ts = datetime.fromisoformat(str(data["ts"])).timestamp()
+        return ("last heartbeat: "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))} "
+                f"({int(time.time() - ts)}s ago)")
+    except (OSError, ValueError, KeyError, TypeError):
+        return "last heartbeat: never"
 
 
 def _daemon_name(name: str) -> str:

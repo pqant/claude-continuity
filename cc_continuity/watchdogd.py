@@ -19,10 +19,11 @@ import signal
 import subprocess
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import ledger, notify, paths, power_plug, state
+from . import atomic, ledger, notify, paths, power_plug, state
 from .watchdog import (Episode, HealthState, build_nudge_text, classify,
                        exit_hang_due, find_claude_pid, find_exit_marker_ts,
                        frozen_nudge_due, nudge_action, parse_entry_ts,
@@ -1817,6 +1818,14 @@ def run_forever(cfg: dict, *, max_ticks: int | None = None,
                 line = {"ts": ctx.now, "error": "tick exception"}
             _log_line(line)
             ticks += 1
+            # issue #37: full-tick heartbeat stamp read by `watchdog
+            # status`; a stamp failure must never touch the loop.
+            try:
+                atomic.atomic_write_json(
+                    paths.runtime_dir() / "watchdog-beat.json",
+                    {"ts": datetime.now(timezone.utc).isoformat()})
+            except OSError:
+                pass
             if max_ticks is not None and ticks >= max_ticks:
                 return 0
         sleep(EXIT_HANG_POLL_S)

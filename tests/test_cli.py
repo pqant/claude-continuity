@@ -1176,6 +1176,122 @@ def test_cli_notify_emit_corrupt_exits_zero(cc_home, tmp_path):
     assert not bad.exists()  # corrupt spec consumed, not left in queue
 
 
+# ------------------------------------------------------- notify --dry-run (issue #37)
+
+
+def test_cli_notify_dry_run_renders_without_sending(cc_home, tmp_path,
+                                                    monkeypatch, capsys):
+    # issue #37: --dry-run renders the exact push and sends nothing
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    _notify_cfg(cc_home)
+    register_session(repo)
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID,
+               "transcript_path": str(repo / "t.jsonl"),
+               "cwd": str(repo)}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    sub = _NotifySub()
+    monkeypatch.setattr(notify, "subprocess", sub)
+    assert cli.main(["notify", "--dry-run", "stop"]) == 0
+    assert sub.popen_calls == [] and sub.run_calls == []  # nothing sent
+    out = capsys.readouterr().out
+    assert "cc-continuity: dry run (nothing sent, nothing recorded)" in out
+    assert "enabled: True" in out
+    assert "title: ✅ cc-continuity: Claude is done" in out
+    assert "priority: default" in out
+    assert "body:" in out
+
+
+def test_cli_notify_dry_run_reports_disabled(cc_home, tmp_path, monkeypatch,
+                                             capsys):
+    # disabled notify must be visible in the render instead of a silent no-op
+    repo = make_repo(tmp_path)
+    register_session(repo)  # default cc_home config: notify disabled
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID,
+               "transcript_path": str(repo / "t.jsonl"),
+               "cwd": str(repo)}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "--dry-run", "stop"]) == 0
+    out = capsys.readouterr().out
+    assert "enabled: False" in out
+    assert "would NOT send" in out
+    assert "title: ✅ cc-continuity: Claude is done" in out
+
+
+def test_cli_notify_dry_run_does_not_consume_dedup_bucket(cc_home, tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    # a dry run must not burn the one-push-per-minute bucket (#37)
+    from cc_continuity import notify
+    repo = make_repo(tmp_path)
+    _notify_cfg(cc_home)
+    register_session(repo)
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID, "message": "deploy? y/n", "cwd": str(repo)}
+    sub = _NotifySub()
+    monkeypatch.setattr(notify, "subprocess", sub)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "--dry-run", "notification"]) == 0
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "--dry-run", "notification"]) == 0
+    assert sub.popen_calls == []  # dry runs touched nothing
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "notification"]) == 0
+    assert len(sub.popen_calls) == 1  # real push still gets its bucket
+
+
+def test_cli_notify_dry_run_notification_without_message_is_silent(
+        cc_home, tmp_path, monkeypatch, capsys):
+    # a message-less notification payload stays a silent rc 0 even in a dry run
+    repo = make_repo(tmp_path)
+    _notify_cfg(cc_home)
+    register_session(repo)
+    monkeypatch.chdir(repo)
+    payload = {"session_id": SID, "cwd": str(repo)}  # no message field
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["notify", "--dry-run", "notification"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------- watchdog status heartbeat (issue #37)
+
+
+def test_watchdog_status_shows_last_heartbeat_age(cc_home, tmp_path,
+                                                  monkeypatch, capsys):
+    # issue #37: status reports the daemon's last full-tick heartbeat
+    from datetime import datetime, timezone
+    runner, _ = _fake_runner()
+    fixed = 1795000000.0
+    monkeypatch.setattr(time, "time", lambda: fixed)
+    beat_ts = datetime.fromtimestamp(fixed - 120, timezone.utc).isoformat()
+    (cc_home / "runtime").mkdir(parents=True, exist_ok=True)
+    (cc_home / "runtime" / "watchdog-beat.json").write_text(
+        json.dumps({"ts": beat_ts}), encoding="utf-8")
+    assert cli.cmd_watchdog(_wd_ns("status"), home=tmp_path,
+                            runner=runner) == 0
+    out = capsys.readouterr().out
+    expected = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(fixed - 120))
+    assert "state = running" in out
+    assert f"last heartbeat: {expected} (120s ago)" in out
+
+
+def test_watchdog_status_heartbeat_never_when_missing_or_corrupt(
+        cc_home, tmp_path, capsys):
+    # no stamp (fresh install) or a corrupt stamp both read as "never"
+    runner, _ = _fake_runner()
+    assert cli.cmd_watchdog(_wd_ns("status"), home=tmp_path,
+                            runner=runner) == 0
+    assert "last heartbeat: never" in capsys.readouterr().out
+    (cc_home / "runtime").mkdir(parents=True, exist_ok=True)
+    (cc_home / "runtime" / "watchdog-beat.json").write_text(
+        "{not json", encoding="utf-8")
+    assert cli.cmd_watchdog(_wd_ns("status"), home=tmp_path,
+                            runner=runner) == 0
+    assert "last heartbeat: never" in capsys.readouterr().out
+
+
 def test_notify_claimed_passes_prev_and_handoff(cc_home, tmp_path,
                                                 monkeypatch):
     from cc_continuity import notify
