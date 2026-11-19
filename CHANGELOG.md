@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.49] - 2026-11-19
+
+### Added
+
+- `notify stop|notification --dry-run` renders the exact push without sending or recording anything (the same contract as `signal --dry-run`): the `enabled` state (a disabled or misconfigured push is shown instead of a silent no-op), `title`, `priority` and the body, and the one-push-per-minute bucket stays untouched so a later real push still fires. `watchdog status` now reports the daemon's freshness with a `last heartbeat: <local time> (<N>s ago)` line, read from the stamp the watchdog writes after every full tick (`runtime/watchdog-beat.json`); a missing or corrupt stamp reads `last heartbeat: never` (issue #37).
+
 ## [0.3.48] - 2026-11-18
 
 ### Added
