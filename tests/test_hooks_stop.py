@@ -181,6 +181,79 @@ def test_rotation_pending_invalid_draft_blocks_c6(cc_home, capsys, tmp_path):
     assert rec["handoff_attempts"] == 1
 
 
+# ---------------- WARNED draft consumption (issue #76)
+#
+# A WARNED session (the c1 warning already reached the model through
+# PostToolUse) that wrote its own handoff draft must not idle at the
+# prompt with a finished handoff on disk: Stop consumes the draft at
+# turn end through the shared HANDOFF_REQUESTED path. Only WARNED
+# consumes - BOOTSTRAPPING/ACTIVE never rotate on a self-written draft
+# (scope ruling).
+
+
+def test_warned_valid_draft_consumed_silently(cc_home, capsys, tmp_path):
+    repo, key, nnn = _setup(cc_home, tmp_path, s="WARNED")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert "decision" not in out  # NO block: the silent #26 path
+    assert out == {"systemMessage": AMCL}
+    rec = state.load_state(key, nnn)
+    assert rec["state"] == "AWAITING_MANUAL_CLEAR"
+    assert rec["degraded"] is False
+    assert rec.get("handoff_attempts", 0) == 0  # not an attempt
+    assert (paths.session_dir(key, nnn) / "checkpoint" /
+            "handoff.md").is_file()
+    g = [e for e in ledger.read(paths.session_dir(key, nnn))
+         if e.get("type") == "gate"]
+    assert [(e["action"], e["from"], e["to"]) for e in g] == [
+        ("silent", "HANDOFF_REQUESTED", "CHECKPOINT_VERIFIED")]
+
+
+def test_warned_without_draft_is_plain_turn_end(cc_home, capsys, tmp_path):
+    # guard: no draft = nothing to consume - WARNED stays byte-identical
+    # to the plain turn end (reply blink queued, state kept, no rotation).
+    repo, key, nnn = _setup(cc_home, tmp_path, s="WARNED")
+    run_hook("Stop", payload("Stop", repo))
+    assert stdout_json(capsys) is None
+    rec = state.load_state(key, nnn)
+    assert rec["state"] == "WARNED"
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))
+
+
+def test_warned_invalid_draft_blocks_c6(cc_home, capsys, tmp_path):
+    # A draft that exists but fails validation takes the shared HR
+    # ladder: attempt counted, C.6 gate block recorded (a genuine
+    # violation after the c1 guidance - the red line is justified here).
+    repo, key, nnn = _setup(cc_home, tmp_path, s="WARNED")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        "## Objective\nshort\n", encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    out = stdout_json(capsys)
+    assert out["decision"] == "block"
+    assert "handoff draft invalid" in out["reason"]
+    rec = state.load_state(key, nnn)
+    assert rec["state"] == "HANDOFF_REQUESTED"
+    assert rec["handoff_attempts"] == 1
+    g = [e for e in ledger.read(paths.session_dir(key, nnn))
+         if e.get("type") == "gate"]
+    assert [(e["action"], e["variant"], e["attempts"]) for e in g] == [
+        ("block", "c6", 1)]
+
+
+def test_warned_scope_active_draft_not_consumed(cc_home, capsys, tmp_path):
+    # Scope guard: an un-warned session must NEVER self-rotate on a
+    # draft it wrote on its own (only WARNED consumes).
+    repo, key, nnn = _setup(cc_home, tmp_path, s="ACTIVE")
+    (paths.session_dir(key, nnn) / "handoff.draft.md").write_text(
+        _valid_draft(), encoding="utf-8")
+    run_hook("Stop", payload("Stop", repo))
+    assert stdout_json(capsys) is None
+    assert state.load_state(key, nnn)["state"] == "ACTIVE"
+    assert "reply_ready" in _types(paths.session_dir(key, nnn))
+
+
 def test_checkpoint_writing_finalizes(cc_home, capsys, tmp_path):
     repo, key, nnn = _setup(cc_home, tmp_path, s="CHECKPOINT_WRITING")
     run_hook("Stop", payload("Stop", repo))

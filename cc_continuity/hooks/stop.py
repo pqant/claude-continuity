@@ -1,7 +1,9 @@
 """Stop hook (PRD §9) — turn-end enforcement (Phase 5, spec §6.4).
 
-State-based (never ratio-based): ROTATION_PENDING -> advance to
-HANDOFF_REQUESTED and fall through; HANDOFF_REQUESTED -> validate the
+State-based (never ratio-based): WARNED with a draft on disk -> advance
+to HANDOFF_REQUESTED and fall through (a self-written draft is consumed
+at turn end, issue #76 - only WARNED consumes); ROTATION_PENDING ->
+advance to HANDOFF_REQUESTED and fall through; HANDOFF_REQUESTED -> validate the
 draft file DIRECTLY (a Bash-written draft was never seen by
 PostToolUse) -> finalize (SILENTLY when valid, issue #26 - a block
 would render as a hardcoded red "Stop hook error:" line) or
@@ -165,6 +167,19 @@ def handle(ctx: HookContext) -> dict | None:
     rec = state.update_fields(key, nnn, turn_active=False, last_stop_ts=time.time())
     s = rec["state"]
     tool_calls = rec.get("tool_calls", 0)
+    if s == "WARNED" and (sdir / "handoff.draft.md").is_file():
+        # Issue #76: a WARNED session whose own draft was never consumed
+        # (the model wrote it after the c1 warning, but the state machine
+        # only read drafts in HANDOFF_REQUESTED) idled at the prompt with
+        # a finished handoff on disk. Consume it here: walk WARNED ->
+        # ROTATION_PENDING -> HANDOFF_REQUESTED (the legal HANDOFF_WALK
+        # path) and fall through to the shared HR validation below - a
+        # valid draft finalizes SILENTLY (the #26 path), an invalid one
+        # takes the attempt/block ladder (guidance was already delivered
+        # by c1). Only WARNED consumes: BOOTSTRAPPING/ACTIVE never
+        # rotate on a self-written draft (scope ruling).
+        rec, _ = thresholds.advance(key, nnn, "HANDOFF_REQUESTED", cfg=cfg)
+        s = "HANDOFF_REQUESTED"
     if s == "ROTATION_PENDING":
         # Issue #26: C.2 already reached the model as PostToolUse
         # additionalContext at the crossing (guide-first). The old blind
