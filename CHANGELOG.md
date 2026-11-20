@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.51] - 2026-11-20
+
+### Added
+
+- The README embeds a short GIF of the animated status line (docs/assets/cc40-statusline-rotation.gif, 13 frames, under 40 KB): the live context-usage segment with its shimmer sweep, then the rotation handoff moments (`HANDOFF!` and `ROTATING`) and the successor's fresh session. Every frame is drawn from the real `statusline.render_segment()` output, so the README shows exactly what the pane shows (issue #40).
+
 ## [0.3.50] - 2026-11-19
 
 ### Fixed
