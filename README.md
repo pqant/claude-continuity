@@ -55,6 +55,12 @@ watchdog, and the opt-in notifications:
 <img src="docs/diagrams/flow.light.anime.en.gif#gh-light-mode-only" width="800" alt="cc-continuity flow">
 <img src="docs/diagrams/flow.dark.anime.en.gif#gh-dark-mode-only" width="800" alt="cc-continuity flow">
 
+The live look of the status line itself, every frame drawn by the real
+renderer: the context-usage segment sweeping, then the rotation handoff
+moments and the fresh successor session.
+
+![Animated cc-continuity status line: the context-usage percentage segment with a shimmer sweep, then the rotation moments HANDOFF! and ROTATING as a fresh session takes over](docs/assets/cc40-statusline-rotation.gif)
+
 ## Demo
 
 A full recorded run: `install` → five chained sessions → four context
