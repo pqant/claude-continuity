@@ -1,6 +1,7 @@
 """doctor.py: PRD §16 health checks on a fake HOME."""
 
 import dataclasses
+import fcntl
 import json
 import os
 import time
@@ -194,17 +195,63 @@ def test_config_sanity_warns_on_bad_endpoint_scheme(fake_home):
     assert "notify_endpoint" in c.detail
 
 
-def test_stale_lock_warns(fake_home, cc_home):
-    h = fake_home
-    install.install(h, window=262144, runner=FakeRun())
+def _seed_stale_lock(h, pid, ts):
     proj = h / ".claude-continuity" / "projects" / "p-1"
     (proj / "sessions").mkdir(parents=True)
-    (proj / "lock").write_text(json.dumps(
-        {"pid": 999999, "ts": time.time() - 600, "rotation_id": None}),
-        encoding="utf-8")
+    lf = proj / "lock"
+    lf.write_text(json.dumps({"pid": pid, "ts": ts,
+                              "rotation_id": None}), encoding="utf-8")
+    return lf
+
+
+def test_stale_lock_removed(fake_home, cc_home):
+    # dead PID + old ts + kernel-released flock: doctor removes the
+    # leftover file (last-holder diagnostic of a dead run), like tmp-residue
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    lf = _seed_stale_lock(h, 999999, time.time() - 600)
     checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
     c = next(x for x in checks if x.name == "stale-locks")
-    assert c.warning
+    assert c.ok and c.warning and "removed" in c.detail
+    assert not lf.exists()
+
+
+def test_stale_lock_held_warns_and_survives(fake_home, cc_home):
+    # dead PID + old ts but the flock is still held (inherited fd): the
+    # file must survive and the check must flag it - deletion would lie
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    lf = _seed_stale_lock(h, 999999, time.time() - 600)
+    fd = os.open(lf, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    c = next(x for x in checks if x.name == "stale-locks")
+    assert c.warning and "held" in c.detail
+    assert lf.exists()
+
+
+def test_live_lock_untouched(fake_home, cc_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    lf = _seed_stale_lock(h, os.getpid(), time.time() - 600)
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "stale-locks")
+    assert c.ok and not c.warning and c.detail == "none"
+    assert lf.exists()
+
+
+def test_fresh_dead_lock_untouched(fake_home, cc_home):
+    h = fake_home
+    install.install(h, window=262144, runner=FakeRun())
+    lf = _seed_stale_lock(h, 999999, time.time())
+    checks = doctor.run_doctor(h, runner=FakeRun(), which=_which_ok)
+    c = next(x for x in checks if x.name == "stale-locks")
+    assert c.ok and not c.warning and c.detail == "none"
+    assert lf.exists()
 
 
 def test_old_tmp_residue_deleted_and_warned(fake_home):

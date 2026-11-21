@@ -1,5 +1,7 @@
 """Health checks (PRD §16/§17). Read-only except deletion of
-``checkpoint.tmp-*`` older than 1 h (PRD §18: ".tmp cleaned by doctor").
+``checkpoint.tmp-*`` older than 1 h (PRD §18: ".tmp cleaned by doctor")
+and removal of stale project ``lock`` files whose flock the kernel has
+already released (dead PID, old ts - issue #79).
 
 Exit code (CLI): 0 iff no check is not-ok; warnings do not fail.
 A half-installed or uninstalled machine must never raise — every check
@@ -9,6 +11,7 @@ guards its own read errors.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import json
 import os
 import plistlib
@@ -281,8 +284,14 @@ def run_doctor(home: Path, runner=subprocess.run,
             f"config {cfg_tokens} vs observed {observed}",
             warning=mismatch)
 
-    # 14: stale locks (warning)
-    stale = []
+    # 14: stale locks - clean up leftover last-holder files of dead runs.
+    # The flock is the authority: an old ts + dead PID + kernel-released
+    # flock means nobody can still be holding it (a crashed holder's flock
+    # died with the process), so the retained diagnostic file is pure
+    # residue and doctor removes it (same cleanup precedent as tmp-residue).
+    # If the flock is STILL held (inherited-fd edge case) the file survives
+    # and the check warns instead - deleting it would lie about the state.
+    removed, held = [], []
     for lf in (store / "projects").glob("*/lock"):
         info = _safe_json(lf)
         if not isinstance(info, dict):
@@ -291,10 +300,30 @@ def run_doctor(home: Path, runner=subprocess.run,
         if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
                 and time.time() - ts > LOCK_STALE_AFTER
                 and isinstance(pid, int) and not pid_alive(pid)):
-            stale.append(lf.parent.name)
-    add("stale-locks", True,
-        "none" if not stale else f"stale: {', '.join(stale)}",
-        warning=bool(stale))
+            try:
+                fd = os.open(lf, os.O_RDWR)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    held.append(lf.parent.name)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    try:
+                        lf.unlink()
+                    except FileNotFoundError:
+                        pass
+                    removed.append(lf.parent.name)
+            finally:
+                os.close(fd)
+    detail = "none"
+    if removed:
+        detail = "removed " + ", ".join(removed)
+    if held:
+        detail += ("; " if removed else "") + "held: " + ", ".join(held)
+    add("stale-locks", True, detail, warning=bool(removed or held))
 
     # 15: tmp residue — delete > 1 h, warn about the rest
     deleted, recent = [], []
