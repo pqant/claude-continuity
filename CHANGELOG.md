@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.57] - 2026-11-21
+
+### Added
+
+- `/continuity-excellence` turns a raw vague prompt into a run-ready one. Hand it a rough intent like "find the image files on my local disk" and it perfects the prompt across seven dimensions (explicit goal, scope boundaries, environment and paths, constraints, output format, edge cases, success criteria), fills the gaps it can infer from the session context, then presents your original wording verbatim next to the perfected prompt as one copyable block. It asks exactly once - run it, change it, or cancel - and acts on the answer: run executes the perfected prompt in this session, change applies the edits and re-presents, cancel stops cleanly. The raw prompt never runs; only the approved perfected version does. It is the first behavior skill (no shell command behind it) and carries `disable-model-invocation: true` like rotate/off/on, so only you can trigger the loop. The `doctor` skills count is now derived from the skill registry instead of a hardcoded literal (issue #81).
+
 ## [0.3.56] - 2026-11-21
 
 ### Fixed
