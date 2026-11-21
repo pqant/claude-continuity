@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.52] - 2026-11-21
+
+### Added
+
+- The status line now caches its heavy render stages (session lookup, ledger reads, transcript parse, pane capture, pane-data rewrite) between tool boundaries: the ~1/s idle renders reuse the cached facts instead of redoing the work, while the shimmer sweep, the reply settle marker and the payload ratio keep flowing so the line always animates and the HUD numbers keep moving. The mode-1 pane feed only rewrites when the data actually changes, and a corrupt or missing cache always falls back to the full render (issue #77).
+
 ## [0.3.51] - 2026-11-20
 
 ### Added
