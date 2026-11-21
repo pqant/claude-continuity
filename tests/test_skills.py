@@ -88,3 +88,10 @@ def test_uninstall_removes_exactly_seven(tmp_path):
 
 def test_uninstall_missing_dir_noop(tmp_path):
     assert skills.uninstall_skills(tmp_path / "nope") == []
+
+
+def test_all_descriptions_carry_the_continuity_keyword():
+    # the /cc slash filter fuzzy-matches name + description; every managed
+    # skill must carry "cc-continuity" so it stays discoverable (issue 82)
+    for name in skills.skill_names():
+        assert "cc-continuity" in skills.SKILLS[name]["description"]

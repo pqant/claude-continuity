@@ -46,7 +46,7 @@ SKILLS: dict[str, dict] = {
     },
     "continuity-history": {
         "command": "cc-continuity history",
-        "description": "Show the session chain (history) for the current project.",
+        "description": "Show the cc-continuity session chain (history) for the current project.",
         "disable_model_invocation": False,
     },
     "continuity-excellence": {
@@ -71,9 +71,10 @@ SKILLS: dict[str, dict] = {
             "version runs."
         ),
         "description": (
-            "Perfect a raw vague prompt multi-dimensionally, present it, ask "
-            "run/change/cancel, and act on the answer. Use when the user has "
-            "a rough prompt they want polished and executed."),
+            "Perfect a raw vague prompt multi-dimensionally with "
+            "cc-continuity, present it, ask run/change/cancel, and act on "
+            "the answer. Use when the user has a rough prompt they want "
+            "polished and executed."),
         "disable_model_invocation": True,
     },
 }
