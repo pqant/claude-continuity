@@ -652,6 +652,41 @@ def test_animator_reply_gate_key_carries_reply_ts(cc_home, monkeypatch):
     assert any("200.0" in k for k in keys)   # second reply: fresh key
 
 
+def test_animator_reply_rearms_after_focus_loss(cc_home, monkeypatch):
+    # issue #78 (mode 1): the dwell read the reply (saved read in the
+    # pane record); the user then takes the window to the background
+    # WITHOUT answering. After a fresh settle window the tab must blink
+    # again - the animator, not just the poller, owns this surface.
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(progress_pane.blink, "list_client_ttys",
+                        lambda *a, **k: {"/dev/ttys001"})
+    fake = _FakeBlinkMod()
+    written = []
+    fronts = iter([None, "/dev/ttys001", "/dev/ttys001",
+                   None, None, None, None, None])
+    state = {"n": 0}
+
+    def clock():
+        state["n"] += 1
+        return 100.0 + (state["n"] - 1) // 40   # one second per blink poll
+
+    progress_pane.run_animator(
+        "12", _frames=121, _write=written.append, _now=clock,
+        _size=lambda: _size_obj(40), _text=lambda: "◆ 9% ok",
+        _mtime=lambda: 1, _sleep=lambda s: None, _blink=fake,
+        _frontmost_tty=lambda: next(fronts, None), _dwell_ticks=1,
+        _focus_log=None,
+        _reply_flag_read=lambda w: {"session_dir": "SD", "ts": 100.0,
+                                    "settle": 2.0},
+        _reply_pending=lambda sd, settle, now: 100.0,
+        _reply_flag_clear=lambda w: None)
+    texts = [t for t, _ts, _p in fake.made[0].texts]
+    assert all("\U0001f550 REPLY" in t for t in texts[0:20])   # blinking
+    assert all(t == "" for t in texts[20:100])   # dwell read; away, settling
+    # lost at poll t=103 (frame 60); settle 2 s -> re-arm at t=105
+    assert all("\U0001f550 REPLY" in t for t in texts[100:121])
+
+
 def test_animator_injects_blocked_chip_from_ledger(cc_home, monkeypatch):
     # Issue #63 (live 2026-11-12 scripted probe): mode 1 never spawns the
     # blink-watch poller ("the animator owns the blink") and the animator

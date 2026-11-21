@@ -11,7 +11,7 @@ the ledger's unconsumed needs_human reason.
 
 import subprocess
 
-from cc_continuity import blink, blink_watch, paths, progress_pane
+from cc_continuity import blink, blink_watch, ledger, paths, progress_pane
 
 
 _DIALOG_REGION = ("❯ 1. (A) go\n"
@@ -360,7 +360,8 @@ def test_spawn_never_raises_on_runner_failure(cc_home, monkeypatch):
 # tab until the user focuses it; the poller needs no status line render.
 
 
-def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
+def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, step=0.0,
+               frontmost=None,
                clients=frozenset(), dwell=3, fade=600.0,
                frontmost_app=None, session_dir="/sess"):
     if frontmost_app is None:
@@ -373,11 +374,16 @@ def _run_watch(fake, *, cfg=None, ticks=1, now=0.0, frontmost=None,
 
         def app_fn():
             return next(seq, None)
+    clock = {"t": now - step}
+
+    def _now():
+        clock["t"] += step
+        return clock["t"]
     blink_watch.watch(
         session_dir, pane_id="%7", window_id="@7", cfg=cfg or {}, _blink=fake,
         _runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0,
                                                                b"", b""),
-        _bin_="tmux", _tty_open=_tty_open, _now=lambda: now,
+        _bin_="tmux", _tty_open=_tty_open, _now=_now,
         _sleep=_sleep_noop, _ticks=ticks, _state=lambda d: "ACTIVE",
         _frontmost_tty=(frontmost if frontmost is not None else (lambda: None)),
         _client_ttys=clients if callable(clients) else (lambda: set(clients)),
@@ -681,3 +687,129 @@ def test_frontmost_tty_falls_through_when_app_unreadable(monkeypatch):
     # the raw tty query still answers (pre-#62 degrade path).
     _fake_osascript(monkeypatch, app_fail=True, tty_out="/dev/ttys001\n")
     assert _REAL_FRONTMOST_TTY() == "/dev/ttys001"
+
+
+# ------------------------------------------------- reply re-arm after dwell
+#
+# Issue #78: the dwell consumes the reply (reply_read), the user reads
+# the answer and takes the window to the background WITHOUT replying:
+# today nothing re-arms and the tab goes quiet with the answer pending.
+# The poller must blink again once focus is lost (after a fresh settle
+# window), and the re-arm must stop once the user replies (user_prompt)
+# or the reply has faded.
+
+_F = "/dev/ttys001"
+
+
+def _seed_reply(tmp_path, ts=0.0):
+    sd = str(tmp_path / "s78")
+    ledger.append(sd, {"type": "reply_ready", "ts": ts})
+    return sd
+
+
+def test_watch_reply_rearms_after_dwell_and_focus_loss(cc_home, tmp_path):
+    # real ledger: dwell consumes (one reply_read), focus loss re-arms
+    # after the settle window; the reply is never answered.
+    sd = _seed_reply(tmp_path)
+    fronts = iter([None, _F, _F, _F, None, None, None, None, None, None])
+    fake = _FakeBlinkMod(captures=[""] * 10)
+    _run_watch(fake, cfg={"blink_reply_settle": 5}, ticks=10, now=5.0,
+               step=1.0, dwell=2,
+               frontmost=lambda: next(fronts, None),
+               clients=lambda: {_F}, session_dir=sd)
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]        # blinking (settled)
+    assert blink.MARKER_REPLY in texts[1]        # focused, dwelling
+    assert texts[2] == ""                        # dwell reached: consumed
+    assert all(t == "" for t in texts[3:9])      # still focused / settling
+    assert blink.MARKER_REPLY in texts[9]        # lost + settle -> RE-ARM
+    types = [e["type"] for e in ledger.read(sd)]
+    assert types.count("reply_read") == 1
+
+
+def test_watch_reply_rearm_holds_through_the_settle_window(cc_home,
+                                                           tmp_path):
+    # the re-arm waits a FRESH settle window from the focus-loss edge:
+    # brief Cmd+Tab blinks must not light the tab back up.
+    sd = _seed_reply(tmp_path)
+    fronts = iter([None, _F, _F, None, None, None, None, None])
+    fake = _FakeBlinkMod(captures=[""] * 8)
+    _run_watch(fake, cfg={"blink_reply_settle": 5}, ticks=8, now=5.0,
+               step=1.0, dwell=2,
+               frontmost=lambda: next(fronts, None),
+               clients=lambda: {_F}, session_dir=sd)
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]
+    assert texts[2] == ""                        # consumed at t=7
+    # lost at t=8 (index 3); re-arm only from t=8+5 (index 8, never
+    # reached): the whole tail stays dark
+    assert all(t == "" for t in texts[3:8])
+
+
+def test_watch_reply_no_rearm_after_user_prompt(cc_home, tmp_path):
+    # acceptance half two: once the user replies (main-session
+    # user_prompt), losing focus again must NOT blink.
+    sd = _seed_reply(tmp_path)
+    seq = [None, _F, _F, _F, None, None, None, None, None, None]
+    calls = {"n": 0}
+
+    def front():
+        i = calls["n"]
+        calls["n"] += 1
+        if i == 3:                               # still focused, t=8
+            ledger.append(sd, {"type": "user_prompt"})
+        return seq[i]
+    fake = _FakeBlinkMod(captures=[""] * 10)
+    _run_watch(fake, cfg={"blink_reply_settle": 5}, ticks=10, now=5.0,
+               step=1.0, dwell=2, frontmost=front,
+               clients=lambda: {_F}, session_dir=sd)
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]
+    assert texts[2] == ""                        # dwell consumed
+    assert all(t == "" for t in texts[3:10])     # answered: stays dark
+    types = [e["type"] for e in ledger.read(sd)]
+    assert types.count("reply_read") == 1
+
+
+def test_watch_reply_rearm_stops_after_fade(cc_home, tmp_path):
+    # an unanswered-but-faded reply never resurfaces (fade caps the
+    # re-arm loop exactly as it caps the first blink).
+    sd = _seed_reply(tmp_path)
+    fronts = iter([None, _F, _F, None, None, None])
+    fake = _FakeBlinkMod(captures=[""] * 6)
+    _run_watch(fake, cfg={"blink_reply_settle": 5}, ticks=6, now=5.0,
+               step=80.0, fade=300.0, dwell=2,
+               frontmost=lambda: next(fronts, None),
+               clients=lambda: {_F}, session_dir=sd)
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]
+    assert blink.MARKER_REPLY in texts[1]
+    assert texts[2] == ""                        # consumed at t=165
+    # lost at t=245; at t=325 the settle gate is open but the reply is
+    # older than the fade: no re-arm, and it never comes back.
+    assert all(t == "" for t in texts[3:6])
+
+
+def test_watch_reply_rearm_cycles_until_answer(cc_home, tmp_path):
+    # two focus/away cycles blink twice (one reply_read per dwell);
+    # the ledger entry keeps re-arming while nobody replies.
+    sd = _seed_reply(tmp_path)
+    seq = [None, _F, _F, _F, None, None, None, None, None, None,
+           _F, _F, None, None, None, None, None, None]
+    front_it = iter(seq)
+    fake = _FakeBlinkMod(captures=[""] * 18)
+    _run_watch(fake, cfg={"blink_reply_settle": 5}, ticks=18, now=5.0,
+               step=1.0, dwell=2,
+               frontmost=lambda: next(front_it, None),
+               clients=lambda: {_F}, session_dir=sd)
+    texts = [t for t, _ in fake.made[0].ticks]
+    assert blink.MARKER_REPLY in texts[0]
+    assert texts[2] == ""                        # dwell 1 consumed
+    assert all(t == "" for t in texts[3:9])
+    assert blink.MARKER_REPLY in texts[9]        # re-arm 1 (t=14)
+    assert blink.MARKER_REPLY in texts[10]       # re-focused, dwelling
+    assert texts[11] == ""                       # dwell 2 consumed
+    assert all(t == "" for t in texts[12:17])
+    assert blink.MARKER_REPLY in texts[17]       # re-arm 2 (t=22)
+    types = [e["type"] for e in ledger.read(sd)]
+    assert types.count("reply_read") == 2

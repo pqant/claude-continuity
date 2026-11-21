@@ -898,3 +898,48 @@ def test_reply_flag_guards(cc_home, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%64")
     assert blink.write_reply_flag("/x", settle=15.0,
                                   runner=_failing_runner) is None
+
+
+# ------------------------------------------- FocusWatcher re-arm (issue #78)
+
+
+def test_focus_watcher_rearm_clears_the_read_state():
+    # issue #78: after the dwell read the reply, the poller/animator
+    # loses focus while the reply is still unanswered: rearm() drops the
+    # read state so the same key is unread again and the tab lights up.
+    store = _store_dict()
+    fronts = iter(["/dev/ttys001", "/dev/ttys001", None])
+    w = blink.FocusWatcher(store, frontmost=lambda: next(fronts, None),
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2,
+                           log=None)
+    assert w.tick(0.0, "K") is False
+    assert w.tick(1.0, "K") is True              # dwell: read stored
+    assert store("read") == "K"
+    w.rearm()
+    assert store("read") is None
+    assert w.tick(2.0, "K") is False             # unfocused: blinks again
+    assert w.lost_at is None                     # rearm cleared stale edge
+
+
+def test_focus_watcher_lost_edge_tracks_only_when_armed():
+    # issue #78: the extra focus probe (the one that records the
+    # focused-to-unfocused edge) must stay OFF for every idle tick that
+    # has nothing to re-arm; the caller arms the window between the
+    # dwell read and the answer/fade.
+    fronts = iter(["/dev/ttys001", None, None])
+    calls = []
+
+    def front():
+        calls.append(1)
+        return next(fronts, None)
+    store = _store_dict()
+    w = blink.FocusWatcher(store, frontmost=front,
+                           clients=lambda: {"/dev/ttys001"}, dwell_ticks=2,
+                           log=None)
+    assert w.tick(0.0, "") is False              # unarmed: no probe
+    assert calls == []
+    w.armed = True
+    assert w.tick(1.0, "") is False              # armed probe: focused
+    assert w.lost_at is None
+    assert w.tick(2.0, "") is False              # armed probe: lost
+    assert w.lost_at == 2.0

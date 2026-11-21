@@ -205,6 +205,11 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
     start = _now()
     fails = 0
     pane_text: str | None = None
+    # reply re-arm (issue #78): ts of the dwell-read reply that is still
+    # unanswered; the ladder below re-lights the tab when the user takes
+    # the window to the background again. ``live`` marks an open re-arm:
+    # the blink stays lit from the loss edge until the dwell reads it.
+    rearm = {"ts": None, "live": False}
     i = 0
     try:
         while True:
@@ -239,6 +244,35 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                     reply = None
             if reply is not None and t - reply > _reply_fade:
                 reply = None  # unfocusable context: fade, never strand
+            # reply re-arm (issue #78): the dwell consumed the entry
+            # (the on_read below appends reply_read). While the user has
+            # not answered (no newer main-session user_prompt, no
+            # self-wake) and the entry has not faded, the window going
+            # to the background again re-arms the blink after a fresh
+            # settle window - the tab lights up until the answer lands.
+            if reply is not None:
+                rearm["ts"] = None       # a live (fresh) reply owns it
+                rearm["live"] = False
+            elif rearm["ts"] is not None:
+                try:
+                    pending, selfwake = ledger.reply_state(
+                        session_dir, dwell_counts=False)
+                except Exception:
+                    pending, selfwake = None, True
+                if selfwake or pending != rearm["ts"]:
+                    rearm["ts"] = None   # answered (or self-woken): stop
+                    rearm["live"] = False
+                elif t - rearm["ts"] > _reply_fade:
+                    rearm["ts"] = None   # faded: never resurrect
+                    rearm["live"] = False
+                elif rearm["live"]:
+                    reply = rearm["ts"]  # open re-arm: keep blinking
+                elif (watcher.lost_at is not None
+                      and t - watcher.lost_at >= settle):
+                    watcher.rearm()      # the read is dropped, blink back
+                    rearm["live"] = True
+                    reply = rearm["ts"]
+            watcher.armed = rearm["ts"] is not None
             parts = []
             if blocked:
                 parts.append(blink_mod.MARKER_BLOCKED)
@@ -257,8 +291,14 @@ def watch(session_dir, *, pane_id: str, window_id: str, cfg: dict,
                            (blocked,
                             repr(reply) if reply is not None else "",
                             pane_text) if p)
-            on_read = ((lambda _key: ledger.mark_reply_read(session_dir))
-                       if reply is not None else None)
+            on_read = None
+            if reply is not None:
+                # the dwell read consumes the entry (reply_read) and
+                # opens the re-arm window for this same ts (#78).
+                def on_read(_key, _ts=reply):
+                    ledger.mark_reply_read(session_dir)
+                    rearm["ts"] = _ts
+                    rearm["live"] = False  # read: wait for a fresh loss
             try:
                 suppress = watcher.tick(t, key, on_read)
             except Exception:

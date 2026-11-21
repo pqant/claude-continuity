@@ -628,6 +628,14 @@ class FocusWatcher:
         self._label = f" {label}" if label else ""
         self._log = log
         self._outcome = None
+        # reply re-arm (issue #78): while the caller holds an unanswered
+        # dwell-read reply it arms the watcher; the armed probes record
+        # the focused-to-unfocused edge (``lost_at``) even on ticks where
+        # the dwell path would not probe at all (empty key, stored read).
+        self.armed = False
+        self.lost_at = None
+        self._was_focused = False
+        self._last_front = None
 
     def _note(self, event: str, key: str, extra: str = "") -> None:
         if self._log is None:
@@ -636,6 +644,57 @@ class FocusWatcher:
             self._log(f"focus {event}{self._label} key={key[:60]!r}{extra}")
         except Exception:
             pass
+
+    def _probe(self, t: float, key: str) -> "bool | None":
+        """One focus probe; tracks the focused-to-unfocused edge (#78).
+
+        Returns the focused verdict; None when no focus source is wired
+        (dwell stays disabled). The edge is what the callers' re-arm
+        ladders gate on, so it survives even while the key is suppressed.
+        """
+        if self._frontmost is None or self._clients is None:
+            return None
+        front = None
+        focused = False
+        outcome = "error"
+        try:
+            front = self._frontmost()
+            self._last_front = front
+            if front is None:
+                outcome = "none"
+            else:
+                focused = front in self._clients()
+                outcome = "focus" if focused else "idle"
+        except Exception:
+            outcome = "error"
+        if outcome != self._outcome:
+            self._note(f"probe-{outcome}", key,
+                       f" front={front!r}" if front is not None else "")
+            self._outcome = outcome
+        if focused:
+            self._was_focused = True
+        elif self._was_focused:
+            self.lost_at = t
+            self._was_focused = False
+            self._note("lost", key)
+        return focused
+
+    def rearm(self) -> None:
+        """Make the current key unread again (issue #78 reply re-arm).
+
+        Drops the stored read (and the dwell counters) so a situation the
+        user already acknowledged blinks again - used when the user takes
+        the window to the background while a reply is still unanswered.
+        The lost edge goes with it: the next loss must be a fresh edge.
+        """
+        try:
+            self._store("read", None)
+        except Exception:
+            pass
+        self._dwell = 0
+        self._last_key = None
+        self.lost_at = None
+        self._was_focused = False
 
     def tick(self, t: float, key: str, on_read=None) -> bool:
         """One poll tick; True means the blink must be suppressed now.
@@ -648,6 +707,8 @@ class FocusWatcher:
         if not key:
             self._dwell = 0
             self._last_key = None
+            if self.armed:
+                self._probe(t, key)
             return False
         try:
             stored = self._store("read")
@@ -658,26 +719,16 @@ class FocusWatcher:
                 self._note("suppress-stored", key)
                 self._outcome = "read"
             self._dwell = 0
+            if self.armed:
+                # #78: the read holds and the key is stable, so the
+                # dwell path below would never probe; the armed probe is
+                # the only thing that can see the user leave the tab.
+                self._probe(t, key)
             return True
-        if self._frontmost is None or self._clients is None:
+        focused = self._probe(t, key)
+        if focused is None:
             self._dwell = 0
             return False
-        front = None
-        focused = False
-        outcome = "error"
-        try:
-            front = self._frontmost()
-            if front is None:
-                outcome = "none"
-            else:
-                focused = front in self._clients()
-                outcome = "focus" if focused else "idle"
-        except Exception:
-            outcome = "error"
-        if outcome != self._outcome:
-            self._note(f"probe-{outcome}", key,
-                       f" front={front!r}" if front is not None else "")
-            self._outcome = outcome
         if not focused:
             self._dwell = 0
             self._last_key = key
@@ -699,7 +750,8 @@ class FocusWatcher:
         if self._dwell < self._dwell_ticks:
             return False
         self._dwell = 0
-        self._note("suppress", key, f" front={front!r}")
+        self.lost_at = None
+        self._note("suppress", key, f" front={self._last_front!r}")
         try:
             self._store("read", key)
         except Exception:

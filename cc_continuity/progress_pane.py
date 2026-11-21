@@ -815,6 +815,17 @@ def run_animator(window_id: str | None = None, *, _frames=None,
                                                  pane_text is not None,
                                                  reply_id,
                                                  blocked_reason) if p)
+                # reply re-arm (issue #78): the saved read silenced the
+                # tab; if the user takes the window to the background
+                # again while the reply is still pending (flag up, the
+                # ledger read above still reports it), the read is
+                # dropped after a fresh settle window so the tab blinks
+                # again. The armed probe is the only focus probe on the
+                # suppressed ticks (the key is stable there).
+                watcher.armed = bool(reply_id)
+                if (reply_id and watcher.lost_at is not None
+                        and t - watcher.lost_at >= settle):
+                    watcher.rearm()
                 try:
                     suppressed = watcher.tick(t, src)
                 except Exception:

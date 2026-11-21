@@ -94,7 +94,8 @@ _RESUME_TYPES = frozenset({"tool_use", "tool_failure", "task_created",
                            "task_completed", "stop"})
 
 
-def reply_state(session_dir: str | Path) -> "tuple[float | None, bool]":
+def reply_state(session_dir: str | Path, *,
+                dwell_counts: bool = True) -> "tuple[float | None, bool]":
     """``(pending_ts, selfwake_consumed)`` of the latest ``reply_ready``.
 
     Raw split of the :func:`reply_pending` read, for callers that keep the
@@ -102,6 +103,10 @@ def reply_state(session_dir: str | Path) -> "tuple[float | None, bool]":
     ``pending_ts`` is the latest unconsumed ``reply_ready`` ts (settle
     NOT applied), and ``selfwake_consumed`` says a wake entry newer than
     that reply marks the wait as self-answered. Never raises.
+
+    ``dwell_counts=False`` (issue #78 re-arm check) ignores ``reply_read``
+    entries: the focus dwell that silenced the blink did not ANSWER the
+    reply - only a main-session ``user_prompt`` does.
     """
     try:
         entries = read(session_dir)
@@ -112,7 +117,8 @@ def reply_state(session_dir: str | Path) -> "tuple[float | None, bool]":
         t = entry.get("type")
         if t == "reply_ready":
             pending = entry.get("ts")
-        elif (t == "user_prompt" and not entry.get("agent_id")) or t == "reply_read":
+        elif ((t == "user_prompt" and not entry.get("agent_id"))
+              or (t == "reply_read" and dwell_counts)):
             pending = None
     if pending is None:
         return None, False
