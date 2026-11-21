@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.54] - 2026-11-21
+
+### Added
+
+- `cc-continuity install --dry-run` prints the full managed-change plan before anything is written: every managed target (app copy, launcher stub, `~/.local/bin` symlink, `settings.json`, `~/.claude/CLAUDE.md`, the six skills, the login-shell rc block, `config.json`) carries a create/update/unchanged/replace status, and indented `+` bullets spell out exactly what a merge would add (hook events, the chained user status line, env keys, permission rules, additional directories, config keys). The plan walks the same decisions as the real install and aborts with the same messages and a non-zero exit on the conditions that would stop a real run (missing prerequisites, corrupt `settings.json`, a non-symlink `~/.local/bin/cc-continuity`, installing from the app dir); nothing on disk is touched (issue #41).
+
 ## [0.3.53] - 2026-11-21
 
 ### Fixed
