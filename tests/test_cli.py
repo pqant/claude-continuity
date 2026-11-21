@@ -1378,3 +1378,53 @@ def test_completion_scripts_match_parse_args(capsys):
         except SystemExit:
             err = capsys.readouterr().err
             assert "invalid choice" not in err
+
+
+# ------------------------------------------------- install --dry-run (issue #41)
+
+
+def test_install_dry_run_parser_flag():
+    p = cli.build_parser()
+    args = p.parse_args(["install", "--dry-run"])
+    assert args.command == "install" and args.dry_run is True
+    assert p.parse_args(["install"]).dry_run is False
+
+
+def _install_ns(**kw):
+    ns = dict(ntfy=None, window=None, dry_run=False)
+    ns.update(kw)
+    return argparse.Namespace(**ns)
+
+
+def test_cmd_install_dry_run_prints_plan_writes_nothing(tmp_path, monkeypatch,
+                                                        capsys):
+    from cc_continuity import install
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CC_CONTINUITY_HOME", str(home / ".claude-continuity"))
+    monkeypatch.setattr(install, "check_prerequisites",
+                        lambda h, **kw: [])
+    rc = cli.cmd_install(_install_ns(dry_run=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry run" in out
+    assert "settings.json" in out and "CLAUDE.md" in out and ".zshrc" in out
+    # the real run touches none of these in dry-run mode
+    assert not (home / ".claude").exists()
+    assert not (home / ".claude-continuity" / "app").exists()
+    assert not (home / ".local" / "bin" / "cc-continuity").exists()
+
+
+def test_cmd_install_dry_run_nonzero_on_missing_prereqs(tmp_path, monkeypatch,
+                                                        capsys):
+    from cc_continuity import install
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CC_CONTINUITY_HOME", str(home / ".cc"))
+    monkeypatch.setattr(install, "check_prerequisites",
+                        lambda h, **kw: ["tmux on PATH"])
+    rc = cli.cmd_install(_install_ns(dry_run=True))
+    assert rc == 1
+    assert "tmux" in capsys.readouterr().err

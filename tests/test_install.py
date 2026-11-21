@@ -470,3 +470,108 @@ def test_migrate_leaves_others(fake_home):
     res = install.migrate_generic_hooks(plain, now="20261105-150000")
     assert res == {"backed_up": None, "replaced": 0}
     assert not list((plain / ".claude").glob("settings.json.bak-*"))
+
+
+# ------------------------------------------------- dry-run plan (issue #41)
+
+
+def _tree_bytes(home: Path) -> dict:
+    """path -> bytes for every file under home (write-nothing checks)."""
+    out = {}
+    for p in sorted(Path(home).rglob("*")):
+        if p.is_file():
+            out[str(p.relative_to(home))] = p.read_bytes()
+    return out
+
+
+def _line_for(text: str, target: str) -> str:
+    return next(l for l in text.splitlines() if target in l)
+
+
+def test_plan_install_fresh_home_lists_every_managed_file(fake_home):
+    text = "\n".join(install.plan_install(fake_home, window=262144,
+                                          runner=FakeRun()))
+    for target in (".claude-continuity/app/cc_continuity",
+                   "app/bin/cc-continuity",
+                   ".local/bin/cc-continuity",
+                   ".claude/settings.json",
+                   ".claude/CLAUDE.md",
+                   ".claude/skills",
+                   ".zshrc",
+                   ".claude-continuity/config.json"):
+        assert target in text, target
+    assert "unchanged" not in text  # fresh home: everything is new
+
+
+def test_plan_install_writes_nothing(fake_home):
+    before = _tree_bytes(fake_home)
+    install.plan_install(fake_home, window=262144, runner=FakeRun())
+    assert _tree_bytes(fake_home) == before
+
+
+def test_plan_install_fresh_home_reports_creates(fake_home):
+    text = "\n".join(install.plan_install(fake_home, window=262144,
+                                          runner=FakeRun()))
+    for target in (".claude/settings.json", ".claude/CLAUDE.md",
+                   ".zshrc", ".claude-continuity/config.json"):
+        assert "create" in _line_for(text, target), target
+
+
+def test_plan_install_after_real_install_reports_unchanged(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    text = "\n".join(install.plan_install(fake_home, window=262144,
+                                          runner=FakeRun()))
+    for target in (".claude/settings.json", ".claude/CLAUDE.md",
+                   ".zshrc", ".claude/skills", ".local/bin/cc-continuity",
+                   ".claude-continuity/config.json"):
+        assert "unchanged" in _line_for(text, target), target
+    assert "create" not in text and "update" not in text
+
+
+def test_plan_install_lists_additions_on_merge(fake_home):
+    (fake_home / ".claude").mkdir()
+    (fake_home / ".claude" / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command",
+                                   "command": "~/my-status.sh"},
+                    "env": {"KEEP": "1"}}),
+        encoding="utf-8")
+    text = "\n".join(install.plan_install(fake_home, window=131072,
+                                          runner=FakeRun()))
+    assert "update" in _line_for(text, ".claude/settings.json")
+    assert "~/my-status.sh" in text          # the user line gets chained
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in text
+    assert "131072" in text
+    assert "Bash(cc-continuity *)" in text   # permission addition listed
+    assert "settings.json.bak-" in text      # backup is part of the plan
+
+
+def test_plan_install_missing_prereqs_raises(fake_home, monkeypatch):
+    monkeypatch.setattr(
+        install.shutil, "which",
+        lambda name: None if name == "tmux" else f"/usr/bin/{name}")
+    with pytest.raises(install.InstallError, match="tmux"):
+        install.plan_install(fake_home, runner=FakeRun())
+
+
+def test_plan_install_corrupt_settings_raises(fake_home):
+    (fake_home / ".claude").mkdir()
+    (fake_home / ".claude" / "settings.json").write_text("{nope",
+                                                         encoding="utf-8")
+    with pytest.raises(install.InstallError, match="settings.json"):
+        install.plan_install(fake_home, runner=FakeRun())
+
+
+def test_plan_install_non_symlink_bin_raises(fake_home):
+    (fake_home / ".local" / "bin" / "cc-continuity").write_text(
+        "x", encoding="utf-8")
+    with pytest.raises(install.InstallError, match="non-symlink"):
+        install.plan_install(fake_home, runner=FakeRun())
+
+
+def test_plan_install_refuses_app_dir(fake_home, monkeypatch):
+    # same self-destruct guard as copy_app: planning from the app dir aborts
+    app_pkg = fake_home / ".claude-continuity" / "app" / "cc_continuity"
+    app_pkg.mkdir(parents=True)
+    monkeypatch.setattr(install, "__file__", str(app_pkg / "install.py"))
+    with pytest.raises(install.InstallError, match="app dir"):
+        install.plan_install(fake_home, runner=FakeRun())

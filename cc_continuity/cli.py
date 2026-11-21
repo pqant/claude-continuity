@@ -162,6 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_inst.add_argument("--ntfy", default=None,
                         help="ntfy endpoint URL (or 'off' to disable; "
                              "prompts on a TTY when omitted)")
+    p_inst.add_argument("--dry-run", action="store_true",
+                        help="print the managed-change plan, write nothing")
     p_un = sub.add_parser("uninstall",
                           help="remove cc-continuity (PRD §17)")
     p_un.add_argument("--purge", action="store_true",
@@ -1296,13 +1298,23 @@ Uninstall: cc-continuity uninstall
 
 def cmd_install(args: argparse.Namespace) -> int:
     from . import install  # local import keeps cli import light
+    dry = getattr(args, "dry_run", False)
     try:
         ntfy = install.resolve_ntfy(
             args.ntfy, is_tty=sys.stdin.isatty() and sys.stdout.isatty())
-        install.install(Path.home(), window=args.window, ntfy=ntfy)
+        if dry:
+            plan = install.plan_install(Path.home(), window=args.window,
+                                        ntfy=ntfy)
+        else:
+            install.install(Path.home(), window=args.window, ntfy=ntfy)
     except install.InstallError as e:
         print(f"cc-continuity install: {e}", file=sys.stderr)
         return 1
+    if dry:
+        print("cc-continuity install: dry run (nothing written)")
+        for line in plan:
+            print("  " + line)
+        return 0
     print("cc-continuity installed.")
     for line in USAGE_SUMMARY.splitlines():
         print("  " + line)

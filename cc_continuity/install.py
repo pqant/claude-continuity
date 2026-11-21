@@ -30,9 +30,10 @@ import time
 from pathlib import Path
 
 from . import __version__, atomic, config, managed, skills
-from .settings_merge import (ENV_OVERRIDE_KEY, ENV_OVERRIDE_VALUE,
-                             detect_format, dump_settings,
-                             merge_settings, unmerge_settings)
+from .settings_merge import (ENV_KEYS, ENV_OVERRIDE_KEY, ENV_OVERRIDE_VALUE,
+                             HOOK_EVENTS, detect_format, dump_settings,
+                             is_ours, merge_settings, our_hook_entry,
+                             unmerge_settings)
 
 MIN_CLAUDE = (2, 1, 209)  # Phase 0 verified floor (VERIFICATION.md)
 
@@ -426,6 +427,183 @@ def install(home: Path, *, window: int | None = None,
     cfg["install"] = manifest
     atomic.atomic_write_json(cfg_path, cfg)
     return manifest
+
+
+# ------------------------------------------------------------- dry-run plan
+
+
+def plan_install(home: Path, *, window: int | None = None,
+                 ntfy: str | None = None,
+                 runner=subprocess.run) -> list[str]:
+    """Render the managed-change plan without writing anything (issue #41).
+
+    Walks ``install`` step for step - same prerequisite checks, same
+    abort conditions (each raises ``InstallError`` with the exact message
+    a real run would die on), but read-only throughout. Returns one line
+    per managed target: ``<path>  <status>: <detail>`` with indented
+    ``+`` bullets for what a merge would add. The CLI owns the banner.
+    """
+    home = Path(home)
+    missing = check_prerequisites(home, runner=runner)
+    if missing:
+        raise InstallError("missing prerequisites: " + "; ".join(missing))
+
+    lines: list[str] = []
+    store = home / ".claude-continuity"
+
+    # app copy + launcher stub (same self-destruct guard as copy_app)
+    pkg_src = Path(__file__).resolve().parent
+    pkg_dst = store / "app" / "cc_continuity"
+    if pkg_src == pkg_dst.resolve():
+        raise InstallError(
+            "refusing to install from the installed app dir "
+            f"({pkg_src}) - run install from the dev tree")
+    lines.append(f"{pkg_dst}  replace: package copy of {pkg_src} "
+                 "(replaced on every install)")
+    lines.append(f"{store / 'app' / 'bin' / 'cc-continuity'}  write: "
+                 "launcher stub, mode 0755")
+
+    # ~/.local/bin symlink (same refuse rule as make_symlink)
+    bin_link = home / ".local" / "bin" / "cc-continuity"
+    launcher = store / "app" / "bin" / "cc-continuity"
+    if bin_link.is_symlink():
+        if os.path.realpath(bin_link) == os.path.realpath(launcher):
+            lines.append(f"{bin_link}  unchanged: already -> {launcher}")
+        else:
+            lines.append(f"{bin_link}  replace: symlink retargeted -> "
+                         f"{launcher}")
+    elif bin_link.exists():
+        raise InstallError(
+            f"refusing to replace existing non-symlink file: {bin_link}")
+    else:
+        lines.append(f"{bin_link}  create: symlink -> {launcher}")
+
+    # settings.json (merge-never-replace diffed against the current file)
+    claude_dir = home / ".claude"
+    settings_path = claude_dir / "settings.json"
+    win = int(window) if window is not None else 262144
+    sm: dict | None = None
+    if settings_path.is_file():
+        raw = settings_path.read_bytes()
+        try:
+            existing = json.loads(raw)
+        except ValueError as e:
+            raise InstallError(f"invalid JSON in {settings_path}: {e}") from e
+        if not isinstance(existing, dict):
+            raise InstallError(
+                f"settings.json must be a JSON object: {settings_path}")
+        merged, sm = merge_settings(existing, launcher=str(bin_link),
+                                    window=win)
+        if merged == existing:
+            lines.append(f"{settings_path}  unchanged: our entries already "
+                         "in place")
+        else:
+            lines.append(f"{settings_path}  update: merge-never-replace "
+                         "(backup settings.json.bak-<timestamp> first)")
+            n_ev = sum(1 for ev in HOOK_EVENTS
+                       if [e for e in (existing.get("hooks") or {})
+                           .get(ev, []) if isinstance(e, dict) and is_ours(e)]
+                       != [our_hook_entry(ev, str(bin_link))])
+            if n_ev:
+                lines.append(f"  + hooks: {n_ev} event(s) -> "
+                             f"'{bin_link} hook <event>'")
+            if sm["status_line_changed"]:
+                prev = (sm.get("previous_status_line") or {}).get("command")
+                lines.append(f"  + statusLine: chain user command {prev}")
+            env_vals = {ENV_KEYS[0]: str(win),
+                        ENV_OVERRIDE_KEY: ENV_OVERRIDE_VALUE}
+            added = [f"{k}={env_vals[k]}" for k, old in sm["env_prev"].items()
+                     if old is None]
+            if added:
+                lines.append("  + env: " + ", ".join(added))
+            if sm["allow_added"]:
+                lines.append("  + permissions.allow: "
+                             + ", ".join(sm["allow_added"]))
+            if sm["dirs_added"]:
+                lines.append("  + permissions.additionalDirectories: "
+                             + ", ".join(sm["dirs_added"]))
+    else:
+        lines.append(f"{settings_path}  create: new file (hooks, statusLine, "
+                     "env, permissions)")
+
+    # ~/.claude/CLAUDE.md managed block
+    claude_md = claude_dir / "CLAUDE.md"
+    if claude_md.is_file():
+        prev_md = claude_md.read_text(encoding="utf-8")
+        new_md = managed.upsert_block(
+            prev_md, CLAUDE_MD_BEGIN, CLAUDE_MD_END,
+            CLAUDE_MD_CONTENT.rstrip("\n"))
+        status = "update" if new_md != prev_md else "unchanged"
+        lines.append(f"{claude_md}  {status}: managed continuity block")
+    else:
+        lines.append(f"{claude_md}  create: managed continuity block")
+
+    # user skills
+    skills_dir = claude_dir / "skills"
+    stale = [f for f in skills.skill_files(skills_dir)
+             if not f.is_file()
+             or f.read_text(encoding="utf-8") != skills.skill_text(
+                 f.parent.name)]
+    total = len(skills.skill_names())
+    if stale:
+        lines.append(f"{skills_dir}  update: write {len(stale)} of {total} "
+                     "SKILL.md files")
+    else:
+        lines.append(f"{skills_dir}  unchanged: all {total} SKILL.md files "
+                     "current")
+
+    # login-shell rc managed block (symlink-aware, same target as install)
+    from . import hosting  # lazy: hosting imports this module (T4 note)
+    if hosting.kind() == "macos":
+        zshrc = home / ".zshrc"
+        is_link = zshrc.is_symlink()
+        rc_path = zshrc.resolve() if is_link else zshrc
+    else:
+        rc_link = rc_target(home)  # unsupported login shell: same abort
+        is_link = rc_link.is_symlink()
+        rc_path = rc_link.resolve() if is_link else rc_link
+    if rc_path.is_file():
+        rtext = rc_path.read_text(encoding="utf-8")
+        new_rc = managed.upsert_block(rtext, ZSHRC_BEGIN, ZSHRC_END,
+                                      ZSHRC_CONTENT.rstrip("\n"))
+        status = "update" if new_rc != rtext else "unchanged"
+        lines.append(f"{rc_path}  {status}: managed launcher block"
+                     + (" (symlink-aware)" if is_link else ""))
+    else:
+        lines.append(f"{rc_path}  create: managed launcher block"
+                     + (" (via symlink)" if is_link else ""))
+
+    # config.json (user-visible keys only; the installer manifest is
+    # restamped by any real run and is not reported as a user change)
+    cfg_path = store / "config.json"
+    cfg: dict = {}
+    if cfg_path.is_file():
+        try:
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except (ValueError, OSError):
+            pass  # corrupt config: install tolerates, doctor flags
+    diffs: list[str] = []
+    if window is not None and cfg.get("window_tokens") != win:
+        diffs.append(f"window_tokens={win}")
+    if ntfy is not None:
+        if cfg.get("notify_endpoint") != ntfy:
+            diffs.append(f"notify_endpoint={ntfy or '(off)'}")
+        if cfg.get("notify_enabled") != bool(ntfy):
+            diffs.append(f"notify_enabled={bool(ntfy)}")
+    chained = ((sm or {}).get("previous_status_line") or {}).get("command")
+    if chained and cfg.get("chained_statusline") != chained:
+        diffs.append(f"chained_statusline={chained}")
+    if not cfg_path.is_file():
+        lines.append(f"{cfg_path}  create: defaults"
+                     + (", " + ", ".join(diffs) if diffs else ""))
+    elif diffs:
+        lines.append(f"{cfg_path}  update: " + ", ".join(diffs))
+    else:
+        lines.append(f"{cfg_path}  unchanged: user keys current "
+                     "(installer manifest restamped)")
+    return lines
 
 
 # ------------------------------------------- generic-hook migration (issue #7)
