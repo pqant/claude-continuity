@@ -35,3 +35,29 @@ def test_gif_reference_line_has_alt_text():
     line = next(l for l in TEXT.splitlines() if REF in l)
     assert line.startswith("![") and f"]({REF})" in line
     assert line[2:line.index("](")].strip()
+
+
+def _frame_delays_ms(path: Path) -> list[int]:
+    """Per-frame delay from each Graphic Control Extension (cs -> ms)."""
+    b = path.read_bytes()
+    delays = []
+    i = 0
+    while True:
+        i = b.find(b"\x21\xf9", i)
+        if i < 0:
+            return delays
+        if b[i + 2] == 4:  # GCE block size is fixed at 4
+            delays.append((b[i + 4] | (b[i + 5] << 8)) * 10)
+        i += 2
+
+
+def test_handoff_frames_are_readable():
+    # issue #80: the rotation story frames (the ACTIVE hold, HANDOFF! x2,
+    # ROTATING, the successor hold) must dwell long enough to actually read
+    delays = _frame_delays_ms(ASSET)
+    assert len(delays) == 13
+    for idx in (7, 8, 9, 10, 12):
+        assert delays[idx] >= 400, (idx, delays[idx])
+    # the sweep keeps moving but the whole loop stays followable
+    assert min(delays) >= 80
+    assert sum(delays) >= 4000
