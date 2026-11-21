@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.55] - 2026-11-21
+
+### Fixed
+
+- `doctor` now clears stale project lock files instead of warning about them forever. `lock.release()` keeps `projects/<key>/lock` as the last-holder diagnostic, so every abandoned project left a file with a dead PID behind and the `! stale-locks` line became permanent noise on long-lived machines. Check 14 is self-healing now, following the tmp-residue precedent: when an entry is older than the stale threshold AND its recorded PID is dead, the kernel's flock state is the authority - if the flock is already released nobody can still hold it, so the leftover is removed and reported as `removed <names>`; if the flock is still held (the inherited-fd edge case) the file survives and the check reports `held: <names>` instead of lying about the state (issue #79).
+
 ## [0.3.54] - 2026-11-21
 
 ### Added
