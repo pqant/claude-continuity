@@ -716,6 +716,136 @@ def compose_line(chained: str, segment: str) -> str:
     return f"{chained} {segment}"
 
 
+# ------------------------------------------------------------- render cache
+# Issue #77: CC re-renders the status line ~1/s while the session sits
+# idle. The heavy stages (session lookup, ledger reads, the transcript
+# tail behind the turn clock, the tmux pane capture, the pane-data
+# rewrite) all produce the same facts between tool calls, so their
+# results are cached in runtime/ and only refreshed when a cheap stat
+# fingerprint moves: a ledger append (any hook event writes the ledger
+# or the pane binding), a session-registry or state.json rewrite, or
+# transcript growth. Wall-time stages (shimmer sweep, reply settle, the
+# ratio straight from the payload) keep flowing on every render, so the
+# "always animated" ruling holds and HUD numbers never freeze. Any
+# doubt (missing/corrupt cache, changed config, moved file) falls back
+# to the full render - the line is never wrong because of the cache.
+
+_RENDER_CACHE_PREFIX = "status-render-cache-"
+_RENDER_CACHE_VERSION = 1
+
+
+def _stat_sig(path):
+    """Cheap change fingerprint of a file, or None when it is absent."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [int(st.st_mtime_ns), int(st.st_size)]
+
+
+def _tree_sig():
+    """Directory-mtime fingerprint of the session registry (issue #77).
+
+    A new project rotates ``projects/``, a new session rotates the
+    per-project ``sessions/`` dir - no file read is needed to notice a
+    session appearing (the payload sid can gain a state.json while we
+    sit on a cached ``record = None``).
+    """
+    base = paths.projects_dir()
+    try:
+        parts = [int(os.stat(base).st_mtime_ns)]
+    except OSError:
+        return None
+    try:
+        projs = sorted(p.name for p in base.iterdir())
+    except OSError:
+        return parts
+    for name in projs:
+        try:
+            parts.append(int(os.stat(base / name / "sessions").st_mtime_ns))
+        except OSError:
+            continue
+    return parts
+
+
+def _render_cache_key(payload):
+    """Pane-scoped (preferred, the #71 authority) or session-scoped key.
+
+    None when neither is available (no pane, no payload sid) - those
+    renders are trivial anyway and keep the pre-#77 path untouched.
+    """
+    path, _pane = _pane_binding()
+    if path is not None:
+        return path.name[len("pane-"):-len(".json")]
+    sid = payload.get("session_id") if isinstance(payload, dict) else None
+    if isinstance(sid, str) and sid:
+        return "sid-" + re.sub(r"[^A-Za-z0-9%_.-]", "_", sid)[:64]
+    return None
+
+
+def _render_cache_path(key):
+    return paths.runtime_dir() / f"{_RENDER_CACHE_PREFIX}{key}.json"
+
+
+def _binding_wall_ts():
+    """Wall ts of the pane binding file (its mtime == the hook-stamped
+    ts), or None without a pane/binding. The hit path re-applies the
+    #71 freshness gate from this without re-reading the file."""
+    path, _pane = _pane_binding()
+    if path is None:
+        return None
+    try:
+        return os.stat(path).st_mtime_ns / 1e9
+    except OSError:
+        return None
+
+
+def _render_sig(cfg, ansi, payload, tp):
+    """Everything that must MATCH for a cached render to be reusable."""
+    return {"v": _RENDER_CACHE_VERSION,
+            "sid": (payload or {}).get("session_id"),
+            "mode": config.progress_mode(cfg),
+            "ansi": bool(ansi),
+            "blink_reply": config.blink_reply(cfg),
+            "settle": config.blink_reply_settle(cfg),
+            "turn_clock": config.turn_clock(cfg),
+            "tp": tp if isinstance(tp, str) else None}
+
+
+def _facts_stats(cache):
+    """Recompute the live stat fingerprint for a cached fact set."""
+    sdir_info = cache.get("sdir")
+    if sdir_info:
+        sdir = paths.session_dir(sdir_info[0], int(sdir_info[1]))
+        state_sig = _stat_sig(sdir / "state.json")
+        ledger_sig = _stat_sig(sdir / ledger.LEDGER_NAME)
+    else:
+        state_sig = ledger_sig = None
+    bind_path, _pane = _pane_binding()
+    return {"tree": _tree_sig(), "state": state_sig,
+            "ledger": ledger_sig,
+            "bind": _stat_sig(bind_path) if bind_path is not None else None}
+
+
+def _load_render_cache(cache_path, sig):
+    """Validate a cached render state, or None for a full render."""
+    if cache_path is None:
+        return None
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cache, dict) or cache.get("sig") != sig:
+        return None
+    stats = cache.get("stats")
+    if not isinstance(stats, dict) or not isinstance(cache.get("record"),
+                                                     (dict, type(None))):
+        return None
+    if stats != _facts_stats(cache):
+        return None
+    return cache
+
+
 # ------------------------------------------------------------------- entry
 
 
@@ -736,59 +866,102 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         payload = None
 
     enabled = config.is_enabled(cfg)
+    ansi = bool(cfg.get("statusline_ansi", True))
+    now = time.time()
+    mode = config.progress_mode(cfg)
     metric = None
     record = None
+    bound = None
+    blocked = None
+    pending = None
+    wake = False
+    prev_dur = None
+    region = None
+    cache = None
+    cache_path = None
+    cache_dirty = False
+    pane_data = None
+    ratio = None
     if enabled:
         window = cfg.get("window_tokens") or 0
         metric = extract_metric(payload, window)
-        # issue #71: the pane's hook-stamped binding names the sid the
-        # session is actually tracked under; a zombie render (abandoned
-        # startup sid) must write under it, else the gate starves.
-        bound = (_pane_bound_sid(payload.get("session_id"))
-                 if payload is not None else None)
+        ratio = metric["ratio"] if metric is not None else None
+        # issue #77: before paying for ANY heavy stage, consult the render
+        # cache. A hit reuses the facts; only the cheap stat fingerprint,
+        # the payload ratio, the reply settle and the sweep move.
+        key = _render_cache_key(payload)
+        cache_path = _render_cache_path(key) if key else None
+        tp = metric.get("transcript_path") if metric is not None else None
+        sig = _render_sig(cfg, ansi, payload, tp)
+        cache = _load_render_cache(cache_path, sig)
+        if cache is None:
+            # issue #71: the pane's hook-stamped binding names the sid the
+            # session is actually tracked under; a zombie render (abandoned
+            # startup sid) must write under it, else the gate starves.
+            bound = (_pane_bound_sid(payload.get("session_id"))
+                     if payload is not None else None)
+            if payload is not None:
+                record = find_session_by_id(bound or payload.get("session_id"))
+            if record is not None:
+                sdir = paths.session_dir(record["project_key"],
+                                         int(record["nnn"]))
+                try:
+                    blocked = ledger.blocked_reason(sdir)
+                except (OSError, ValueError):
+                    blocked = None
+                if config.blink_reply(cfg):
+                    # settle (user ruling 2026-11-07): a just-finished turn
+                    # is only reported once its settle window elapsed and
+                    # nothing woke the session since - CC re-renders ~1/s
+                    # while idle, so the marker lands on the first settled
+                    # render and an auto-continuation keeps it out entirely.
+                    # issue #77: the raw ts + selfwake split is cached, the
+                    # settle window itself is applied per render by wall
+                    # time, so the marker still lands mid-idle.
+                    try:
+                        pending, wake = ledger.reply_state(sdir)
+                    except (OSError, ValueError):
+                        pending, wake = None, False
+            # Issue #45: prev-task wall time for the HUD (turn_clock
+            # opt-in). The transcript path rides the status line payload;
+            # the parse is the guarded #44 tail reader and must never take
+            # the HUD down.
+            if config.turn_clock(cfg) and metric is not None:
+                tp = metric.get("transcript_path")
+                if isinstance(tp, str) and tp:
+                    try:
+                        prev_dur = transcript.prev_task_duration(tp)
+                    except Exception:
+                        prev_dur = None
+            region = _input_box_lines() if (ansi and ratio is not None
+                                            and not (record is not None
+                                                     and record.get("off"))
+                                            ) else None
+        else:
+            record = cache.get("record")
+            bound = cache.get("bound")
+            binding_ts = cache.get("binding_ts")
+            if bound is not None:
+                # same freshness gate as _pane_bound_sid, no re-read: the
+                # binding stat fingerprint already ruled out a change.
+                if (not isinstance(binding_ts, (int, float))
+                        or isinstance(binding_ts, bool)
+                        or now - binding_ts > STALE_SECONDS):
+                    bound = None
+            blocked = cache.get("blocked")
+            pending = cache.get("reply_ts")
+            wake = bool(cache.get("reply_wake"))
+            prev_dur = cache.get("prev_dur")
+            region = cache.get("region")
         if metric is not None:
             if bound is not None:
                 metric = dict(metric, session_id=bound)
             write_metric(metric)
-        if payload is not None:
-            record = find_session_by_id(bound or payload.get("session_id"))
 
-    ratio = metric["ratio"] if metric is not None else None
-    blocked = None
-    reply = False
-    if record is not None:
-        try:
-            blocked = ledger.blocked_reason(
-                paths.session_dir(record["project_key"],
-                                  int(record["nnn"])))
-        except (OSError, ValueError):
-            blocked = None
-        if config.blink_reply(cfg):
-            # settle (user ruling 2026-11-07): a just-finished turn is
-            # only reported once its settle window elapsed and nothing
-            # woke the session since - CC re-renders ~1/s while idle,
-            # so the marker lands on the first settled render and an
-            # auto-continuation keeps it out entirely.
-            try:
-                reply = ledger.reply_pending(
-                    paths.session_dir(record["project_key"],
-                                      int(record["nnn"])),
-                    settle=config.blink_reply_settle(cfg),
-                    now=time.time()) is not None
-            except (OSError, ValueError):
-                reply = False
-    # Issue #45: prev-task wall time for the HUD (turn_clock opt-in).
-    # The transcript path rides the status line payload; the parse is the
-    # guarded #44 tail reader and must never take the HUD down.
-    prev_dur = None
-    if enabled and config.turn_clock(cfg) and metric is not None:
-        tp = metric.get("transcript_path")
-        if isinstance(tp, str) and tp:
-            try:
-                prev_dur = transcript.prev_task_duration(tp)
-            except Exception:
-                prev_dur = None
-    ansi = bool(cfg.get("statusline_ansi", True))
+    settle = config.blink_reply_settle(cfg)
+    reply = (record is not None and config.blink_reply(cfg)
+             and pending is not None and not wake
+             and not (settle > 0 and now - pending < settle))
     live = (enabled and ratio is not None
             and not (record is not None and record.get("off")))
     # Revision 11: in mode 0 the sweep is ALWAYS on for live ansi
@@ -799,15 +972,13 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
     # SHIMMER_CELLS_PER_S, no typing required. A static/off segment still
     # never reads the pane (short-circuit); the capture feeds the render
     # diagnostic log only (ut= stays honest: 1 = the word WAS in the box).
-    now = time.time()
-    region = _input_box_lines() if (ansi and live) else None
+    # issue #77: on a cache hit the capture itself is the cached region.
     word = bool(region) and bool(
         ULTRATHINK_RE.search("\n".join(region)))
     # issue #11: same live-capture gate as the ultrathink word: a dead
     # pane must not strand an ASK marker. blink.ask_visible covers both
     # permission wording and selection footers (AskUserQuestion).
     ask = bool(region) and blink.ask_visible("\n".join(region))
-    mode = config.progress_mode(cfg)
     if mode == 1:
         # Phase 12 fix (user bug A): in mode 1 the PANE is the ONLY
         # progress display — the status line must not render the same
@@ -823,11 +994,20 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
         # display there.
         from . import progress_pane  # local: it imports from THIS module
         sweep_pos = None
-        try:
-            result = progress_pane.ensure_progress_pane(cfg)
-        except Exception:
-            result = {}
-        win = result.get("window_id") if isinstance(result, dict) else None
+        if cache is None:
+            try:
+                result = progress_pane.ensure_progress_pane(cfg)
+            except Exception:
+                result = {}
+            win = (result.get("window_id")
+                   if isinstance(result, dict) else None)
+        else:
+            # issue #77: on a hit the pane decision is the cached one; the
+            # tmux self-heal query rides the next tool boundary.
+            m1 = cache.get("mode1") or {}
+            result = m1.get("result")
+            win = m1.get("win")
+            pane_data = cache.get("pane_data")
         if win:
             # Feed the pane only when we have a real metric (ratio present).
             # A no-metric render (idle between turns — e.g. the instant a
@@ -844,13 +1024,25 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             # fresh session, not a measurement; an existing file is never
             # rewritten by a no-metric render (no downgrade, no re-flash).
             if ratio is not None:
-                progress_pane.write_progress_data(win, render_segment(
-                    ratio, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask, reply=reply, prev_dur=prev_dur))
+                data = render_segment(ratio, record, enabled,
+                                      blocked=blocked, ansi=False,
+                                      ask=ask, reply=reply,
+                                      prev_dur=prev_dur)
+                # issue #77: on a cache hit the rewrite happens only when
+                # the pane data actually moved (ratio/marker flow); an
+                # idle repeat leaves the file (and its animator's mtime
+                # check) untouched. Misses keep today's unconditional feed.
+                if cache is None or data != pane_data:
+                    progress_pane.write_progress_data(win, data)
+                    pane_data = data
+                    cache_dirty = True
             elif enabled and not progress_pane.has_progress_data(win):
-                progress_pane.write_progress_data(win, render_segment(
-                    0.0, record, enabled, blocked=blocked, ansi=False,
-                    ask=ask, reply=reply, prev_dur=prev_dur))
+                pane_data = render_segment(0.0, record, enabled,
+                                           blocked=blocked, ansi=False,
+                                           ask=ask, reply=reply,
+                                           prev_dur=prev_dur)
+                progress_pane.write_progress_data(win, pane_data)
+                cache_dirty = True
             segment = ""
         elif (isinstance(result, dict)
               and result.get("reason") in ("no-window", "error")):
@@ -889,6 +1081,32 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
                                  ansi=ansi, now=now, shimmer=shimmer,
                                  shimmer_pos=sweep_pos, ask=ask,
                                  reply=reply, prev_dur=prev_dur)
+    if cache_path is not None:
+        if enabled and cache is None:
+            cache_obj = {"sig": sig,
+                         "record": record,
+                         "sdir": ([record["project_key"], record["nnn"]]
+                                  if isinstance(record, dict) else None),
+                         "bound": bound,
+                         "binding_ts": _binding_wall_ts(),
+                         "blocked": blocked,
+                         "reply_ts": pending, "reply_wake": bool(wake),
+                         "prev_dur": prev_dur,
+                         "region": region,
+                         "mode1": ({"result": result, "win": win}
+                                   if mode == 1 else None),
+                         "pane_data": pane_data}
+            try:
+                cache_obj["stats"] = _facts_stats(cache_obj)
+                atomic.atomic_write_json(cache_path, cache_obj)
+            except (OSError, ValueError):
+                pass
+        elif cache_dirty:
+            cache["pane_data"] = pane_data
+            try:
+                atomic.atomic_write_json(cache_path, cache)
+            except (OSError, ValueError):
+                pass
     _render_log(enabled, ansi, live, word, now, region, segment,
                 sweep_pos)
     chained = chain(cfg.get("chained_statusline"), stdin_bytes)

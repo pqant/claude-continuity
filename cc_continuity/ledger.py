@@ -94,6 +94,35 @@ _RESUME_TYPES = frozenset({"tool_use", "tool_failure", "task_created",
                            "task_completed", "stop"})
 
 
+def reply_state(session_dir: str | Path) -> "tuple[float | None, bool]":
+    """``(pending_ts, selfwake_consumed)`` of the latest ``reply_ready``.
+
+    Raw split of the :func:`reply_pending` read, for callers that keep the
+    facts in a render cache between status line invocations (issue #77):
+    ``pending_ts`` is the latest unconsumed ``reply_ready`` ts (settle
+    NOT applied), and ``selfwake_consumed`` says a wake entry newer than
+    that reply marks the wait as self-answered. Never raises.
+    """
+    try:
+        entries = read(session_dir)
+    except (OSError, ValueError):
+        return None, False
+    pending = None
+    for entry in entries:
+        t = entry.get("type")
+        if t == "reply_ready":
+            pending = entry.get("ts")
+        elif (t == "user_prompt" and not entry.get("agent_id")) or t == "reply_read":
+            pending = None
+    if pending is None:
+        return None, False
+    for entry in entries:
+        if (entry.get("type") in _RESUME_TYPES
+                and (entry.get("ts") or 0) > pending):
+            return pending, True  # woke itself: never a wait for the user
+    return pending, False
+
+
 def reply_pending(session_dir: str | Path, *, settle: float = 0.0,
                   now: float | None = None) -> float | None:
     """Ts of the latest UNCONSUMED ``reply_ready`` entry, or None.
@@ -112,26 +141,13 @@ def reply_pending(session_dir: str | Path, *, settle: float = 0.0,
     wakes itself was never waiting for the user. ``now`` is injectable
     for tests; ``settle=0`` keeps the raw read.
     """
-    try:
-        entries = read(session_dir)
-    except (OSError, ValueError):
+    pending, selfwake = reply_state(session_dir)
+    if pending is None or selfwake:
         return None
-    pending = None
-    for entry in entries:
-        t = entry.get("type")
-        if t == "reply_ready":
-            pending = entry.get("ts")
-        elif (t == "user_prompt" and not entry.get("agent_id")) or t == "reply_read":
-            pending = None
-    if pending is None:
-        return None
-    now = time.time() if now is None else now
-    if settle > 0 and now - pending < settle:
-        return None  # settling: an auto-continue may still land
-    for entry in entries:
-        if (entry.get("type") in _RESUME_TYPES
-                and (entry.get("ts") or 0) > pending):
-            return None  # woke itself: never a wait for the user
+    if settle > 0:
+        now = time.time() if now is None else now
+        if now - pending < settle:
+            return None  # settling: an auto-continue may still land
     return pending
 
 
