@@ -264,8 +264,10 @@ def run_doctor(home: Path, runner=subprocess.run,
     sdir = home / ".claude" / "skills"
     missing_s = [n for n in skills.skill_names()
                  if not (sdir / n / "SKILL.md").is_file()]
+    n_skills = len(skills.skill_names())
     add("skills", not missing_s,
-        "6/6" if not missing_s else f"missing: {', '.join(missing_s)}")
+        f"{n_skills}/{n_skills}" if not missing_s
+        else f"missing: {', '.join(missing_s)}")
 
     # 13: window vs observed context_window_size (warning only)
     env = (settings or {}).get("env") or {}

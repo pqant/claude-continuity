@@ -4,7 +4,7 @@
 ``~/.claude-continuity/app/`` + symlink ``~/.local/bin/cc-continuity``;
 merge (never replace) ``~/.claude/settings.json`` (hooks, statusLine
 chain, env, permissions - home-relative form per S12) with a timestamped
-backup; managed block in ``~/.claude/CLAUDE.md`` (Appendix A); the six
+backup; managed block in ``~/.claude/CLAUDE.md`` (Appendix A); the seven
 user skills; managed block in ``~/.zshrc`` (Appendix D, symlink-aware);
 write ``config.json`` (defaults + window + chained_statusline + manifest).
 Idempotent: entries are identifiable by the substring ``cc-continuity``.

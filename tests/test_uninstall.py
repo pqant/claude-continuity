@@ -80,7 +80,7 @@ def test_byte_for_byte_roundtrip_on_seeded_home(seeded_home):
     assert (h / ".zshrc").is_symlink()
     assert not (h / ".local" / "bin" / "cc-continuity").exists()
     assert not (h / ".claude-continuity" / "app").exists()
-    # skills: the six gone, foreign ones survive
+    # skills: the seven gone, foreign ones survive
     names = {p.name for p in (h / ".claude" / "skills").iterdir()}
     assert names == {"graphify"}
 

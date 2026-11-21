@@ -138,7 +138,7 @@ login shell); the full WSL guide is [`docs/WINDOWS.md`](docs/WINDOWS.md).
 The installer touches (all as identifiable managed blocks, all reversible
 via `cc-continuity uninstall`): hooks + status line in
 `~/.claude/settings.json`, a managed block in `~/.claude/CLAUDE.md`, the
-`claude()` wrapper in `~/.zshrc`, six `/continuity-*` skills, the
+`claude()` wrapper in `~/.zshrc`, seven `/continuity-*` skills, the
 `cc-continuity` launcher on PATH, and the app copy in
 `~/.claude-continuity/app/`. A timestamped backup of
 `settings.json` is written before any merge.

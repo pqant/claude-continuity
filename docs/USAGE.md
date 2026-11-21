@@ -35,7 +35,7 @@ Options:
 What the installer touches (all as managed blocks, all reversible via
 `uninstall`): hooks + statusline in `~/.claude/settings.json`, a managed
 block in `~/.claude/CLAUDE.md`, the `claude()` wrapper in `~/.zshrc`, the
-six `continuity-*` skills, the `cc-continuity` launcher on `PATH`, and the
+seven `continuity-*` skills, the `cc-continuity` launcher on `PATH`, and the
 app copy in `~/.claude-continuity/app/`.
 
 > **Updating:** from PyPI — `pip install --upgrade cc-continuity`, then
