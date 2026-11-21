@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.53] - 2026-11-21
+
+### Fixed
+
+- The reply blink no longer dies after a single look. The focus dwell consumed the reply the moment the user glanced at the tab, so reading the answer and then sending the window to the background without replying left the tab quiet and the pending answer forgotten. The blink poller (mode 0) and the pane animator (mode 1) now catch the window losing focus again while the reply is still unanswered (no newer main-session user prompt, no self-wake, not faded) and re-arm the blink with a fresh settle window, so the tab lights up again until the answer lands; once the user replies the re-arm stops (issue #78).
+
 ## [0.3.52] - 2026-11-21
 
 ### Added
