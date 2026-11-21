@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.58] - 2026-11-21
+
+### Fixed
+
+- The two skills that were invisible to the `/cc` slash-menu filter now show up. Claude Code fuzzy-matches the menu against the command name and the description text, so the five managed skills whose descriptions contain "cc-continuity" (checkpoint, status, rotate, off, on) appeared when you typed `/cc`, while `continuity-history` and `continuity-excellence` matched neither and stayed hidden. Both descriptions now carry the keyword, and a new test pins "cc-continuity" into every managed skill description, so a future skill added without it fails CI instead of disappearing from the menu (issue #82).
+
 ## [0.3.57] - 2026-11-21
 
 ### Added
