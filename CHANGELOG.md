@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.56] - 2026-11-21
+
+### Fixed
+
+- The README rotation GIF now plays slow enough to follow. The #40 demo cycled the whole rotation story in about 2 seconds, so the frames that actually matter - the end-of-ACTIVE hold, the two `HANDOFF!` frames, `ROTATING` and the fresh successor session - flashed by at ~320 ms and the handoff read as noise. The frames themselves are unchanged (still drawn from the real `render_segment` output, sweep still lively at ~110 ms); the dwell per story frame went up to 500-1000 ms and the loop to ~5 s, and a new test parses the GIF's per-frame delays so the pacing can never silently regress (issue #80).
+
 ## [0.3.55] - 2026-11-21
 
 ### Fixed
