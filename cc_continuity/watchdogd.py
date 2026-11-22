@@ -23,7 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import atomic, ledger, notify, paths, power_plug, state
+from . import (atomic, ledger, notify, overflow, paths, power_plug, state,
+               statusline, transcript)
 from .watchdog import (Episode, HealthState, build_nudge_text, classify,
                        exit_hang_due, find_claude_pid, find_exit_marker_ts,
                        frozen_nudge_due, nudge_action, parse_entry_ts,
@@ -922,6 +923,10 @@ class TickCtx:
     gen: HealthState = dataclasses.field(default_factory=HealthState)
     probe_generation: object = None  # () -> bool (Phase 22 gen probe)
     frozen_esc: set = dataclasses.field(default_factory=set)
+    # Durum A: per-PANE (target) context-400 recovery dedup, per run -
+    # one recovery attempt per pane (the froze pattern; recover_400 is
+    # itself idempotent via the state gate).
+    rec400: set = dataclasses.field(default_factory=set)
     # Phase 23 (fix a): daemon-lifetime zombie dedup. Session names are
     # random, so a cleaned session never reappears — one kill, ever. A
     # FAILED kill (rc != 0) is NOT added (the next tick retries).
@@ -1468,6 +1473,34 @@ def tick(ctx: TickCtx) -> dict:
                 ledger.append(sdir, {"type": "watchdog_freeze"})
                 ctx.froze.add(target)
                 line["events"].append(f"freeze:{key}:{nnn:03d}")
+            # Durum A (context-400 brick, connector-258): the Stop hook
+            # NEVER fired on the 400 turn, the pane sits frozen and the
+            # status-line metric starves every ratio guard - detect the
+            # synthetic-400 transcript tail and drive deterministic
+            # recovery (checkpoint + rotator) instead of Esc/escalation.
+            sid400 = rec.get("session_id")
+            if (bool(ctx.cfg.get("full_auto", True))
+                    and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE",
+                                             "WARNED")
+                    and sid400 and target not in ctx.rec400):
+                try:
+                    pfile = paths.project_dir(key) / "project.json"
+                    root = Path(json.loads(
+                        pfile.read_text(encoding="utf-8"))["root"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    _log_error("context400 root")
+                    root = None
+                if root is not None:
+                    tpath = transcript.resolve_transcript_path(
+                        statusline.read_metric(sid400), root, sid400)
+                    info = overflow.scan_tail_400(tpath) if tpath else None
+                    if info is not None:
+                        ctx.rec400.add(target)
+                        outcome400 = overflow.recover_400(
+                            key, nnn, sid400, target, ctx.cfg, root, info)
+                        line["events"].append(
+                            f"context400:{key}:{nnn:03d}:{outcome400}")
+                        continue
             if rec.get("turn_active"):
                 # a turn is in flight: once the freeze outlives the
                 # threshold, escalate (ESC + frozen-form nudge + push,
