@@ -242,3 +242,66 @@ def test_panel_echoes_transcript_line():
     assert "Transcript:" in install.CLAUDE_MD_CONTENT
     assert "**Transcript:**" in install.CLAUDE_MD_CONTENT
     assert "single backticks" in install.CLAUDE_MD_CONTENT
+
+
+# ------------------------------------------------- METRIC_FLOOR (Durum A)
+
+import json
+
+
+def _floor_ctx(tmp_path, window=None):
+    """A ctx whose project.json root is tmp_path (transcript discovery
+    base), with an optional window override."""
+    pdir = paths.project_dir("p-1234")
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "project.json").write_text(json.dumps({"root": str(tmp_path)}),
+                                       encoding="utf-8")
+    cfg = dict(config.DEFAULTS)
+    if window is not None:
+        cfg["window_tokens"] = window
+    session = {"session_id": SID, "state": "ACTIVE",
+               "project_key": "p-1234", "nnn": 1}
+    return common.HookContext("PostToolUse", {"session_id": SID}, cfg,
+                              session)
+
+
+def _write_usage_jsonl(tmp_path, used):
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps({"type": "assistant", "message": {
+        "model": "x", "content": [{"type": "text", "text": "hi"}],
+        "usage": {"input_tokens": used,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0}}}) + "\n",
+        encoding="utf-8")
+    return p
+
+
+def test_read_ratio_stale_uses_transcript_floor(cc_home, tmp_path):
+    w = config.DEFAULTS["window_tokens"]
+    jsonl = _write_usage_jsonl(tmp_path, w // 2)
+    statusline.write_metric({"session_id": SID, "ts": time.time() - 700,
+                             "used_tokens": 1, "window_tokens": 100,
+                             "ratio": 0.9,  # red herring: stale, never used
+                             "transcript_path": str(jsonl)})
+    assert thresholds.read_ratio(_floor_ctx(tmp_path, window=w)) == 0.5
+    log = (paths.continuity_home() / "logs" / "events.log").read_text()
+    assert "METRIC_FLOOR" in log and SID in log and "ratio=0.5" in log
+
+
+def test_read_ratio_stale_no_transcript_logs_stale(cc_home, tmp_path):
+    _write_metric(0.61, age=700)
+    assert thresholds.read_ratio(_floor_ctx(tmp_path)) is None
+    log = (paths.continuity_home() / "logs" / "events.log").read_text()
+    assert "METRIC_STALE" in log and "METRIC_FLOOR" not in log
+
+
+def test_read_ratio_fresh_ignores_floor(cc_home, tmp_path):
+    w = config.DEFAULTS["window_tokens"]
+    jsonl = _write_usage_jsonl(tmp_path, w // 2)  # would estimate 0.5
+    statusline.write_metric({"session_id": SID, "ts": time.time(),
+                             "used_tokens": 1, "window_tokens": 100,
+                             "ratio": 0.61, "transcript_path": str(jsonl)})
+    assert thresholds.read_ratio(_floor_ctx(tmp_path, window=w)) == 0.61
+    log_path = paths.continuity_home() / "logs" / "events.log"
+    log = log_path.read_text() if log_path.exists() else ""
+    assert "METRIC_FLOOR" not in log
