@@ -411,3 +411,56 @@ def test_watchdog_check_enabled_loaded_ok(fake_home, tmp_path):
                                which=_which_ok)
     wd = next(c for c in checks if c.name == "watchdog")
     assert wd.ok and "loaded" in wd.detail
+
+
+# --------------------------------------------- hud-added-dirs (issue #85)
+
+def _hud_installed(fake_home):
+    """Installed home whose chain runs claude-hud (issue #85 shape)."""
+    install.install(fake_home, window=262144, runner=FakeRun())
+    _write_cfg(fake_home, chained_statusline=str(
+        fake_home / ".claude" / "claude-hud-launch.sh"))
+    return fake_home
+
+
+def _hud_check(fake_home):
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    return next(c for c in checks if c.name == "hud-added-dirs")
+
+
+def test_hud_added_dirs_warns_with_hint(fake_home):
+    # HUD chained, no HUD config (default showAddedDirs true), our dir
+    # registered by install: warn once and print the exact config fix.
+    _hud_installed(fake_home)
+    c = _hud_check(fake_home)
+    assert c.ok and c.warning
+    assert "showAddedDirs" in c.detail
+    assert "claude-hud/config.json" in c.detail
+
+
+def test_hud_added_dirs_quiet_when_flag_off(fake_home):
+    _hud_installed(fake_home)
+    hud_cfg = fake_home / ".claude" / "plugins" / "claude-hud" / "config.json"
+    hud_cfg.parent.mkdir(parents=True)
+    hud_cfg.write_text(json.dumps({"display": {"showAddedDirs": False}}),
+                       encoding="utf-8")
+    c = _hud_check(fake_home)
+    assert c.ok and not c.warning and "false" in c.detail
+
+
+def test_hud_added_dirs_not_registered(fake_home):
+    _hud_installed(fake_home)
+    sp = fake_home / ".claude" / "settings.json"
+    settings = json.loads(sp.read_text(encoding="utf-8"))
+    settings["permissions"]["additionalDirectories"] = []
+    sp.write_text(json.dumps(settings), encoding="utf-8")
+    c = _hud_check(fake_home)
+    assert c.ok and not c.warning and "not registered" in c.detail
+
+
+def test_hud_added_dirs_absent_without_chain(fake_home):
+    install.install(fake_home, window=262144, runner=FakeRun())
+    checks = doctor.run_doctor(fake_home, runner=FakeRun(),
+                               which=_which_ok)
+    assert all(c.name != "hud-added-dirs" for c in checks)
