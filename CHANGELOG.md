@@ -4,6 +4,14 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.59] - 2026-11-22
+
+### Fixed
+
+- A context-400 overflow no longer bricks a session. When the API rejects the oversized prompt with a 400, the Stop hook never fires, so the model can never write its own handoff, the status line metric freezes at its last value, and the rotator (which reads that metric) never triggers: the watchdog nudged a pane that could only 400 again, forever. Three additive pieces close the loop. A new `overflow` module detects the trailing synthetic "API Error: 400 ... maximum context length" transcript record (excluding the "No response requested." synthetic kind), estimates the context ratio from the last real assistant usage, and recovers deterministically: the checkpoint is finalized by the watchdog itself (no model turn to 400 again) and the successor is spawned. The watchdog's FROZEN path now runs that detection and recovery before nudging, once per target, and falls through to the old Esc/escalation path when detection cannot read the project root. And `read_ratio` now falls back to the transcript-based estimate (logged as `METRIC_FLOOR`) when the metric is stale, instead of parking on `None`, so ratio-driven guards keep working while a pane is frozen. Fresh payloads are never overridden; the thresholds themselves are unchanged (issue #86).
+
+- Chaining [claude-hud](https://github.com/) (0.15.4+) no longer leaves an unexplained `+.claude-continuity` segment on the status line. HUD 0.15.4 started rendering every `workspace.added_dirs` entry inline after the project name, and our install legitimately registers `~/.claude-continuity` as an additional directory, so the segment appeared the day HUD auto-updated. `cc-continuity doctor` now detects the combination (claude-hud chain, our directory registered, HUD's `display.showAddedDirs` not set to false) and prints the one-line exact config fix; the README documents the interaction too (issue #85).
+
 ## [0.3.58] - 2026-11-21
 
 ### Fixed
