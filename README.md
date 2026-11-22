@@ -155,6 +155,14 @@ Watch the status line: the context ratio climbs (default thresholds
 (quick-start list above). After a crash, sleep, or reboot: just run
 `claude` in the project and say "continue".
 
+Chaining a third-party status line such as [claude-hud](https://github.com/)?
+cc-continuity registers `~/.claude-continuity` as an additional directory,
+and claude-hud 0.15.4+ renders every additional directory inline after the
+project name, so you see an extra `+.claude-continuity` segment. Hide it by
+setting `{"display": {"showAddedDirs": false}}` in
+`~/.claude/plugins/claude-hud/config.json`; `cc-continuity doctor` prints
+that exact hint when it detects the combination (issue #85).
+
 In-session commands: `/continuity-status`, `/continuity-checkpoint`,
 `/continuity-rotate`, `/continuity-off` / `/continuity-on`,
 `/continuity-history`. Full CLI reference: `docs/USAGE.md`.
