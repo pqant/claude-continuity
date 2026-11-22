@@ -231,6 +231,35 @@ def run_doctor(home: Path, runner=subprocess.run,
         target = Path(chained).expanduser()
         add("chained", True, str(target), warning=not target.exists())
 
+    # 9b: claude-hud added-dirs noise (issue #85, warning only): HUD
+    # 0.15.4+ renders every workspace.added_dirs entry after the project
+    # path, so our legitimate ~/.claude-continuity entry appears as a
+    # '+.claude-continuity' segment. The fix lives in the third-party HUD
+    # config, so this check only prints the hint.
+    hud_cfg_path = home / ".claude" / "plugins" / "claude-hud" / "config.json"
+    if chained and ("claude-hud" in str(chained) or hud_cfg_path.is_file()):
+        hud_cfg = _safe_json(hud_cfg_path)
+        hud_display = hud_cfg.get("display", {}) if isinstance(hud_cfg, dict) else {}
+        if hud_display.get("showAddedDirs") is False:
+            add("hud-added-dirs", True, "showAddedDirs false")
+        else:
+            perms = settings.get("permissions", {}) \
+                if isinstance(settings, dict) else {}
+            dirs = perms.get("additionalDirectories", []) \
+                if isinstance(perms, dict) else []
+            ours = any(
+                str(Path(str(d)).expanduser()) ==
+                str(home / ".claude-continuity") for d in dirs)
+            if not ours:
+                add("hud-added-dirs", True, "our dir not registered")
+            else:
+                add("hud-added-dirs", True,
+                    "claude-hud renders +.claude-continuity from our "
+                    "additionalDirectories; set "
+                    '{"display": {"showAddedDirs": false}} in '
+                    "~/.claude/plugins/claude-hud/config.json",
+                    warning=True)
+
     # 10: CLAUDE.md block
     claude_md = home / ".claude" / "CLAUDE.md"
     md_text = claude_md.read_text(encoding="utf-8") if claude_md.is_file() \
