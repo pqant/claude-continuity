@@ -2,17 +2,25 @@
 truth for ratio reading, state walking, the PreToolUse allowlist, and the
 Appendix C injected texts.
 
-Ratio source is the status-line metric only (PRD §7/F5): a missing or
-> 10-minute-old metric is "unknown" and NEVER drives a transition; the
-affected paths log METRIC_STALE.
+Ratio source is the status-line metric (PRD §7/F5); the fresh payload
+ratio is authoritative. A missing or > 10-minute-old metric is "unknown"
+for the payload path - but a frozen pane stops rendering, so the metric
+freezes at its last value and every ratio-driven guard parks on None
+(the context-400 brick, connector-258). The stale path therefore first
+tries the transcript-side METRIC_FLOOR (overflow.estimate_ratio over the
+live JSONL usage, see Durum A); only when that finds nothing does it log
+METRIC_STALE and return None.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
+from pathlib import Path
 
-from . import checkpoint, lock, notify, state, statusline
+from . import (checkpoint, lock, notify, overflow, paths, state, statusline,
+               transcript)
 from .hooks.common import HookContext, log_event
 
 #: PRD §9 PreToolUse allowlist: Bash commands that stay allowed at the
@@ -27,13 +35,47 @@ def pct_of(ratio: float) -> int:
     return math.ceil(round(ratio * 100, 6))
 
 
-def read_ratio(ctx: HookContext) -> float | None:
-    """Fresh ratio for decisions, or None (missing/stale metric).
+def _transcript_floor(ctx: HookContext,
+                      metric: dict | None) -> float | None:
+    """METRIC_FLOOR: transcript-side ratio when the status-line metric is
+    stale/absent (Durum A - a frozen pane freezes the metric file).
 
-    Logs one METRIC_STALE line to events.log on the unknown path (PRD §7).
+    Resolves the live JSONL through ``transcript.resolve_transcript_path``
+    (the metric's own ``transcript_path`` wins, the derived-slug fallback
+    follows) and estimates from the newest non-zero usage. Never raises:
+    any read/parse problem is simply "no floor" (None)."""
+    try:
+        sid = ctx.session["session_id"]
+        pfile = (paths.project_dir(ctx.session["project_key"])
+                 / "project.json")
+        root = Path(json.loads(pfile.read_text(encoding="utf-8"))["root"])
+        tpath = transcript.resolve_transcript_path(metric, root, sid)
+        if tpath is None:
+            return None
+        ratio = overflow.estimate_ratio(tpath,
+                                        ctx.cfg.get("window_tokens"))
+        if ratio is None:
+            return None
+        log_event(f"METRIC_FLOOR session={sid} "
+                  f"state={ctx.session.get('state')} ratio={ratio}")
+        return ratio
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def read_ratio(ctx: HookContext) -> float | None:
+    """Fresh ratio for decisions, or None (missing/stale metric with no
+    transcript floor).
+
+    Stale/absent metric: try the METRIC_FLOOR first (logs one
+    METRIC_FLOOR line on a hit); only a floor miss logs METRIC_STALE
+    and returns None (PRD §7). The fresh payload path is untouched.
     """
     metric = statusline.read_metric(ctx.session["session_id"])
     if statusline.is_stale(metric):
+        floor = _transcript_floor(ctx, metric)
+        if floor is not None:
+            return floor
         log_event(f"METRIC_STALE session={ctx.session['session_id']} "
                   f"state={ctx.session.get('state')}")
         return None
