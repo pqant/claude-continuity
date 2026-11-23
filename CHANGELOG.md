@@ -4,6 +4,10 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Context-400 recovery no longer depends on how the watchdog classifies a pane's screen. The #86 recovery was wired only into the FROZEN branch of the tick loop, but a session stuck on an oversized prompt usually still looks alive: the pane keeps redrawing, so `classify` returns ALIVE (or TURN_DEAD/STALLED once the turn flag expires), and none of those paths ever reached the recovery code while the watchdog nudged a pane that could only 400 again. The recovery block is now extracted into a `_try_recover_400` helper and the tick loop runs it right after the transcript tail is read, before the TURN_DEAD/STALLED branch, for every session classified as ALIVE, TURN_DEAD or STALLED with an active turn; the FROZEN branch keeps the same call as defense-in-depth. The recovery gate itself is unchanged (full-auto, session state BOOTSTRAPPING/ACTIVE/WARNED, one attempt per target, transcript-tail 400 scan), and the screen-independence tests were written first (issue #87).
+
 ## [0.3.59] - 2026-11-22
 
 ### Fixed
