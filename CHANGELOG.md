@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.62] - 2026-11-23
+
+### Fixed
+
+- Sessions stuck in `CHECKPOINT_VERIFIED` are now actually dispatched to context-400 recovery. v0.3.61 had added `CHECKPOINT_VERIFIED` to the recovery gate, but the watchdog tick loop still only reached that gate through screen classification: `classify` returns SKIP for every record outside `ACTIVE`/`WARNED`, and the tick loop called the recovery helper only for sessions classified as ALIVE, TURN_DEAD, STALLED or FROZEN, so a stalled verified checkpoint was never scanned and stayed parked on the oversized prompt (observed live: ticks kept reporting SKIP across restarts). The tick loop now also calls the recovery helper for a session classified as SKIP whose state is `CHECKPOINT_VERIFIED` with a turn in flight; the gate itself (full-auto, state set, one-attempt dedup, transcript-tail scan, fresh-prompt check) stays the single source of truth and the liveness semantics of `classify` are untouched, and three tick-loop integration tests were written first to pin the dispatch (active-turn verified checkpoint dispatched, resting verified checkpoint not dispatched, other skipped states not dispatched) (issue #92).
+
 ## [0.3.61] - 2026-11-23
 
 ### Fixed
