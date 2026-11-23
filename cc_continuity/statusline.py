@@ -31,7 +31,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import atomic, blink, config, ledger, naming, paths, transcript
+from . import atomic, blink, config, ledger, naming, paths, project, transcript
 
 #: Hooks treat a metric older than this as unknown (PRD §7, METRIC_STALE).
 STALE_SECONDS = 600
@@ -415,7 +415,7 @@ def stamp_pane_binding(session_id: object) -> None:
         pass
 
 
-def _pane_bound_sid(payload_sid):
+def _pane_bound_sid(payload_sid, payload=None):
     """The bound sid to retarget this render's metric to, or None.
 
     Redirect only when ALL of: we are in a tmux pane, the binding is fresh
@@ -427,7 +427,12 @@ def _pane_bound_sid(payload_sid):
     conversation is live (CC renders the status line with the stale sid,
     issue #42 evidence). The binding must not predate the payload record's
     creation (same-pane sequential claude must not inherit the previous
-    session's binding). Any doubt -> None -> today's byte-identical write.
+    session's binding). The bound record's project must match the
+    payload's project (BUG-2, connector-258: pane ids are renumbered on
+    tmux-server restart, so a foreign project's stamp used to retarget
+    this render onto the wrong session; without a payload record the
+    comparison falls back to the payload's workspace.project_dir/cwd).
+    Any doubt -> None -> today's byte-identical write.
     """
     if not payload_sid:
         return None
@@ -451,6 +456,23 @@ def _pane_bound_sid(payload_sid):
             or bound.get("state") not in _RETARGET_STATES):
         return None
     payload_rec = find_session_by_id(payload_sid)
+    # BUG-2 (connector-258) cross-project gate: reject only when BOTH
+    # project keys are known and differ (unknown -> today's behavior).
+    bound_key = bound.get("project_key")
+    payload_key = (payload_rec.get("project_key")
+                   if isinstance(payload_rec, dict) else None)
+    if payload_key is None and isinstance(payload, dict):
+        ws = payload.get("workspace")
+        pdir = ((ws.get("project_dir") if isinstance(ws, dict) else None)
+                or payload.get("cwd"))
+        if isinstance(pdir, (str, Path)) and str(pdir):
+            try:
+                payload_key = project.project_key_for_root(
+                    project.resolve_root(pdir))
+            except (OSError, ValueError):
+                payload_key = None
+    if bound_key and payload_key and bound_key != payload_key:
+        return None
     if isinstance(payload_rec, dict):
         created = payload_rec.get("created")
         if isinstance(created, str):
@@ -898,7 +920,7 @@ def run(stdin_bytes: bytes, cfg: dict) -> str:
             # issue #71: the pane's hook-stamped binding names the sid the
             # session is actually tracked under; a zombie render (abandoned
             # startup sid) must write under it, else the gate starves.
-            bound = (_pane_bound_sid(payload.get("session_id"))
+            bound = (_pane_bound_sid(payload.get("session_id"), payload)
                      if payload is not None else None)
             if payload is not None:
                 record = find_session_by_id(bound or payload.get("session_id"))
