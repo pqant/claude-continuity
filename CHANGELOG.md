@@ -10,6 +10,8 @@ All notable changes to cc-continuity are documented here.
 
 - A context-400 stuck in `CHECKPOINT_VERIFIED` is no longer invisible to recovery. A session whose rotation verified the checkpoint and then failed kept the stale oversized prompt in the pane while the session sat in `CHECKPOINT_VERIFIED`: the watchdog's skipped-scan path left the recovery gate unarmed and `recover_400` would not re-attach a session that already had a fresh user prompt, so it stayed stuck and 400ed every request (observed live on a connector session). `recover_400` now re-attaches `CHECKPOINT_VERIFIED` sessions when a fresh prompt is present, and the tick loop gates `CHECKPOINT_VERIFIED` into the context-400 recovery pass while skipped scans stay unarmed (issue #89).
 
+- The context-400 recovery now reaches the phone. The recovery path called `notify.safe_send` with a `context400` event, but `build_message` had no branch for that event, so the recovery push was silently dropped and nobody saw recoveries on the phone. `build_message` gained the `context400` branch (title `cc-continuity: <what>` with the recovery emoji prefix, priority high, body `proj=<slug> <nnn> detail=<scrubbed, clipped to 200>`), and a new wire-contract test pins `recover_400` to the `safe_send` call so the event name cannot silently drift again (issue #90).
+
 ## [0.3.60] - 2026-11-23
 
 ### Fixed
