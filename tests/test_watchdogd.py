@@ -2708,3 +2708,67 @@ def test_tick_frozen_progress_pane_no_action(cc_home, monkeypatch):
     assert l3["sessions"][0]["outcome"] == "FROZEN"
     assert not any(ev[0] == "freeze_detected" for ev in pushes)
     assert io.sends == []
+
+
+# --- Durum A: context-400 scan must not depend on screen classification ----
+
+
+def _patch400(monkeypatch, tmp_path, info=None):
+    """Wire the tick's 400 block to fakes: project.json at tmp_path,
+    transcript resolution stubbed, scan/recover recorded. Returns the
+    recover_400 call list."""
+    pdir = paths.project_dir("proj-a")
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "project.json").write_text(
+        json.dumps({"root": str(tmp_path)}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        watchdogd.transcript, "resolve_transcript_path",
+        lambda metric, root, sid: tmp_path / f"{sid}.jsonl")
+    monkeypatch.setattr(
+        watchdogd.overflow, "scan_tail_400",
+        lambda p: info if info is not None else
+        {"window": 1000, "input_tokens": 999, "text_head": "API Error"})
+
+    def fake_recover(key, nnn, sid, target, cfg, root, inf):
+        calls.append((key, nnn, sid, target))
+        return "recovered"
+
+    monkeypatch.setattr(watchdogd.overflow, "recover_400", fake_recover)
+    return calls
+
+
+def test_tick_context400_alive_turn_active_triggers_recovery(
+        cc_home, tmp_path, monkeypatch):
+    # BUG-1 root cause (cp-251): a fresh ledger ts (user_prompt's own
+    # entry) keeps classify on row1 ALIVE for stale_minutes, so the
+    # FROZEN-gated recovery never runs. The 400 scan must be screen-
+    # classification independent: ALIVE + turn_active + 400 tail fires it.
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    sdir = _mk(turn_active=True)
+    ledger.append(sdir, {"type": "user_prompt", "ts": 10_000.0 - 60})
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "ALIVE"
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert any(e.startswith("context400:") for e in line["events"])
+    assert io.sends == [] and pushes == []
+
+
+def test_tick_context400_turn_dead_preempts_nudge(cc_home, tmp_path,
+                                                  monkeypatch):
+    # row3 TURN_DEAD normally nudges; with a 400 tail the recovery must
+    # run FIRST and suppress the nudge (a nudge into a 400 pane injects
+    # text into the input box = brand-new 400).
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    sdir = _mk(turn_active=True)
+    _stale_prompt(sdir)  # 50 min idle > 45 min stale → row3 TURN_DEAD
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "TURN_DEAD"
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert io.sends == []
