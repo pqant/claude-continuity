@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.61] - 2026-11-23
+
+### Fixed
+
+- A context-400 stuck in `CHECKPOINT_VERIFIED` is no longer invisible to recovery. A session whose rotation verified the checkpoint and then failed kept the stale oversized prompt in the pane while the session sat in `CHECKPOINT_VERIFIED`: the watchdog's skipped-scan path left the recovery gate unarmed and `recover_400` would not re-attach a session that already had a fresh user prompt, so it stayed stuck and 400ed every request (observed live on a connector session). `recover_400` now re-attaches `CHECKPOINT_VERIFIED` sessions when a fresh prompt is present, and the tick loop gates `CHECKPOINT_VERIFIED` into the context-400 recovery pass while skipped scans stay unarmed (issue #89).
+
 ## [0.3.60] - 2026-11-23
 
 ### Fixed
