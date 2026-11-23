@@ -1454,6 +1454,19 @@ def tick(ctx: TickCtx) -> dict:
                 and _try_recover_400(ctx, key, nnn, rec, target, line)):
             continue
 
+        # BUG-6 (cp-263, connector-258): the verified-checkpoint variant.
+        # classify() row 7 SKIPs everything outside ACTIVE/WARNED, so a
+        # rotation-stalled CHECKPOINT_VERIFIED + turn_active record never
+        # reached the pre-nudge scan above and recovery was unreachable
+        # in production. Additive dispatch here (NOT row 7 - liveness
+        # semantics); _try_recover_400's own gate (full_auto/state/
+        # rec400-dedup/400-scan + overflow.recover_400's fresh-prompt
+        # check) stays the single source of truth.
+        if (outcome == "SKIP" and rec.get("turn_active")
+                and rec.get("state") == "CHECKPOINT_VERIFIED"
+                and _try_recover_400(ctx, key, nnn, rec, target, line)):
+            continue
+
         if outcome in ("TURN_DEAD", "STALLED"):
             if _may_nudge(ctx, focus, key, nnn):
                 _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
