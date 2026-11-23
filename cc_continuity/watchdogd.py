@@ -1444,6 +1444,16 @@ def tick(ctx: TickCtx) -> dict:
             if tail:
                 entry["tail"] = tail[:200]
 
+        # BUG-1 (cp-251/252): the context-400 scan is screen-
+        # classification independent. While a turn is in flight, check
+        # the transcript tail BEFORE any nudge decision: ALIVE hides the
+        # 400 (fresh ledger ts), TURN_DEAD would inject nudge text into
+        # the dead pane (a brand-new 400).
+        if (rec.get("turn_active")
+                and outcome in ("ALIVE", "TURN_DEAD", "STALLED")
+                and _try_recover_400(ctx, key, nnn, rec, target, line)):
+            continue
+
         if outcome in ("TURN_DEAD", "STALLED"):
             if _may_nudge(ctx, focus, key, nnn):
                 _nudge_path(ctx, key, nnn, target, cap, last_ts, now, line,
@@ -1473,34 +1483,11 @@ def tick(ctx: TickCtx) -> dict:
                 ledger.append(sdir, {"type": "watchdog_freeze"})
                 ctx.froze.add(target)
                 line["events"].append(f"freeze:{key}:{nnn:03d}")
-            # Durum A (context-400 brick, connector-258): the Stop hook
-            # NEVER fired on the 400 turn, the pane sits frozen and the
-            # status-line metric starves every ratio guard - detect the
-            # synthetic-400 transcript tail and drive deterministic
-            # recovery (checkpoint + rotator) instead of Esc/escalation.
-            sid400 = rec.get("session_id")
-            if (bool(ctx.cfg.get("full_auto", True))
-                    and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE",
-                                             "WARNED")
-                    and sid400 and target not in ctx.rec400):
-                try:
-                    pfile = paths.project_dir(key) / "project.json"
-                    root = Path(json.loads(
-                        pfile.read_text(encoding="utf-8"))["root"])
-                except (OSError, ValueError, KeyError, TypeError):
-                    _log_error("context400 root")
-                    root = None
-                if root is not None:
-                    tpath = transcript.resolve_transcript_path(
-                        statusline.read_metric(sid400), root, sid400)
-                    info = overflow.scan_tail_400(tpath) if tpath else None
-                    if info is not None:
-                        ctx.rec400.add(target)
-                        outcome400 = overflow.recover_400(
-                            key, nnn, sid400, target, ctx.cfg, root, info)
-                        line["events"].append(
-                            f"context400:{key}:{nnn:03d}:{outcome400}")
-                        continue
+            # Durum A (context-400 brick): the screen-independent
+            # recovery lives in _try_recover_400; the FROZEN branch keeps
+            # a call here as defense-in-depth (input-closed variant).
+            if _try_recover_400(ctx, key, nnn, rec, target, line):
+                continue
             if rec.get("turn_active"):
                 # a turn is in flight: once the freeze outlives the
                 # threshold, escalate (ESC + frozen-form nudge + push,
@@ -1536,6 +1523,47 @@ def tick(ctx: TickCtx) -> dict:
     #     run_forever (Phase 25) so an orphaned off-pane is reaped in
     #     ~5-10 s, not on the 300 s tick. It no longer runs here.
     return line
+
+
+def _try_recover_400(ctx: TickCtx, key: str, nnn: int, rec: dict,
+                     target: str, line: dict) -> bool:
+    """Durum A (context-400 brick, connector-258): the Stop hook NEVER
+    fired on the 400 turn, the pane sits frozen and the status-line
+    metric starves every ratio guard - detect the synthetic-400
+    transcript tail and drive deterministic recovery (checkpoint +
+    rotator) instead of Esc/escalation.
+
+    BUG-1 (cp-251/252): this scan must NOT depend on the screen
+    classification. A fresh user_prompt ledger entry keeps classify on
+    row1 ALIVE for stale_minutes even when the API 400'd the turn, and
+    TURN_DEAD would otherwise nudge text INTO the dead pane (a
+    brand-new 400). Both the tick-loop pre-nudge call and the FROZEN
+    branch (defense-in-depth) use this single implementation.
+    Returns True when recovery was attempted (caller must continue)."""
+    sid400 = rec.get("session_id")
+    if not (bool(ctx.cfg.get("full_auto", True))
+            and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE", "WARNED")
+            and sid400 and target not in ctx.rec400):
+        return False
+    try:
+        pfile = paths.project_dir(key) / "project.json"
+        root = Path(json.loads(
+            pfile.read_text(encoding="utf-8"))["root"])
+    except (OSError, ValueError, KeyError, TypeError):
+        _log_error("context400 root")
+        root = None
+    if root is None:
+        return False
+    tpath = transcript.resolve_transcript_path(
+        statusline.read_metric(sid400), root, sid400)
+    info = overflow.scan_tail_400(tpath) if tpath else None
+    if info is None:
+        return False
+    ctx.rec400.add(target)
+    outcome400 = overflow.recover_400(
+        key, nnn, sid400, target, ctx.cfg, root, info)
+    line["events"].append(f"context400:{key}:{nnn:03d}:{outcome400}")
+    return True
 
 
 def check_exit_hangs(ctx: TickCtx) -> list[dict]:
