@@ -526,6 +526,13 @@ def build_message(event: str, *, slug: str, nnn: int,
         t, pr = "🧟 cc-continuity: zombie session cleaned", "default"
         lines = [(f"proj={slug} {p} {_clip(fields['session'], 40)} — "
                   "no CC, killed")]
+    elif event == "context400":
+        # BUG-4: overflow.recover_400 sends what/detail; before this branch
+        # the event was unknown, safe_send swallowed the ValueError and the
+        # recovery push never went out
+        t, pr = f"🩹 cc-continuity: {fields['what']}", "high"
+        lines = [(f"proj={slug} {p} "
+                  f"detail={_clip(scrub(str(fields['detail'])), 200)}")]
     else:
         raise ValueError(f"unknown notify event {event!r}")
     body = "\n".join(dict.fromkeys([*(env or []), *lines]))
