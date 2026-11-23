@@ -2774,6 +2774,57 @@ def test_tick_context400_turn_dead_preempts_nudge(cc_home, tmp_path,
     assert io.sends == []
 
 
+def test_tick_context400_checkpoint_verified_triggers_recovery(
+        cc_home, tmp_path, monkeypatch):
+    # BUG-6 (cp-263 live, connector-258): a rotation-stalled
+    # CHECKPOINT_VERIFIED record is SKIPped by classify() (row 7 knows
+    # only ACTIVE/WARNED) and the tick loop dispatched _try_recover_400
+    # only on ALIVE/TURN_DEAD/STALLED/FROZEN - the verified checkpoint
+    # was never dispatched for recovery in production. SKIP +
+    # CHECKPOINT_VERIFIED + turn_active must reach the gate too
+    # (full_auto/state/dedup/400-scan/fresh-prompt checks live in
+    # _try_recover_400 - single source of truth).
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    sdir = _mk(st="CHECKPOINT_VERIFIED", turn_active=True)
+    _stale_prompt(sdir)  # age is moot: row 7 SKIP dominates eligibility
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "SKIP"
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert any(e.startswith("context400:") for e in line["events"])
+    assert io.sends == [] and pushes == []
+
+
+def test_tick_context400_verified_not_turn_active_no_dispatch(
+        cc_home, tmp_path, monkeypatch):
+    # Guard: a CHECKPOINT_VERIFIED record at rest (no turn in flight,
+    # user legitimately at the prompt) must NOT be dispatched - only a
+    # mid-turn verified checkpoint is the stuck-rotation signature.
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    _mk(st="CHECKPOINT_VERIFIED", turn_active=False)
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "SKIP"
+    assert calls == []
+
+
+def test_tick_context400_skip_other_state_no_dispatch(cc_home, tmp_path,
+                                                      monkeypatch):
+    # Guard: the dispatch is additive and CHECKPOINT_VERIFIED-only -
+    # any other SKIPped state (here BOOTSTRAPPING) keeps the old
+    # never-dispatched behaviour.
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    _mk(st="BOOTSTRAPPING", turn_active=True)
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "SKIP"
+    assert calls == []
+
+
 # --- BUG-3 (cp-259): CHECKPOINT_VERIFIED gate + rec400 skip guard ----------
 
 
