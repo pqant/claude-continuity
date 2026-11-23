@@ -167,6 +167,34 @@ def test_recover_400_happy(cc_home, tmp_path, monkeypatch):
     assert evs[0]["window"] == W and evs[0]["input_tokens"] == W - 32000
 
 
+def test_recover_400_sends_context400_push(cc_home, tmp_path, monkeypatch):
+    # BUG-4: the push used to vanish — recover_400 sent an event notify.py
+    # did not know; this pins the wire contract between the two modules
+    key = _mk(cc_home, tmp_path)
+    monkeypatch.setattr(overflow.rotator, "spawn",
+                        lambda sid, pane, rid: 4242)
+    monkeypatch.setattr(overflow.checkpoint, "finalize", _fake_finalize)
+    sends = []
+
+    def fake_send(cfg, event, **kw):
+        sends.append((event, kw))
+
+    monkeypatch.setattr(overflow.notify, "safe_send", fake_send)
+    info = {"window": W, "input_tokens": W - 32000}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    # the ROTATING transition also fires its own rotation_pending push;
+    # this test pins only the context400 one
+    sends = [s for s in sends if s[0] == "context400"]
+    assert len(sends) == 1
+    event, kw = sends[0]
+    assert event == "context400"
+    assert kw["what"] == "context-400 auto-rotation"
+    assert kw["detail"] == f"window={W} input={W - 32000}"
+    assert kw["dedup_key"] == "context400:001"
+
+
 def test_recover_400_spawn_failure_keeps_checkpoint_verified(
         cc_home, tmp_path, monkeypatch):
     key = _mk(cc_home, tmp_path)
