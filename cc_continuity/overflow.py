@@ -173,6 +173,29 @@ def estimate_ratio(path: Path | str | None,
     return None
 
 
+def _fresh_prompt_after_checkpoint(key: str, nnn: int) -> bool:
+    """BUG-3 (cp-258 live): True when the newest ledger ``user_prompt``
+    post-dates the last ``state`` event into CHECKPOINT_VERIFIED - the
+    user re-attached a verified checkpoint and typed again, then the API
+    400'd the turn (Stop never fires, pane freezes). The ledger is the
+    single source: state.json "updated" is unreliable (UserPromptSubmit
+    touches it without a state change)."""
+    try:
+        entries = ledger.read(paths.session_dir(key, nnn))
+    except OSError:
+        return False
+    prompt_ts: float | None = None
+    verified_ts: float | None = None
+    for entry in entries:
+        etype = entry.get("type")
+        if etype == "user_prompt":
+            prompt_ts = entry.get("ts") or 0
+        elif etype == "state" and entry.get("to") == "CHECKPOINT_VERIFIED":
+            verified_ts = entry.get("ts") or 0
+    return (prompt_ts is not None and verified_ts is not None
+            and prompt_ts > verified_ts)
+
+
 def recover_400(key: str, nnn: int, session_id: str | None, pane: str,
                 cfg: dict, root: Path, info: dict | None) -> str:
     """Deterministic recovery from a context-400 brick (stop.py _degrade
@@ -180,19 +203,27 @@ def recover_400(key: str, nnn: int, session_id: str | None, pane: str,
     HANDOFF_REQUESTED -> HANDOFF_FAILED -> finalize (C.7 checkpoint,
     -> CHECKPOINT_VERIFIED) -> rotator.spawn -> ROTATING. The spawned
     rotator self-exits on its state re-read when a concurrent claim raced
-    us (PRD 11.2). NEVER raises: returns "recovered", "skipped:<state>"
-    or "failed:<ExcName>".
+    us (PRD 11.2). BUG-3: a CHECKPOINT_VERIFIED session whose newest
+    user_prompt post-dates the checkpoint stamp (re-attached, user back,
+    400 tail) skips the whole finalize walk - the checkpoint is already
+    verified - and drives spawn -> ROTATING directly. NEVER raises:
+    returns "recovered", "skipped:<state>" or "failed:<ExcName>".
     """
     from . import thresholds  # lazy: thresholds imports this module
     try:
         rec = state.load_state(key, nnn)
+        verified = False
         if rec["state"] not in _RECOVERABLE_STATES:
-            return f"skipped:{rec['state']}"
-        thresholds.advance(key, nnn, "HANDOFF_REQUESTED", cfg=cfg)
-        state.transition(key, nnn, "HANDOFF_FAILED")
-        metric = statusline.read_metric(session_id) if session_id else None
-        checkpoint.finalize(key, nnn, cfg=cfg, root=Path(root),
-                            metric=metric)
+            if not (rec["state"] == "CHECKPOINT_VERIFIED"
+                    and _fresh_prompt_after_checkpoint(key, nnn)):
+                return f"skipped:{rec['state']}"
+            verified = True
+        if not verified:
+            thresholds.advance(key, nnn, "HANDOFF_REQUESTED", cfg=cfg)
+            state.transition(key, nnn, "HANDOFF_FAILED")
+            metric = statusline.read_metric(session_id) if session_id else None
+            checkpoint.finalize(key, nnn, cfg=cfg, root=Path(root),
+                                metric=metric)
         rotation_id = str(uuid.uuid4())
         rotator.spawn(session_id or "", pane, rotation_id)
         try:
