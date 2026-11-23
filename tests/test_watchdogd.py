@@ -2772,3 +2772,53 @@ def test_tick_context400_turn_dead_preempts_nudge(cc_home, tmp_path,
     assert line["sessions"][0]["outcome"] == "TURN_DEAD"
     assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
     assert io.sends == []
+
+
+# --- BUG-3 (cp-259): CHECKPOINT_VERIFIED gate + rec400 skip guard ----------
+
+
+def test_try_recover_400_accepts_verified_checkpoint(cc_home, tmp_path,
+                                                     monkeypatch):
+    # BUG-3 live case (connector-258): a re-attached pane sits
+    # CHECKPOINT_VERIFIED with a fresh prompt + 400 tail; the gate must
+    # hand it to recover_400 (the fresh-prompt check lives inside it).
+    io = FakeIO(sessions=["cc-proj-a-0a9b"])
+    _mk(st="CHECKPOINT_VERIFIED", turn_active=True)
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    rec = state.load_state("proj-a", 1)
+    line = {"events": []}
+    assert watchdogd._try_recover_400(ctx, "proj-a", 1, rec,
+                                      "cc-proj-a-0a9b", line) is True
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert any(ev.endswith(":recovered") for ev in line["events"])
+    assert "cc-proj-a-0a9b" in ctx.rec400
+
+
+def test_try_recover_400_skip_does_not_arm_rec400(cc_home, tmp_path,
+                                                  monkeypatch):
+    # A stale verified checkpoint (user gone, no fresh prompt yet) must
+    # not burn the per-daemon rec400 dedup set: when the user later
+    # returns, the same daemon must still recover the pane.
+    io = FakeIO(sessions=["cc-proj-a-0a9b"])
+    _mk(st="CHECKPOINT_VERIFIED", turn_active=True)
+    calls = _patch400(monkeypatch, tmp_path)
+    outcomes = ["skipped:CHECKPOINT_VERIFIED"]
+
+    def flaky(key, nnn, sid, target, cfg, root, inf):
+        calls.append((key, nnn, sid, target))
+        return outcomes[0]
+
+    monkeypatch.setattr(watchdogd.overflow, "recover_400", flaky)
+    ctx = _ctx(io, now=10_000.0)
+    rec = state.load_state("proj-a", 1)
+    line = {"events": []}
+    assert watchdogd._try_recover_400(ctx, "proj-a", 1, rec,
+                                      "cc-proj-a-0a9b", line) is True
+    assert any(ev.endswith(":skipped:CHECKPOINT_VERIFIED")
+               for ev in line["events"])
+    assert ctx.rec400 == set()
+    outcomes[0] = "recovered"
+    assert watchdogd._try_recover_400(ctx, "proj-a", 1, rec,
+                                      "cc-proj-a-0a9b", line) is True
+    assert len(calls) == 2 and "cc-proj-a-0a9b" in ctx.rec400
