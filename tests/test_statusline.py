@@ -1617,3 +1617,60 @@ def test_run_binding_from_previous_session_does_not_redirect(cc_home,
                    dict(config.DEFAULTS, statusline_ansi=False))
     assert (paths.runtime_dir() / f"{SID}.json").exists()
     assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+
+
+# ------------------------------- BUG-2 (cp-251/252): wrong-project binding
+#
+# Pane ids are renumbered when the tmux server restarts, so a reused pane
+# can carry a fresh-looking binding stamped by ANOTHER project's hooks
+# (connector-258 live case: pane %3 rendered a session from a foreign
+# project). The bound record's project must match the payload's project.
+
+
+def test_run_cross_project_binding_is_rejected(cc_home, tmp_path, monkeypatch):
+    from hookutil import SID, make_repo, register_session
+    repo_a = make_repo(tmp_path, "proj-a")
+    repo_b = make_repo(tmp_path, "proj-b")
+    key_a, n_bound = register_session(repo_a, SID_BOUND)
+    state.transition(key_a, n_bound, "ACTIVE")
+    register_session(repo_b)  # the payload's own record
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo_b, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID}.json").exists()
+    assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+
+
+def test_run_cross_project_binding_rejected_without_payload_record(
+        cc_home, tmp_path, monkeypatch):
+    # zombie startup sid: no record for the payload sid - the cwd
+    # fallback must still cross-check and reject the foreign binding.
+    from hookutil import SID, make_repo, register_session
+    repo_a = make_repo(tmp_path, "proj-a")
+    repo_b = make_repo(tmp_path, "proj-b")
+    key_a, n_bound = register_session(repo_a, SID_BOUND)
+    state.transition(key_a, n_bound, "ACTIVE")
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(json.dumps(_zombie_payload(repo_b, SID)).encode(),
+                   dict(config.DEFAULTS, statusline_ansi=False))
+    assert not (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
+
+
+def test_run_same_project_binding_without_payload_record_still_retargets(
+        cc_home, tmp_path, monkeypatch):
+    # cwd-fallback positive: same project, unregistered payload sid -
+    # the same-pane retarget must keep working (issue #42/#71 path).
+    from hookutil import make_repo, register_session
+    repo_a = make_repo(tmp_path, "proj-a")
+    register_session(repo_a)  # abandoned startup record
+    key_a, n_bound = register_session(repo_a, SID_BOUND)
+    state.transition(key_a, n_bound, "ACTIVE")
+    _write_binding("%1", SID_BOUND, time.time())
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    statusline.run(
+        json.dumps(_zombie_payload(
+            repo_a, "33333333-7777-8888-9999-000000000033")).encode(),
+        dict(config.DEFAULTS, statusline_ansi=False))
+    assert (paths.runtime_dir() / f"{SID_BOUND}.json").exists()
