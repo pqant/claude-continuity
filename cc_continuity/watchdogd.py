@@ -1541,8 +1541,13 @@ def _try_recover_400(ctx: TickCtx, key: str, nnn: int, rec: dict,
     branch (defense-in-depth) use this single implementation.
     Returns True when recovery was attempted (caller must continue)."""
     sid400 = rec.get("session_id")
+    # BUG-3 (cp-258): CHECKPOINT_VERIFIED joins the gate so a re-attached
+    # pane (fresh user_prompt + 400 tail) recovers too; the fresh-prompt
+    # check lives ONLY in overflow.recover_400 (single source) - a stale
+    # verified checkpoint still returns "skipped:CHECKPOINT_VERIFIED".
     if not (bool(ctx.cfg.get("full_auto", True))
-            and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE", "WARNED")
+            and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE", "WARNED",
+                                     "CHECKPOINT_VERIFIED")
             and sid400 and target not in ctx.rec400):
         return False
     try:
@@ -1559,9 +1564,13 @@ def _try_recover_400(ctx: TickCtx, key: str, nnn: int, rec: dict,
     info = overflow.scan_tail_400(tpath) if tpath else None
     if info is None:
         return False
-    ctx.rec400.add(target)
     outcome400 = overflow.recover_400(
         key, nnn, sid400, target, ctx.cfg, root, info)
+    # BUG-3: a "skipped:" outcome must NOT poison ctx.rec400 - the stale
+    # verified-checkpoint scan happens BEFORE the user returns; arming the
+    # dedup set here would block recovery when the fresh prompt arrives.
+    if not outcome400.startswith("skipped:"):
+        ctx.rec400.add(target)
     line["events"].append(f"context400:{key}:{nnn:03d}:{outcome400}")
     return True
 
