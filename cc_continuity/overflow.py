@@ -179,7 +179,11 @@ def _fresh_prompt_after_checkpoint(key: str, nnn: int) -> bool:
     user re-attached a verified checkpoint and typed again, then the API
     400'd the turn (Stop never fires, pane freezes). The ledger is the
     single source: state.json "updated" is unreliable (UserPromptSubmit
-    touches it without a state change)."""
+    touches it without a state change). BUG-8 (cp-265 live, connector-258):
+    a deferred rotation re-stamps with an out-of-band ``ROTATING ->
+    CHECKPOINT_VERIFIED`` revert; that rollback is NOT a new verification,
+    so such entries never move ``verified_ts`` (they used to bury the
+    fresh prompt and gate recovery out forever)."""
     try:
         entries = ledger.read(paths.session_dir(key, nnn))
     except OSError:
@@ -190,7 +194,9 @@ def _fresh_prompt_after_checkpoint(key: str, nnn: int) -> bool:
         etype = entry.get("type")
         if etype == "user_prompt":
             prompt_ts = entry.get("ts") or 0
-        elif etype == "state" and entry.get("to") == "CHECKPOINT_VERIFIED":
+        elif (etype == "state"
+              and entry.get("to") == "CHECKPOINT_VERIFIED"
+              and entry.get("from") != "ROTATING"):
             verified_ts = entry.get("ts") or 0
     return (prompt_ts is not None and verified_ts is not None
             and prompt_ts > verified_ts)
