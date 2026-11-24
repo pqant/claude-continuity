@@ -226,3 +226,43 @@ def test_recover_400_state_gate(cc_home, tmp_path, monkeypatch):
                                dict(config.DEFAULTS), tmp_path, None)
     assert res == "skipped:ROTATING"
     assert calls == []
+
+
+def test_recover_400_clears_turn_active_like_stop(
+        cc_home, tmp_path, monkeypatch):
+    # BUG-7 (connector-258 live): the 400 killed the turn without a Stop
+    # hook, so hooks/stop.py never cleared turn_active/last_stop_ts and
+    # the spawned rotator deferred forever ("activity after Stop"). The
+    # recovery must mirror the Stop hook's field write; AFTER the
+    # context400_recovered append, so the gate's "no ledger activity since
+    # last Stop" sees the recovery itself as the last event.
+    key = _mk(cc_home, tmp_path)  # BOOTSTRAPPING is recoverable
+    state.update_fields(key, 1, turn_active=True)
+    monkeypatch.setattr(overflow.rotator, "spawn", lambda *a: 4242)
+    monkeypatch.setattr(overflow.checkpoint, "finalize", _fake_finalize)
+    info = {"window": W, "input_tokens": W - 32000, "text_head": "API Error"}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    rec = state.load_state(key, 1)
+    assert rec["turn_active"] is False
+    evs = [e for e in ledger.read(paths.session_dir(key, 1))
+           if e.get("type") == "context400_recovered"]
+    assert len(evs) == 1
+    assert rec.get("last_stop_ts", 0) >= evs[0]["ts"]
+
+
+def test_recover_400_unlocks_rotator_idle_gate(
+        cc_home, tmp_path, monkeypatch):
+    # End-to-end pin of the BUG-7 deadlock: after a successful recovery
+    # the rotator's PRD 11.3 idle gate (run()'s first check) must pass -
+    # the dead turn may never be mistaken for "user still working".
+    key = _mk(cc_home, tmp_path)
+    state.update_fields(key, 1, turn_active=True)
+    monkeypatch.setattr(overflow.rotator, "spawn", lambda *a: 4242)
+    monkeypatch.setattr(overflow.checkpoint, "finalize", _fake_finalize)
+    info = {"window": W, "input_tokens": W - 32000, "text_head": "API Error"}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    assert rotator._idle(key, 1) is True
