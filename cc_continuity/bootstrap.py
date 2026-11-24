@@ -254,6 +254,61 @@ def _find_reusable_successor(pref: dict, key: str, old_name: str) -> dict | None
     return None
 
 
+def _tmux_session_names(runner=subprocess.run) -> set | None:
+    """Live tmux session names; None when tmux is unavailable or the probe
+    failed (unknown, never "empty")."""
+    try:
+        proc = runner(["tmux", "list-sessions", "-F", "#{session_name}"],
+                      capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {ln.strip() for ln in proc.stdout.decode(errors="replace").splitlines()
+            if ln.strip()}
+
+
+def _pane_record_dead(rec: dict, *, runner=subprocess.run) -> bool:
+    """Issue #98: liveness probe for a record's recorded pane. True ONLY
+    when the record recorded its own tmux pane and that pane is absent
+    from the live list. Conservative by construction: no recorded pane,
+    tmux unavailable or any probe error → False (treated as alive, today's
+    behavior; a live pane is never hijacked)."""
+    pane = rec.get("tmux_session")
+    if not pane:
+        return False
+    names = _tmux_session_names(runner=runner)
+    if names is None:
+        return False
+    return pane not in names
+
+
+def _find_dead_successor(pref: dict, key: str, old_name: str) -> dict | None:
+    """Issue #98 (the gap v0.3.65 left open): this predecessor's ACTIVE
+    successor (``predecessor == old_name``, ``successor`` unset, older than
+    ``REUSE_MIN_AGE_S``) whose recorded pane is DEAD - the attached-then-
+    killed successor that ``_find_reusable_successor`` must skip because a
+    live session is ACTIVE. Adoption honors the no-index-jumping rule."""
+    for s in reversed(pref.get("sessions") or []):
+        try:
+            rec = state.load_state(key, int(s["nnn"]))
+        except (state.StateNotFoundError, ValueError, KeyError):
+            continue
+        if (rec.get("predecessor") != old_name
+                or rec["state"] != "ACTIVE"
+                or rec.get("successor")):
+            continue
+        try:
+            created = datetime.fromisoformat(rec["created"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (datetime.now(timezone.utc) - created).total_seconds() < REUSE_MIN_AGE_S:
+            continue
+        if _pane_record_dead(rec):
+            return rec
+    return None
+
+
 def try_claim(key: str, *, new_session_id: str, cfg: dict,
               states: frozenset[str] | None = None,
               source: str = "clear") -> dict | None:
@@ -283,13 +338,22 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
     root = Path(pref["root"])
     old_nnn = int(old["nnn"])
     reuse = _find_reusable_successor(pref, key, old["name"])
-    if reuse is not None:
+    corpse = _find_dead_successor(pref, key, old["name"]) if reuse is None else None
+    if reuse is not None or corpse is not None:
         # BUG-10 (connector 258/259 live): this claim's own never-attached
         # successor already sits at its index - adopt it (standing "no
         # session index jumping" rule) instead of minting a second name.
-        nnn_new = int(reuse["nnn"])
-        name_new = reuse["name"]
-        state.update_fields_unlocked(key, nnn_new, session_id=new_session_id)
+        # Issue #98 adds the attached-then-killed ACTIVE variant, adopted
+        # the same way after its recorded pane is probed dead.
+        nnn_new = int((reuse or corpse)["nnn"])
+        name_new = (reuse or corpse)["name"]
+        if corpse is not None:
+            state.update_fields_unlocked(key, nnn_new,
+                                         session_id=new_session_id,
+                                         state="BOOTSTRAPPING")
+        else:
+            state.update_fields_unlocked(key, nnn_new,
+                                         session_id=new_session_id)
         entry = next((s for s in pref["sessions"]
                       if int(s.get("nnn", -1)) == nnn_new), None)
         if entry is not None:
@@ -310,7 +374,7 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
         cp["consumed_by"] = name_new
         pref["latest_checkpoint"] = cp
     pref["counter"] = max(int(pref["counter"]), nnn_new)
-    if reuse is None:
+    if reuse is None and corpse is None:
         pref["sessions"].append({"name": name_new, "session_id": new_session_id,
                                  "nnn": nnn_new, "created": _now()})
     atomic.atomic_write_json(pfile, pref)
@@ -328,8 +392,10 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
         new_work=_new_work_since_handoff(cp_dir, key, old_nnn))
     start_entry = {"type": "session_start", "source": source,
                    "claimed": old["name"], "validation": status}
-    if reuse is not None:
+    if reuse is not None or corpse is not None:
         start_entry["reused"] = True
+        if corpse is not None:
+            start_entry["reused_dead"] = True
     ledger.append(paths.session_dir(key, nnn_new), start_entry)
     return {"old_name": old["name"], "old_nnn": old_nnn,
             "new_name": name_new, "new_nnn": nnn_new,
