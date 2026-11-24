@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.64] - 2026-11-24
+
+### Fixed
+
+- A deferred rotation no longer erases the fresh-prompt recovery evidence. `recover_400` re-attaches a `CHECKPOINT_VERIFIED` session only when the newest ledger `user_prompt` post-dates the checkpoint verification stamp, but a deferred rotation used to append an out-of-band `ROTATING -> CHECKPOINT_VERIFIED` revert that re-stamped the verification after the user's fresh prompt: the prompt looked stale, the watchdog kept reporting `skipped:CHECKPOINT_VERIFIED` on every tick and the context-400 rotation never dispatched (observed live: a connector session carried the fresh prompt at ts 1795443508 while the revert entry was appended at ts 1795461290.95, and the pane stayed frozen on the oversized prompt with the 400 tail still in the transcript). `_fresh_prompt_after_checkpoint` now ignores ledger state entries that entered `CHECKPOINT_VERIFIED` from `ROTATING`: a rollback is not a new verification. The ledger stays the single source of truth and the state machine, the watchdog and the rotator are untouched. A test was written first to pin that a deferred re-stamp neither buries the fresh prompt nor gates recovery out (issue #94).
+
 ## [0.3.63] - 2026-11-24
 
 ### Fixed
