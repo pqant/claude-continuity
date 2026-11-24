@@ -266,3 +266,43 @@ def test_recover_400_unlocks_rotator_idle_gate(
                                dict(config.DEFAULTS), tmp_path, info)
     assert res == "recovered"
     assert rotator._idle(key, 1) is True
+
+
+def test_recover_400_verified_checkpoint_survives_deferred_restamp(
+        cc_home, tmp_path, monkeypatch):
+    # BUG-8 (connector-258 live): a deferred rotation appended an
+    # out-of-band ROTATING -> CHECKPOINT_VERIFIED revert to the ledger
+    # AFTER the user re-attached and typed. The fresh prompt is the real
+    # recovery evidence; the rollback is not a new verification. The
+    # re-stamp must not bury it: recovery still drives spawn + ROTATING
+    # without re-running finalize.
+    import time
+    key = _mk(cc_home, tmp_path)
+    for step in ("ACTIVE", "ROTATION_PENDING",
+                 "HANDOFF_REQUESTED", "HANDOFF_FAILED",
+                 "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED"):
+        state.transition(key, 1, step)
+    now = time.time()
+    ledger.append(paths.session_dir(key, 1),
+                  {"type": "user_prompt", "text": "go", "ts": now + 10})
+    ledger.append(paths.session_dir(key, 1),
+                  {"type": "state", "from": "ROTATING",
+                   "to": "CHECKPOINT_VERIFIED", "fields": {},
+                   "ts": now + 20})
+    assert overflow._fresh_prompt_after_checkpoint(key, 1) is True
+    spawns = []
+    monkeypatch.setattr(overflow.rotator, "spawn",
+                        lambda *a: spawns.append(a) or 4242)
+    monkeypatch.setattr(
+        overflow.checkpoint, "finalize",
+        lambda *a, **k: pytest.fail("finalize must not rerun on verified"))
+    info = {"window": W, "input_tokens": W - 32000, "text_head": "API Error"}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    rec = state.load_state(key, 1)
+    assert rec["state"] == "ROTATING"
+    assert spawns == [("sid-a", "proj:cc.0", rec["rotation_id"])]
+    evs = [e for e in ledger.read(paths.session_dir(key, 1))
+           if e.get("type") == "context400_recovered"]
+    assert len(evs) == 1
