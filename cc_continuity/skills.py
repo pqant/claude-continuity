@@ -1,11 +1,13 @@
 """The seven /continuity-* user skills (PRD §16, P7-D11).
 
-Six skills are a thin instruction: run one exact command and report its
+Seven skills are a thin instruction: run one exact command and report its
 output verbatim. continuity-excellence is a behavior skill: it carries a
 custom ``body`` (no shell command) that pins the prompt-perfection loop.
+continuity-search is a second behavior skill: the invocation argument IS
+the search phrase, passed straight to ``cc-continuity search`` (issue #97).
 rotate/off/on/excellence carry ``disable-model-invocation: true``
 so the model can never toggle continuity on its own (PRD §16).
-Uninstall removes EXACTLY these seven directories; foreign skills
+Uninstall removes EXACTLY these eight directories; foreign skills
 (e.g. graphify) are never touched.
 """
 
@@ -88,6 +90,25 @@ SKILLS: dict[str, dict] = {
             "the answer. Use when the user has a rough prompt they want "
             "polished and executed."),
         "disable_model_invocation": True,
+    },
+    "continuity-search": {
+        "description": (
+            "Search the cc-continuity checkpoint handoffs of the current "
+            "project for a keyword. The invocation argument IS the search "
+            "phrase; pass it straight to the command (example: "
+            "/continuity-search rotation). Use when the user asks what "
+            "past sessions did."),
+        "disable_model_invocation": False,
+        "body": (
+            "The user's invocation argument is the search phrase itself; "
+            "treat it as the query verbatim and do not add words like "
+            "'history' around it. Run:\n\n```bash\n"
+            "cc-continuity search <query>\n```\n\nIf no argument came "
+            "with the invocation, ask once for the keyword and wait. "
+            "Report the printed table verbatim. The same command accepts "
+            "the optional filters --nnn N, --since YYYY-MM-DD and "
+            "--until YYYY-MM-DD.\n"
+        ),
     },
 }
 

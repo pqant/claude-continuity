@@ -78,6 +78,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("--until", default=None,
                         help="with a query: sessions created on/before YYYY-MM-DD")
 
+    p_search = sub.add_parser(
+        "search", help="search checkpoint handoffs for a keyword")
+    p_search.add_argument("query",
+                          help="literal substring to search for (required)")
+    p_search.add_argument("--nnn", type=int, default=None,
+                          help="only this session number")
+    p_search.add_argument("--since", default=None,
+                          help="sessions created on/after YYYY-MM-DD")
+    p_search.add_argument("--until", default=None,
+                          help="sessions created on/before YYYY-MM-DD")
+
     p_ratio = sub.add_parser("ratio",
                              help="print the live context ratio of a project")
     p_ratio.add_argument("slug", nargs="?",
@@ -726,6 +737,29 @@ def _history_search(args: argparse.Namespace, key: str,
         print(f"{nnn_str:<4}  {date_str:<10}  {_clip(objective, 40):<40}  "
               f"{_clip(match, 100)}")
     return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """Issue #97: top-level keyword search - the query is the whole argument.
+
+    Thin wrapper over the #84 engine: same read-only, deterministic scan of
+    the checkpoint handoffs; no behavior fork, single source of truth.
+    """
+    cwd = Path.cwd()
+    root = project.resolve_root(cwd)
+    key = project.project_key_for_root(root)
+    pfile = paths.project_dir(key) / "project.json"
+    if not pfile.is_file():
+        print(f"No cc-continuity project for {root} "
+              f"(a project registers itself on its first hook).")
+        return 0
+    try:
+        record = json.loads(pfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"cc-continuity search: unreadable project record: {e}",
+              file=sys.stderr)
+        return 1
+    return _history_search(args, key, record)
 
 
 def _project_record(key: str) -> dict | None:
@@ -1905,6 +1939,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_hook(args)
     if args.command == "history":
         return cmd_history(args)
+    if args.command == "search":
+        return cmd_search(args)
     if args.command == "ratio":
         return cmd_ratio(args)
     if args.command == "ledger":
