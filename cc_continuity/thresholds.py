@@ -267,6 +267,47 @@ def advance(key: str, nnn: int, target: str, *,
         return record, True
 
 
+def _c4_preview(handoff: str, status: str) -> str | None:
+    """One at-a-glance preview line for the user (issue #83): checkpoint
+    number, predecessor, the validation result and the first Next Atomic
+    Action item. Display-only: parsed from the handoff text already loaded
+    by the caller (no file read, no state change); None whenever nothing
+    useful is parseable, so the block then stays exactly the old format.
+    """
+    try:
+        m = re.search(r"cp-(\d{1,4})", handoff)
+        cp = f"cp-{m.group(1)}" if m else None
+        pm = re.search(r"predecessor:\s*`?([^`\n]+)`?", handoff)
+        pred = pm.group(1).strip() if pm else None
+        next_item = None
+        in_naa = False
+        for line in handoff.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                in_naa = stripped.startswith("## Next Atomic Action")
+                continue
+            if in_naa:
+                mi = re.match(r"\d+\.\s+(.*)", stripped)
+                if mi:
+                    next_item = mi.group(1).strip()
+                    break
+                if stripped:
+                    break
+        if cp is None and next_item is None:
+            return None
+        parts = [cp or "cp-???"]
+        if pred:
+            parts.append(f"from {pred}")
+        parts.append(f"validation {status}")
+        if next_item:
+            if len(next_item) > 100:
+                next_item = next_item[:97].rstrip() + "..."
+            parts.append(f"next: {next_item}")
+        return "Preview: " + " | ".join(parts)
+    except Exception:
+        return None
+
+
 def c4_text(*, new_name: str, old_name: str, status: str,
             details: list, handoff: str, handoff_path: str,
             inline_max: int, new_work: list | None = None) -> str:
@@ -279,10 +320,18 @@ def c4_text(*, new_name: str, old_name: str, status: str,
     ledger AFTER the handoff was written (the rotation window) - they
     are not in the handoff, so they are appended as a separate section
     (empty/None → the text is exactly the old format).
+
+    When the handoff text is available (issue #83) a one-line ``Preview:``
+    (cp id, predecessor, validation, first next action) sits between the
+    details and the protocol directive; when nothing is parseable the
+    block is exactly the old format.
     """
     lines = [f"CONTINUITY BOOTSTRAP: you are {new_name}, continuing "
              f"{old_name}. VALIDATION: {status}"]
     lines.extend(details)
+    preview = _c4_preview(handoff, status) if handoff else None
+    if preview:
+        lines.append(preview)
     lines.append(
         f"Protocol: read the handoff below (or at {handoff_path}) "
         "fully; do not redo completed work; start with Next Atomic "
