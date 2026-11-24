@@ -1,13 +1,13 @@
-"""skills.py: the seven /continuity-* user skills (PRD section 16)."""
+"""skills.py: the eight /continuity-* user skills (PRD section 16)."""
 
 from cc_continuity import skills
 
 
-def test_skill_names_seven():
+def test_skill_names_eight():
     assert skills.skill_names() == (
         "continuity-status", "continuity-checkpoint", "continuity-rotate",
         "continuity-off", "continuity-on", "continuity-history",
-        "continuity-excellence")
+        "continuity-excellence", "continuity-search")
 
 
 def test_skill_text_frontmatter_and_command():
@@ -60,9 +60,9 @@ def test_excellence_pins_the_perfection_loop():
     assert "```bash" not in text
 
 
-def test_install_creates_seven_files(tmp_path):
+def test_install_creates_eight_files(tmp_path):
     paths = skills.install_skills(tmp_path / "skills")
-    assert len(paths) == 7
+    assert len(paths) == 8
     for name in skills.skill_names():
         f = tmp_path / "skills" / name / "SKILL.md"
         assert f.is_file()
@@ -75,13 +75,13 @@ def test_install_idempotent(tmp_path):
     assert once == twice
 
 
-def test_uninstall_removes_exactly_seven(tmp_path):
+def test_uninstall_removes_exactly_eight(tmp_path):
     d = tmp_path / "skills"
     skills.install_skills(d)
     (d / "graphify").mkdir()                      # foreign skill must survive
     (d / "graphify" / "SKILL.md").write_text("x")
     removed = skills.uninstall_skills(d)
-    assert len(removed) == 7
+    assert len(removed) == 8
     assert (d / "graphify" / "SKILL.md").is_file()
     assert not (d / "continuity-status").exists()
 
@@ -105,3 +105,13 @@ def test_history_skill_pins_search_usage():
     assert "search" in text.lower()
     # the plain-chain command fence (test_command_mapping) still holds
     assert "```bash\ncc-continuity history\n```" in text
+
+
+def test_search_skill_pins_raw_argument_usage():
+    # issue #97: /continuity-search takes the search phrase directly as its
+    # argument (no extra word like "history"); the raw prompt IS the query.
+    text = skills.skill_text("continuity-search")
+    assert "cc-continuity search <query>" in text
+    assert "argument" in text.lower()
+    # the model may run it when the user asks for a search
+    assert "disable-model-invocation" not in text

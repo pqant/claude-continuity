@@ -1555,3 +1555,47 @@ def test_history_search_without_project(cc_home, tmp_path, monkeypatch,
     monkeypatch.chdir(repo)
     assert cli.main(["history", "anything"]) == 0
     assert "No cc-continuity project" in capsys.readouterr().out
+
+
+# ------------------------------------------------ top-level search (issue #97)
+
+
+def test_search_command_shows_history_table(cc_home, tmp_path, monkeypatch,
+                                            capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Ship the rotation threshold fix.",
+                   ["thresholds raised to warn 0.65 yesterday"])
+    _write_handoff(key2, 2, "Unrelated docs work.", ["nothing here"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["search", "0.65"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert lines[0].startswith("NNN") and "MATCH" in lines[0]
+    assert len(lines) == 2 and lines[1].startswith("001")
+    assert "Ship the rotation threshold fix." in lines[1]
+
+
+def test_search_command_honors_filters(cc_home, tmp_path, monkeypatch,
+                                       capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Rotation cleanup.", ["a"])
+    _write_handoff(key2, 2, "Rotation polish.", ["b"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["search", "rotation", "--nnn", "2"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("002")
+    capsys.readouterr()
+    assert cli.main(["search", "bad-date", "--since", "11/2026"]) == 2
+
+
+def test_search_command_without_project(cc_home, tmp_path, monkeypatch,
+                                        capsys):
+    repo = make_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    assert cli.main(["search", "anything"]) == 0
+    assert "No cc-continuity project" in capsys.readouterr().out
