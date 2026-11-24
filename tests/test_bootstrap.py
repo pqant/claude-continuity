@@ -567,3 +567,139 @@ def test_c4_text_preview_shows_mismatch_status():
     t = _c4(status="MISMATCH: git tree differs from snapshot")
     pv = next(l for l in t.splitlines() if l.startswith("Preview:"))
     assert "validation MISMATCH: git tree differs from snapshot" in pv
+
+# --- issue #98: liveness probe for dead ACTIVE successors -------------------
+
+
+def _fake_runner(payload: bytes, rc: int = 0):
+    import types
+    calls: list = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=rc, stdout=payload,
+                                     stderr=b"")
+    run.calls = calls
+    return run
+
+
+def _active_dead_successor(key):
+    """001's claim minted 042, it attached (ACTIVE, pane recorded) and its
+    pane has since died; 001 is back in ROTATING with ``successor`` unset."""
+    import datetime as _dt
+    zombie = "spike-repo-042"
+    state.create_session_state(key, zombie, 42, "sid-zombie",
+                               predecessor="spike-repo-001",
+                               initial_state="ACTIVE")
+    state.update_fields(key, 42, tmux_session="cc-spike-repo-zz99")
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text())
+    pref["sessions"].append({"name": zombie, "session_id": "sid-zombie",
+                             "nnn": 42,
+                             "created": _dt.datetime.now(
+                                 _dt.timezone.utc).isoformat()})
+    pref["counter"] = 42
+    pfile.write_text(json.dumps(pref))
+    state.update_fields(key, 42, created=(_dt.datetime.now(
+        _dt.timezone.utc) - _dt.timedelta(hours=1)).isoformat())
+    return pfile
+
+
+def test_try_claim_adopts_dead_active_successor_same_index(cc_home, tmp_path,
+                                                           monkeypatch):
+    # issue #98: the attached-then-killed successor must be re-adopted at
+    # its own index; minting max+1 leaves the ACTIVE corpse behind.
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    pfile = _active_dead_successor(key)
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    monkeypatch.setattr(bootstrap, "_pane_record_dead",
+                        lambda rec, **kw: True)
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert res["new_nnn"] == 42 and res["new_name"] == "spike-repo-042"
+    new = state.load_state(key, 42)
+    assert new["session_id"] == _NEW_SID
+    assert new["state"] == "BOOTSTRAPPING"        # the hook drives it fresh
+    assert state.load_state(key, nnn)["successor"] == "spike-repo-042"
+    pref2 = json.loads(pfile.read_text())
+    assert pref2["counter"] == 42                  # no index jump
+    assert sum(1 for s in pref2["sessions"] if s["nnn"] == 42) == 1
+    assert next(s for s in pref2["sessions"]
+                if s["nnn"] == 42)["session_id"] == _NEW_SID
+    entries = ledger.read(paths.session_dir(key, 42))
+    assert entries[-1]["type"] == "session_start"
+    assert entries[-1].get("reused") is True
+    assert entries[-1].get("reused_dead") is True
+
+
+def test_try_claim_mints_new_name_when_successor_alive(cc_home, tmp_path,
+                                                       monkeypatch):
+    # a live pane must never be hijacked: today's mint stays.
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    _active_dead_successor(key)
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    monkeypatch.setattr(bootstrap, "_pane_record_dead",
+                        lambda rec, **kw: False)
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None and res["new_nnn"] == 43
+    assert state.load_state(key, 42)["state"] == "ACTIVE"
+    assert state.load_state(key, 42)["session_id"] == "sid-zombie"
+    entries = ledger.read(paths.session_dir(key, 43))
+    assert entries[-1]["type"] == "session_start"
+    assert "reused" not in entries[-1]
+
+
+def test_try_claim_skips_young_dead_successor(cc_home, tmp_path,
+                                              monkeypatch):
+    # REUSE_MIN_AGE_S still guards adoption: an in-flight successor is
+    # never stolen even if a probe says dead.
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    _active_dead_successor(key)
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 1e18)
+    monkeypatch.setattr(bootstrap, "_pane_record_dead",
+                        lambda rec, **kw: True)
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None and res["new_nnn"] == 43
+    assert state.load_state(key, 42)["state"] == "ACTIVE"
+
+
+def test_pane_record_dead_true_when_pane_gone():
+    rec = {"tmux_session": "cc-spike-repo-zz99"}
+    assert bootstrap._pane_record_dead(
+        rec, runner=_fake_runner(b"cc-other\n")) is True
+
+
+def test_pane_record_dead_false_when_pane_listed():
+    rec = {"tmux_session": "cc-spike-repo-zz99"}
+    assert bootstrap._pane_record_dead(
+        rec, runner=_fake_runner(b"cc-spike-repo-zz99\ncc-other\n")) is False
+
+
+def test_pane_record_dead_false_without_recorded_pane():
+    run = _fake_runner(b"")
+    assert bootstrap._pane_record_dead({}, runner=run) is False
+    assert run.calls == []        # no tmux call for a pane-less record
+
+
+def test_pane_record_dead_false_when_tmux_fails():
+    rec = {"tmux_session": "cc-spike-repo-zz99"}
+    assert bootstrap._pane_record_dead(
+        rec, runner=_fake_runner(b"", rc=1)) is False
+
+
+def test_pane_record_dead_false_on_probe_error():
+    import subprocess as _sp
+
+    def boom(cmd, **kw):
+        raise _sp.SubprocessError("tmux exploded")
+    rec = {"tmux_session": "cc-spike-repo-zz99"}
+    assert bootstrap._pane_record_dead(rec, runner=boom) is False
