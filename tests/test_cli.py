@@ -1428,3 +1428,130 @@ def test_cmd_install_dry_run_nonzero_on_missing_prereqs(tmp_path, monkeypatch,
     rc = cli.cmd_install(_install_ns(dry_run=True))
     assert rc == 1
     assert "tmux" in capsys.readouterr().err
+
+
+# ------------------------------------------------ history search (issue #84)
+
+
+def _write_handoff(key, nnn, objective, body_lines):
+    """Minimal handoff.md for the read-only #84 search (checkpoint dir)."""
+    cdir = paths.session_dir(key, nnn) / "checkpoint"
+    cdir.mkdir(parents=True, exist_ok=True)
+    text = (f"# Handoff cp-{nnn:03d}\n\n"
+            "## Objective\n\n"
+            f"{objective}\n\n"
+            "## Current Task and Exact Stopping Point\n\n"
+            + "\n".join(body_lines) + "\n")
+    (cdir / "handoff.md").write_text(text, encoding="utf-8")
+
+
+def _set_created(key, nnn, iso):
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text(encoding="utf-8"))
+    for s in pref["sessions"]:
+        if s["nnn"] == nnn:
+            s["created"] = iso
+    pfile.write_text(json.dumps(pref), encoding="utf-8")
+
+
+def test_history_search_finds_match_and_shows_table(cc_home, tmp_path,
+                                                    monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Ship the rotation threshold fix.",
+                   ["thresholds raised to warn 0.65 yesterday"])
+    _write_handoff(key2, 2, "Unrelated docs work.",
+                   ["nothing interesting here"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "0.65"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert lines[0].startswith("NNN") and "MATCH" in lines[0]
+    assert len(lines) == 2  # only session 1 matched
+    row = lines[1]
+    assert row.startswith("001")
+    assert "Ship the rotation threshold fix." in row  # objective column
+    assert "warn 0.65" in row                         # matched-line snippet
+
+
+def test_history_search_is_case_insensitive(cc_home, tmp_path, monkeypatch,
+                                            capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    _write_handoff(key, 1, "Ship the rotation threshold fix.",
+                   ["thresholds raised to warn 0.65 yesterday"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "WARN"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("001")
+
+
+def test_history_search_nnn_filter(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Ship the rotation threshold fix.", ["x"])
+    _write_handoff(key2, 2, "Rotation cleanup.", ["y"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "rotation", "--nnn", "2"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2
+    assert lines[1].startswith("002")
+    assert "Rotation cleanup." in lines[1]
+
+
+def test_history_search_date_range(cc_home, tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Old work.", ["threshold note one"])
+    _write_handoff(key2, 2, "New work.", ["threshold note two"])
+    _set_created(key, 1, "2026-11-01T10:00:00+00:00")
+    _set_created(key, 2, "2026-11-20T10:00:00+00:00")
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "threshold", "--since", "2026-11-10"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("002")
+    capsys.readouterr()
+    assert cli.main(["history", "threshold",
+                     "--until", "2026-11-10"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("001")
+
+
+def test_history_search_no_match_message(cc_home, tmp_path, monkeypatch,
+                                         capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    _write_handoff(key, 1, "Ship the rotation threshold fix.", ["x"])
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "zebra-not-there"]) == 0
+    assert "no matches" in capsys.readouterr().out
+
+
+def test_history_search_unreadable_handoff_skipped(cc_home, tmp_path,
+                                                   monkeypatch, capsys):
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    key2, nnn2 = register_session(
+        repo, session_id="22222222-2222-2222-2222-222222222222")
+    _write_handoff(key, 1, "Ship the rotation threshold fix.", ["x"])
+    # session 2: handoff.md is a directory -> unreadable, must be skipped
+    (paths.session_dir(key2, nnn2) / "checkpoint").mkdir(parents=True,
+                                                         exist_ok=True)
+    (paths.session_dir(key2, nnn2) / "checkpoint" / "handoff.md").mkdir()
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "threshold"]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("001")
+
+
+def test_history_search_without_project(cc_home, tmp_path, monkeypatch,
+                                        capsys):
+    repo = make_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    assert cli.main(["history", "anything"]) == 0
+    assert "No cc-continuity project" in capsys.readouterr().out

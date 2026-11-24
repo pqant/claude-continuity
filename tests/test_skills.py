@@ -95,3 +95,13 @@ def test_all_descriptions_carry_the_continuity_keyword():
     # skill must carry "cc-continuity" so it stays discoverable (issue 82)
     for name in skills.skill_names():
         assert "cc-continuity" in skills.SKILLS[name]["description"]
+
+
+def test_history_skill_pins_search_usage():
+    # issue #84: the skill text must teach the keyword search so the /cc
+    # filter and the invoking agent both see it.
+    text = skills.skill_text("continuity-history")
+    assert "cc-continuity history <query>" in text
+    assert "search" in text.lower()
+    # the plain-chain command fence (test_command_mapping) still holds
+    assert "```bash\ncc-continuity history\n```" in text
