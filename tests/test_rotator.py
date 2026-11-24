@@ -1303,3 +1303,37 @@ def test_paneless_spawn_unattended_adds_skip_permissions(
     assert outcome == "deferred"  # no claim; we only inspect the cmd
     ns = next(c for c in _calls(fake_tmux) if c[0] == "new-session")
     assert "--dangerously-skip-permissions" in ns[6]
+
+
+def test_complete_uses_claimed_successor_name(cc_home, tmp_path, monkeypatch):
+    # BUG-10 (connector-258 live): rotation_completed was written with the
+    # rotator's PREDICTED name even though the real claimed record had
+    # already been fetched in the same function - the old ledger then
+    # contradicted state.successor forever (ledger 259 vs state 267).
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    walk_to(key, nnn, "ROTATING")
+    state.update_fields(key, nnn, rotation_id="r1")
+    monkeypatch.setattr(rotator, "_find_successor_rec",
+                        lambda k, n: {"name": "spike-repo-777", "nnn": 777,
+                                      "session_id": None})
+    monkeypatch.setattr(rotator.notify, "safe_send", lambda *a, **k: None)
+    rec = state.load_state(key, nnn)
+    rotator._complete(key, nnn, rec, "spike-repo-002", {})
+    evs = [e for e in ledger.read(paths.session_dir(key, nnn))
+           if e["type"] == "rotation_completed"]
+    assert evs[-1]["successor"] == "spike-repo-777"
+
+
+def test_successor_name_fallback_follows_project_counter(cc_home, tmp_path):
+    # BUG-10: the prediction must equal the CLAIM allocator
+    # (max(counter, old_nnn) + 1), not strict nnn+1 - when stale records
+    # advanced the counter the pane title and ledger froze the stale
+    # prediction (live: pane said connector-259, real session was 267).
+    repo = make_repo(tmp_path)
+    key, nnn = register_session(repo)
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text())
+    pref["counter"] = nnn + 9
+    pfile.write_text(json.dumps(pref))
+    assert rotator._successor_name(key, nnn, "spike-repo-001") == "spike-repo-011"

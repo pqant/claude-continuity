@@ -452,3 +452,42 @@ def test_try_reuse_stalled_same_sid_optin_reannounces(cc_home, tmp_path,
     starts = [e for e in ledger.read(paths.session_dir(key, 2))
               if e["type"] == "session_start"]
     assert starts[-1]["reused"] and starts[-1]["source"] == "resume"
+
+
+def test_try_claim_reuses_never_attached_successor(cc_home, tmp_path):
+    # BUG-10 (connector 258/259 live): the claimed session's own
+    # never-attached BOOTSTRAPPING successor must be re-adopted at the SAME
+    # index by the next claim - minting max+1 and leaving the orphan behind
+    # violates the standing "no session index jumping" rule.
+    import datetime as _dt
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    orphan_name = "spike-repo-042"
+    state.create_session_state(key, orphan_name, 42, "sid-orphan",
+                               predecessor="spike-repo-001",
+                               initial_state="BOOTSTRAPPING")
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text())
+    pref["sessions"].append({"name": orphan_name, "session_id": "sid-orphan",
+                             "nnn": 42,
+                             "created": _dt.datetime.now(
+                                 _dt.timezone.utc).isoformat()})
+    pref["counter"] = 42
+    pfile.write_text(json.dumps(pref))
+    state.update_fields(key, 42, created=(_dt.datetime.now(
+        _dt.timezone.utc) - _dt.timedelta(hours=1)).isoformat())
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None
+    assert res["new_nnn"] == 42 and res["new_name"] == "spike-repo-042"
+    new = state.load_state(key, 42)
+    assert new["session_id"] == _NEW_SID
+    assert new["predecessor"] == "spike-repo-001"
+    assert state.load_state(key, nnn)["successor"] == "spike-repo-042"
+    pref2 = json.loads(pfile.read_text())
+    assert sum(1 for s in pref2["sessions"] if s["nnn"] == 42) == 1
+    assert pref2["counter"] == 42
+    entries = ledger.read(paths.session_dir(key, 42))
+    assert entries[-1]["type"] == "session_start"
+    assert entries[-1].get("reused") is True
