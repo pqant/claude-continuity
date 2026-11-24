@@ -46,8 +46,20 @@ SKILLS: dict[str, dict] = {
     },
     "continuity-history": {
         "command": "cc-continuity history",
-        "description": "Show the cc-continuity session chain (history) for the current project.",
+        "description": ("Show the cc-continuity session chain (history) for "
+                        "the current project, or search checkpoint handoffs "
+                        "for a keyword."),
         "disable_model_invocation": False,
+        "body": (
+            "Run the exact command below and report its output verbatim to "
+            "the user. Do not paraphrase or add commentary.\n\n```bash\n"
+            "cc-continuity history\n```\n\nTo search this project's "
+            "checkpoint handoffs (issue #84), run the same command with a "
+            "literal keyword (case-insensitive substring), optionally "
+            "filtered by session number or date range:\n\n```bash\n"
+            "cc-continuity history <query> [--nnn N] "
+            "[--since YYYY-MM-DD] [--until YYYY-MM-DD]\n```\n"
+        ),
     },
     "continuity-excellence": {
         "body": (

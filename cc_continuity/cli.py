@@ -69,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show at most N most recent sessions (default 20)")
     p_hist.add_argument("--json", action="store_true",
                         help="print the session chain as one JSON array")
+    p_hist.add_argument("query", nargs="?",
+                        help="search this literal substring in checkpoint handoffs")
+    p_hist.add_argument("--nnn", type=int, default=None,
+                        help="with a query: only this session number")
+    p_hist.add_argument("--since", default=None,
+                        help="with a query: sessions created on/after YYYY-MM-DD")
+    p_hist.add_argument("--until", default=None,
+                        help="with a query: sessions created on/before YYYY-MM-DD")
 
     p_ratio = sub.add_parser("ratio",
                              help="print the live context ratio of a project")
@@ -622,6 +630,8 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"cc-continuity history: unreadable project record: {e}",
               file=sys.stderr)
         return 1
+    if getattr(args, "query", None):
+        return _history_search(args, key, record)
     if getattr(args, "json", False):
         rows = []
         for s in (record.get("sessions") or [])[-args.n:]:
@@ -645,6 +655,76 @@ def cmd_history(args: argparse.Namespace) -> int:
         nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
         print(f"{nnn:03d}  {s.get('name')}  {s.get('session_id')}  "
               f"{s.get('created')}")
+    return 0
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _history_search(args: argparse.Namespace, key: str,
+                    record: dict) -> int:
+    """Issue #84: read-only literal search over the checkpoint handoffs.
+
+    Scans sessions/<nnn>/checkpoint/handoff.md only; never touches the
+    checkpoint write path, the rotator or the session index. Unreadable
+    handoffs are skipped silently; the command is display-only.
+    """
+    try:
+        since = (datetime.strptime(args.since, "%Y-%m-%d").date()
+                 if args.since else None)
+        until = (datetime.strptime(args.until, "%Y-%m-%d").date()
+                 if args.until else None)
+    except ValueError:
+        print("cc-continuity history: --since/--until need YYYY-MM-DD",
+              file=sys.stderr)
+        return 2
+    needle = args.query.lower()
+    rows = []
+    for s in (record.get("sessions") or []):
+        if not isinstance(s, dict):
+            continue
+        nnn = s.get("nnn") if isinstance(s.get("nnn"), int) else 0
+        if args.nnn is not None and nnn != args.nnn:
+            continue
+        date_str = "-"
+        created = s.get("created")
+        if isinstance(created, str):
+            try:
+                created_d = datetime.fromisoformat(created).date()
+                date_str = created_d.isoformat()
+                if since and created_d < since:
+                    continue
+                if until and created_d > until:
+                    continue
+            except ValueError:
+                pass
+        hpath = paths.session_dir(key, nnn) / "checkpoint" / "handoff.md"
+        try:
+            lines = hpath.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        match = next((ln.strip() for ln in lines if needle in ln.lower()),
+                     None)
+        if match is None:
+            continue
+        objective = "-"
+        after = False
+        for ln in lines:
+            if not after:
+                after = ln.strip().startswith("## Objective")
+                continue
+            if ln.strip():
+                objective = ln.strip()
+                break
+        rows.append((f"{nnn:03d}", date_str, objective, match))
+    if not rows:
+        print(f"history search: no matches for {args.query!r}")
+        return 0
+    print(f"{'NNN':<4}  {'DATE':<10}  {'OBJECTIVE':<40}  MATCH")
+    for nnn_str, date_str, objective, match in rows:
+        print(f"{nnn_str:<4}  {date_str:<10}  {_clip(objective, 40):<40}  "
+              f"{_clip(match, 100)}")
     return 0
 
 
