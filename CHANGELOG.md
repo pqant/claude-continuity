@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.63] - 2026-11-24
+
+### Fixed
+
+- Context-400 recovery now actually completes the rotation. Issue #92 made recovery dispatchable from `CHECKPOINT_VERIFIED`, but the spawned rotator deferred back every time: the API 400 kills the turn without firing the Stop hook, so the Stop hook's `turn_active=False` and `last_stop_ts` writes never run, and the rotator's idle gate read the dead turn as "activity after Stop", deferred, retried three times and waited for a Stop that can never come (observed live: `ROTATION_DEFERRED (activity after Stop)`, `RETRY_DEFER_AGAIN` x2, `RETRY_GIVE_UP`, and the state rolled back from ROTATING to `CHECKPOINT_VERIFIED` about 1.7 s after the recovery dispatch with no `rotation_failed` entry). `recover_400` now mirrors the Stop hook's field write right after recording the recovery (turn flag off, stop timestamp set, ordered after the ledger append so the gate's no-activity-since-last-Stop check passes): the dead turn is no longer mistaken for live work, and the rotator, its idle gate and the state machine are untouched. Two tests were written first to pin the behavior (fields cleared after the recovery append, rotator idle gate unlocked after recovery) (issue #93).
+
 ## [0.3.62] - 2026-11-23
 
 ### Fixed
