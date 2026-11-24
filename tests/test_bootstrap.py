@@ -102,8 +102,11 @@ def test_c4_text_inlines_short_handoff():
     assert lines[0] == ("CONTINUITY BOOTSTRAP: you are p-002, continuing "
                         "p-001. VALIDATION: OK")
     assert lines[1] == "working tree unchanged since checkpoint"
-    assert "Protocol: read the handoff below (or at /x/handoff.md) fully" in lines[2]
-    assert lines[3] == "---"
+    # issue #83: the fixture carries a cp id, so the preview line slots in
+    # between the details and the protocol directive.
+    assert lines[2] == "Preview: cp-001 | validation OK"
+    assert "Protocol: read the handoff below (or at /x/handoff.md) fully" in lines[3]
+    assert lines[4] == "---"
     assert t.endswith("# Handoff cp-001\n## Objective\n...")
 
 
@@ -491,3 +494,76 @@ def test_try_claim_reuses_never_attached_successor(cc_home, tmp_path):
     entries = ledger.read(paths.session_dir(key, 42))
     assert entries[-1]["type"] == "session_start"
     assert entries[-1].get("reused") is True
+
+# --- issue #83: at-a-glance preview line in the C.4 block (display-only) ---
+
+_NAA_HANDOFF = (
+    "# Handoff cp-007 - claude-continuity-007\n\n"
+    "- session: `claude-continuity-007` (7)\n"
+    "- predecessor: `claude-continuity-006`\n\n"
+    "## Objective\n\nkeep it simple\n\n"
+    "## Next Atomic Action\n\n"
+    "1. run the full dev suite (uv run pytest -q)\n"
+    "2. write the docs\n\n"
+    "## Remaining Plan\n\n1. ship\n"
+)
+
+
+def _c4(**over):
+    from cc_continuity import thresholds
+    kw = dict(new_name="p-002", old_name="p-001", status="OK", details=[],
+              handoff=_NAA_HANDOFF, handoff_path="/x/handoff.md",
+              inline_max=12000)
+    kw.update(over)
+    return thresholds.c4_text(**kw)
+
+
+def test_c4_text_preview_line_at_a_glance():
+    # issue #83: cp id, predecessor, validation and the first next action
+    # must be visible at resume time, before the new session's first reply.
+    t = _c4()
+    lines = t.splitlines()
+    pv = next(l for l in lines if l.startswith("Preview:"))
+    assert "cp-007" in pv
+    assert "from claude-continuity-006" in pv
+    assert "validation OK" in pv
+    assert "next: run the full dev suite (uv run pytest -q)" in pv
+    # the preview precedes the protocol directive (at-a-glance first)
+    proto = next(i for i, l in enumerate(lines) if l.startswith("Protocol:"))
+    assert lines.index(pv) < proto
+
+
+def test_c4_text_preview_first_action_only():
+    # only the first numbered item; the "1. " numbering is stripped
+    t = _c4()
+    pv = next(l for l in t.splitlines() if l.startswith("Preview:"))
+    assert "write the docs" not in pv
+    assert "next: 1." not in pv
+
+
+def test_c4_text_preview_truncates_long_action():
+    long_action = "x" * 200
+    t = _c4(handoff=_NAA_HANDOFF.replace(
+        "run the full dev suite (uv run pytest -q)", long_action))
+    pv = next(l for l in t.splitlines() if l.startswith("Preview:"))
+    assert pv.endswith("...")
+    assert len(pv.split("next: ", 1)[1]) <= 100
+
+
+def test_c4_text_preview_absent_without_sections():
+    # silent fallback: nothing parseable, block stays exactly the old format
+    t = _c4(handoff="# Handoff\nbody")
+    assert not any(l.startswith("Preview:") for l in t.splitlines())
+
+
+def test_c4_text_preview_absent_when_not_inlined():
+    # the handoff text is too large to inline: no parse, no preview line
+    t = _c4(handoff="x" * 20, inline_max=10)
+    assert not any(l.startswith("Preview:") for l in t.splitlines())
+
+
+def test_c4_text_preview_shows_mismatch_status():
+    # the validation summary rides the preview verbatim (one line)
+    t = _c4(status="MISMATCH: git tree differs from snapshot")
+    pv = next(l for l in t.splitlines() if l.startswith("Preview:"))
+    assert "validation MISMATCH: git tree differs from snapshot" in pv
