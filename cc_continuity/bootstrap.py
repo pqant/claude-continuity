@@ -230,6 +230,30 @@ def _new_work_since_handoff(cp_dir: Path, key: str,
     return out[-5:]
 
 
+def _find_reusable_successor(pref: dict, key: str, old_name: str) -> dict | None:
+    """BUG-10: the BOOTSTRAPPING record this claim minted earlier but never
+    attached (predecessor == ``old_name``, ``successor`` unset, older than
+    ``REUSE_MIN_AGE_S``). Liveness is not probed: a live session is ACTIVE,
+    never BOOTSTRAPPING, so adoption cannot hijack a running pane."""
+    for s in reversed(pref.get("sessions") or []):
+        try:
+            rec = state.load_state(key, int(s["nnn"]))
+        except (state.StateNotFoundError, ValueError, KeyError):
+            continue
+        if (rec.get("predecessor") != old_name
+                or rec["state"] != "BOOTSTRAPPING"
+                or rec.get("successor")):
+            continue
+        try:
+            created = datetime.fromisoformat(rec["created"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (datetime.now(timezone.utc) - created).total_seconds() < REUSE_MIN_AGE_S:
+            continue
+        return rec
+    return None
+
+
 def try_claim(key: str, *, new_session_id: str, cfg: dict,
               states: frozenset[str] | None = None,
               source: str = "clear") -> dict | None:
@@ -243,7 +267,9 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
     a second claim sees ``successor`` set). On success returns
     ``{"old_name", "old_nnn", "new_name", "new_nnn", "validation",
     "details", "bootstrap_text"}`` and has: created the successor state
-    (BOOTSTRAPPING, predecessor = old name, nnn = old+1 at least), set
+    (BOOTSTRAPPING, predecessor = old name, nnn = old+1 at least) - or,
+    when this predecessor's BOOTSTRAPPING successor already exists but was
+    never attached, adopted it at the same index (BUG-10, ``reused``) - set
     the old session's ``successor`` and moved it to ROTATED, cleared
     ``pending_consumption`` on the matching latest_checkpoint, appended
     one ``session_start`` ledger entry to the successor, and updated
@@ -256,11 +282,24 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
     pref = json.loads(pfile.read_text(encoding="utf-8"))
     root = Path(pref["root"])
     old_nnn = int(old["nnn"])
-    nnn_new = max(int(pref["counter"]), old_nnn) + 1
-    name_new = naming.logical_name(naming.split_name(old["name"])[0], nnn_new)
-    state.create_session_state(key, name_new, nnn_new, new_session_id,
-                               predecessor=old["name"],
-                               initial_state="BOOTSTRAPPING")
+    reuse = _find_reusable_successor(pref, key, old["name"])
+    if reuse is not None:
+        # BUG-10 (connector 258/259 live): this claim's own never-attached
+        # successor already sits at its index - adopt it (standing "no
+        # session index jumping" rule) instead of minting a second name.
+        nnn_new = int(reuse["nnn"])
+        name_new = reuse["name"]
+        state.update_fields_unlocked(key, nnn_new, session_id=new_session_id)
+        entry = next((s for s in pref["sessions"]
+                      if int(s.get("nnn", -1)) == nnn_new), None)
+        if entry is not None:
+            entry["session_id"] = new_session_id
+    else:
+        nnn_new = max(int(pref["counter"]), old_nnn) + 1
+        name_new = naming.logical_name(naming.split_name(old["name"])[0], nnn_new)
+        state.create_session_state(key, name_new, nnn_new, new_session_id,
+                                   predecessor=old["name"],
+                                   initial_state="BOOTSTRAPPING")
     state.update_fields_unlocked(key, old_nnn, successor=name_new)
     state._transition_unlocked(key, old_nnn, "ROTATED")
     cp = pref.get("latest_checkpoint")
@@ -270,9 +309,10 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
         cp["pending_consumption"] = False
         cp["consumed_by"] = name_new
         pref["latest_checkpoint"] = cp
-    pref["counter"] = nnn_new
-    pref["sessions"].append({"name": name_new, "session_id": new_session_id,
-                             "nnn": nnn_new, "created": _now()})
+    pref["counter"] = max(int(pref["counter"]), nnn_new)
+    if reuse is None:
+        pref["sessions"].append({"name": name_new, "session_id": new_session_id,
+                                 "nnn": nnn_new, "created": _now()})
     atomic.atomic_write_json(pfile, pref)
     cp_dir = paths.session_dir(key, old_nnn) / "checkpoint"
     status, details = validate.validate_checkpoint(cp_dir, cfg, root=root)
@@ -286,9 +326,11 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
         details=details, handoff=handoff, handoff_path=str(handoff_file),
         inline_max=int(cfg.get("inline_handoff_max_chars", 12000)),
         new_work=_new_work_since_handoff(cp_dir, key, old_nnn))
-    ledger.append(paths.session_dir(key, nnn_new),
-                  {"type": "session_start", "source": source,
-                   "claimed": old["name"], "validation": status})
+    start_entry = {"type": "session_start", "source": source,
+                   "claimed": old["name"], "validation": status}
+    if reuse is not None:
+        start_entry["reused"] = True
+    ledger.append(paths.session_dir(key, nnn_new), start_entry)
     return {"old_name": old["name"], "old_nnn": old_nnn,
             "new_name": name_new, "new_nnn": nnn_new,
             "validation": status, "details": details,

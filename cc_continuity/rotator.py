@@ -304,6 +304,8 @@ def spawn_successor_detached(key: str, nnn: int, session_id: str, cfg: dict,
         old_name = rec["name"]
         if verify(key, nnn, f"cp-{nnn:03d}", old_name):
             succ = _find_successor_rec(key, old_name)
+            if succ and succ.get("name"):
+                name_new = succ["name"]  # BUG-10: ledger/log carry the claim's name
             r1 = None
             sid_new = (succ or {}).get("session_id")
             if sid_new:
@@ -402,11 +404,18 @@ def _find_successor_rec(key: str, old_name: str) -> dict | None:
 
 def _successor_name(key: str, nnn: int, old_name: str) -> str:
     """The name the successor has: the claimed record when the claim already
-    ran, else the naming successor of the old name (F14 path)."""
+    ran, else the claim allocator's next name (F14 path). The fallback
+    mirrors bootstrap.try_claim's mint exactly — max(counter, nnn) + 1 — or
+    the pane title and ledger freeze a prediction the claim never mints
+    (BUG-10: pane said connector-259, real session was 267)."""
     rec = _find_successor_rec(key, old_name)
     if rec is not None:
         return rec["name"]
-    return naming.successor_name(old_name)
+    pref = json.loads((paths.project_dir(key) / "project.json")
+                      .read_text(encoding="utf-8"))
+    counter = int(pref.get("counter") or 0)
+    return naming.logical_name(naming.split_name(old_name)[0],
+                               max(counter, nnn) + 1)
 
 
 def _handoff_path(key: str, nnn: int) -> str:
@@ -649,13 +658,17 @@ def _defer_to_checkpoint(key: str, nnn: int, reason: str) -> None:
 def _complete(key: str, nnn: int, rec: dict, name_new: str,
               cfg: dict) -> int:
     """§11.9 success bookkeeping, shared by attempt 1 and escalation ticks."""
+    # BUG-10: the claim is the name's owner - reconcile the predicted name
+    # with the real claimed record BEFORE ledger/log see it.
+    succ = _find_successor_rec(key, rec["name"])
+    if succ and succ.get("name"):
+        name_new = succ["name"]
     state.transition(key, nnn, "ROTATED")
     delete_pending_prompt(key, nnn)  # consumed by the C.8 note
     ledger.append(paths.session_dir(key, nnn),
                   {"type": "rotation_completed", "successor": name_new})
     log_event(f"rotator: ROTATION_COMPLETED key={key} {nnn:03d} "
               f"-> {name_new}")
-    succ = _find_successor_rec(key, rec["name"])
     r1 = None
     sid_new = (succ or {}).get("session_id")
     if sid_new:
