@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.68] - 2026-11-24
+
+### Added
+
+- The resume bootstrap block now opens with a one-line at-a-glance preview (issue #83): checkpoint number, predecessor session, the VALIDATION result and the first `Next Atomic Action` item, so the user sees what is being resumed without waiting for the new session's first reply. The line is parsed display-only from the handoff text the hook already loaded: when the handoff is not inlined or nothing parses, the line is silently omitted and the block stays exactly the old format; no extra file read, write, state change or network call is involved. Six tests were written first (the summary content and its position before the protocol directive, the first-item rule, long-action truncation, both silent fallbacks and the mismatch-status display) and one positional assertion was updated to account for the new line.
+
 ## [0.3.67] - 2026-11-24
 
 ### Added
