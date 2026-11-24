@@ -49,7 +49,7 @@ def test_install_fresh_home_creates_all(fake_home):
     assert (h / ".claude" / "CLAUDE.md").is_file()
     ztext = (h / ".zshrc").read_text(encoding="utf-8")
     assert "cc-continuity launch --" in ztext
-    assert len(list((h / ".claude" / "skills").iterdir())) == 7
+    assert len(list((h / ".claude" / "skills").iterdir())) == 8
     link = h / ".local" / "bin" / "cc-continuity"
     assert link.is_symlink()
     launcher = Path(manifest["launcher"])
