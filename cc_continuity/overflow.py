@@ -236,6 +236,15 @@ def recover_400(key: str, nnn: int, session_id: str | None, pane: str,
                       {"type": "context400_recovered",
                        "window": info.get("window"),
                        "input_tokens": info.get("input_tokens")})
+        # BUG-7: a context-400 kills the turn WITHOUT a Stop hook, so
+        # hooks/stop.py never clears turn_active/last_stop_ts and the
+        # spawned rotator's PRD 11.3 idle gate defers forever waiting for a
+        # "next Stop" that can never come. Mirror the Stop hook's field
+        # write here - the turn is provably dead (400 tail; fresh-prompt
+        # gate ran first). AFTER the ledger append so "no ledger activity
+        # since last Stop" sees the recovery itself as the last event.
+        state.update_fields(key, nnn, turn_active=False,
+                            last_stop_ts=time.time())
         notify.safe_send(
             cfg, "context400", slug=notify.project_slug(key), nnn=nnn,
             dedup_key=f"context400:{nnn:03d}",
