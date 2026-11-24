@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.66] - 2026-11-24
+
+### Added
+
+- `cc-continuity history` gained a keyword search over the project's checkpoint archive (issue #84). Passing a literal query searches every `sessions/<nnn>/checkpoint/handoff.md` case-insensitively and prints one row per matching session (session number, creation date, first `## Objective` line, matched line snippet); `--nnn` restricts the search to one session number and `--since`/`--until` filter by creation date (YYYY-MM-DD). The `/continuity-history` skill teaches the same usage. The search is read-only and deterministic: the checkpoint write path, the rotator and the session index are untouched, no background process or network call is involved, and unreadable handoffs are skipped silently. Eight tests were written first (table shape, case-insensitivity, the session-number filter, both date-range ends, the no-match message, the unreadable-handoff skip, the no-project notice and the skill usage pin).
+
 ## [0.3.65] - 2026-11-24
 
 ### Fixed
