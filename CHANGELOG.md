@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.65] - 2026-11-24
+
+### Fixed
+
+- A rotation no longer splits the successor identity between the pane, the ledger and the claim. The rotator predicted the successor name as strict `nnn+1` while the claim mints `max(counter, old_nnn) + 1`: when stale records had already advanced the counter the two allocators disagreed, and the rotator then wrote the `rotation_completed` ledger entry, the log line and the pane title with its own stale prediction while the claimed record carried a different name forever (observed live: the ledger of a rotated connector session recorded successor connector-259 while the claimed successor session was connector-267). The prediction now mirrors the claim allocator exactly, `_complete` and the paneless completion path reconcile the ledger entry and log line with the claimed record before writing them, and a claim whose own `BOOTSTRAPPING` successor exists but was never attached adopts that record at the same index (session id refreshed in the state record and project.json, `reused` flagged on the `session_start` entry) instead of minting a second name, honoring the standing no-index-jumping rule. Liveness is not probed and no live record is ever adopted: a live session is `ACTIVE`, never `BOOTSTRAPPING`. Three tests were written first to pin the reconciled ledger entry, the counter-following prediction and the same-index adoption (issue #96).
+
 ## [0.3.64] - 2026-11-24
 
 ### Fixed
