@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.67] - 2026-11-24
+
+### Added
+
+- Handoff search became a first-class surface (issue #97). `cc-continuity search <query>` now takes the search phrase directly, without typing `history` first, and the new `/continuity-search <phrase>` skill makes the invocation argument itself the query: invoked bare it asks for the keyword once, and the model may invoke it when the user asks to search past sessions. Both surfaces reuse the read-only keyword engine introduced in v0.3.66 verbatim, so `--nnn` / `--since` / `--until` keep working and `cc-continuity history <query>` continues to work unchanged. The checkpoint write path, the rotator and the session index are untouched, no background process or network call is involved, and four tests were written first (the search command's table output, its filter flags, its no-project notice and the skill's raw-argument usage pin).
+
 ## [0.3.66] - 2026-11-24
 
 ### Added
