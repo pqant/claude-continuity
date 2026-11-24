@@ -67,8 +67,8 @@ rotations → a completed task, captured end to end. It is a long,
 video-style GIF, so it is offered as a download rather than embedded
 in the page:
 
-- [demo-high-res.gif](https://github.com/pqant/claude-continuity/releases/download/v0.1.1/demo-high-res.gif) — 896x1920, 20 fps (~20 MB)
-- [demo-low-res.gif](https://github.com/pqant/claude-continuity/releases/download/v0.1.1/demo-low-res.gif) — 700x1500, 12 fps (~12 MB)
+- [demo-high-res.gif](https://github.com/pqant/claude-continuity/releases/download/v0.1.1/demo-high-res.gif) - 896x1920, 20 fps (~20 MB)
+- [demo-low-res.gif](https://github.com/pqant/claude-continuity/releases/download/v0.1.1/demo-low-res.gif) - 700x1500, 12 fps (~12 MB)
 
 The demo itself is recorded by
 [`tools/demo_gif.sh`](tools/demo_gif.sh) (it needs a local-model
@@ -92,8 +92,8 @@ path end to end.
 ## Windows (via WSL)
 
 cc-continuity runs inside a Windows Subsystem for Linux distro: the
-Linux side is unchanged — same rotation, same watchdog, same ntfy
-pushes — and only the daemon hosting differs. Where macOS uses
+Linux side is unchanged: same rotation, same watchdog, same ntfy
+pushes, and only the daemon hosting differs. Where macOS uses
 launchd, the distro uses a detached tmux session (default) or systemd
 user units (WSL 2 with systemd enabled), plus one optional Windows
 logon task so the daemons come back when the WSL VM restarts.
@@ -101,7 +101,7 @@ logon task so the daemons come back when the WSL VM restarts.
 - **WSL 2 recommended; WSL 1 works too** (minus the systemd option).
 - **Ubuntu 24.04 recommended**; Ubuntu 22.04 works with `python3.11`
   from deadsnakes.
-- **Native Windows is out of scope** — the distro is the runtime.
+- **Native Windows is out of scope**; the distro is the runtime.
 
 Full guide (requirements, install, watchdog, autostart,
 troubleshooting): [`docs/WINDOWS.md`](docs/WINDOWS.md). An end-to-end
