@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.69] - 2026-11-24
+
+### Fixed
+
+- A claim no longer skips an already-attached successor that died (issue #98, the gap v0.3.65 left open). A successor record can die after attaching: the claim minted it, the pane attached (ACTIVE), then the claude process died before the next rotation (crash, kill, box hiccup). v0.3.65 re-adopted only never-attached `BOOTSTRAPPING` successors, so the dead `ACTIVE` record was skipped, a fresh name was minted at `max(counter)+1`, and the session list kept showing a record that looked live forever. The claim now probes the candidate's recorded pane (its `tmux_session` field against `tmux list-sessions`) and, only when that pane is gone, adopts the record at its same index: `session_id` refreshed in the state record and `project.json`, state reset to `BOOTSTRAPPING` so the SessionStart hook drives it like a fresh claim, and `reused` plus `reused_dead` flagged on the `session_start` ledger entry. The probe is conservative by construction: no recorded pane, tmux unavailable or any probe error means the candidate is treated as live and the claim behaves exactly as before; `REUSE_MIN_AGE_S` still guards in-flight successors and the cost is one `tmux list-sessions` only when an ACTIVE candidate needs checking. Eight tests were written first (the same-index adoption, the live-pane no-hijack, the in-flight guard and the five conservative probe paths).
+
 ## [0.3.68] - 2026-11-24
 
 ### Added
