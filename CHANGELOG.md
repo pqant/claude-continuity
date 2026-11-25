@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.70] - 2026-11-26
+
+### Fixed
+
+- An adopted successor no longer keeps the `off` marking of its abandoned startup (issue #99, live on a connector pane). When Claude Code's native auto-resume abandons a freshly registered startup, the SessionEnd hook marks that record `off=true` on `reason=resume` (by design since 2026-09-27, so abandoned startups never linger as live zombies). The same record can later be revived as the live session by successor adoption (the v0.3.65 never-attached `BOOTSTRAPPING` reuse or the v0.3.69 dead-`ACTIVE` `reused_dead` variant), but adoption refreshed `session_id` and state without clearing `off`: every consumer that gates on `off` (hook session resolution, the rotator, the watchdog) then ignored a real attached pane, the status line rendered `off` instead of the usage segment, and the conversation grew unmonitored (observed at 93% context with no rotation). Both adoption branches now clear `off` in the same unlocked write that refreshes the record; abandoned startups stay `off` exactly as before and minted successors are unaffected (they start `off=False`). Two tests were written first, one per adoption branch.
+
 ## [0.3.69] - 2026-11-24
 
 ### Fixed
