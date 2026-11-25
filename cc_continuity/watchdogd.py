@@ -1559,8 +1559,12 @@ def _try_recover_400(ctx: TickCtx, key: str, nnn: int, rec: dict,
     # check lives ONLY in overflow.recover_400 (single source) - a stale
     # verified checkpoint still returns "skipped:CHECKPOINT_VERIFIED".
     if not (bool(ctx.cfg.get("full_auto", True))
+            # Issue #100: HANDOFF_REQUESTED (hard-limit brick) joins the
+            # gate; recover_400 owns the state checks, this is only the
+            # dispatch permit.
             and rec.get("state") in ("BOOTSTRAPPING", "ACTIVE", "WARNED",
-                                     "CHECKPOINT_VERIFIED")
+                                     "CHECKPOINT_VERIFIED",
+                                     "HANDOFF_REQUESTED")
             and sid400 and target not in ctx.rec400):
         return False
     try:

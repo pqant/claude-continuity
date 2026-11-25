@@ -50,7 +50,12 @@ _INPUT_RE = re.compile(r"at least (\d+) input tokens")
 
 #: The states recovery may drive (anything else - a rotation already in
 #: flight, a terminal session - is a no-op skip).
-_RECOVERABLE_STATES = frozenset({"BOOTSTRAPPING", "ACTIVE", "WARNED"})
+# Issue #100 (connector-280 live): HANDOFF_REQUESTED joins the set - the
+# hard-limit gate parks the session there, the model writes the draft and
+# the turn then dies on a 400 (no Stop hook); recover_400's documented
+# route starts from exactly this state (advance() is idempotent there).
+_RECOVERABLE_STATES = frozenset({"BOOTSTRAPPING", "ACTIVE", "WARNED",
+                                 "HANDOFF_REQUESTED"})
 
 
 def _log(detail: str) -> None:
