@@ -228,6 +228,60 @@ def test_recover_400_state_gate(cc_home, tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_recover_400_verified_checkpoint_with_fresh_prompt(
+        cc_home, tmp_path, monkeypatch):
+    # BUG-3 (cp-258 live): re-attached pane sits CHECKPOINT_VERIFIED while
+    # a fresh user_prompt and a trailing 400 prove the user is back. The
+    # checkpoint is already verified, so recovery must skip the finalize
+    # walk and drive rotator.spawn + ROTATING directly.
+    import time
+    key = _mk(cc_home, tmp_path)
+    for step in ("ACTIVE", "ROTATION_PENDING",
+                 "HANDOFF_REQUESTED", "HANDOFF_FAILED",
+                 "CHECKPOINT_WRITING", "CHECKPOINT_VERIFIED"):
+        state.transition(key, 1, step)
+    ledger.append(paths.session_dir(key, 1),
+                  {"type": "user_prompt", "text": "go",
+                   "ts": time.time() + 10})
+    spawns = []
+    monkeypatch.setattr(overflow.rotator, "spawn",
+                        lambda *a: spawns.append(a) or 4242)
+    monkeypatch.setattr(
+        overflow.checkpoint, "finalize",
+        lambda *a, **k: pytest.fail("finalize must not rerun on verified"))
+    info = {"window": W, "input_tokens": W - 32000, "text_head": "API Error"}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    rec = state.load_state(key, 1)
+    assert rec["state"] == "ROTATING"
+    assert spawns == [("sid-a", "proj:cc.0", rec["rotation_id"])]
+    evs = [e for e in ledger.read(paths.session_dir(key, 1))
+           if e.get("type") == "context400_recovered"]
+    assert len(evs) == 1
+
+
+def test_recover_400_verified_checkpoint_without_fresh_prompt(
+        cc_home, tmp_path, monkeypatch):
+    # Stale verified checkpoint (rotation deferred, user gone): recovery
+    # must stay gated - no fresh user_prompt after the checkpoint stamp.
+    key = _mk(cc_home, tmp_path)
+    for step in ("ACTIVE", "ROTATION_PENDING", "HANDOFF_REQUESTED",
+                 "HANDOFF_FAILED", "CHECKPOINT_WRITING",
+                 "CHECKPOINT_VERIFIED"):
+        state.transition(key, 1, step)
+    calls = []
+    monkeypatch.setattr(overflow.rotator, "spawn",
+                        lambda *a: calls.append(a))
+    monkeypatch.setattr(
+        overflow.checkpoint, "finalize",
+        lambda *a, **k: pytest.fail("finalize must not run"))
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, None)
+    assert res == "skipped:CHECKPOINT_VERIFIED"
+    assert calls == []
+
+
 def test_recover_400_clears_turn_active_like_stop(
         cc_home, tmp_path, monkeypatch):
     # BUG-7 (connector-258 live): the 400 killed the turn without a Stop
