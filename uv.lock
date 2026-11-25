@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "cc-continuity"
-version = "0.3.69"
+version = "0.3.70"
 source = { editable = "." }
 
 [package.dev-dependencies]
