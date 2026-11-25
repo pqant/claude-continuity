@@ -703,3 +703,55 @@ def test_pane_record_dead_false_on_probe_error():
         raise _sp.SubprocessError("tmux exploded")
     rec = {"tmux_session": "cc-spike-repo-zz99"}
     assert bootstrap._pane_record_dead(rec, runner=boom) is False
+
+# --- issue #99: adoption must clear the stale off flag ----------------------
+
+
+def test_try_claim_adopted_dead_successor_clears_off(cc_home, tmp_path,
+                                                      monkeypatch):
+    # issue #99 (connector-280 live): the successor was off-marked by its
+    # own SessionEnd(reason=resume) (regression 2026-09-27 047); adoption
+    # makes it the live session again, so off must not survive or the pane
+    # renders "◆ off" and runs unmonitored (hooks/rotator/watchdog gate).
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    _active_dead_successor(key)
+    state.update_fields(key, 42, off=True)      # abandoned-startup marking
+    monkeypatch.setattr(bootstrap, "REUSE_MIN_AGE_S", 0.0)
+    monkeypatch.setattr(bootstrap, "_pane_record_dead",
+                        lambda rec, **kw: True)
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None and res["new_nnn"] == 42
+    assert state.load_state(key, 42)["off"] is False
+
+
+def test_try_claim_reused_never_attached_successor_clears_off(cc_home,
+                                                               tmp_path):
+    # same root cause on the BUG-10 reuse branch: an off-marked
+    # never-attached BOOTSTRAPPING successor is revived as the live
+    # session; the stale off flag must be cleared with the sid refresh.
+    import datetime as _dt
+    repo, key, nnn = _verified(cc_home, tmp_path)
+    state.transition(key, nnn, "ROTATING", rotation_id="r1")
+    orphan_name = "spike-repo-042"
+    state.create_session_state(key, orphan_name, 42, "sid-orphan",
+                               predecessor="spike-repo-001",
+                               initial_state="BOOTSTRAPPING")
+    pfile = paths.project_dir(key) / "project.json"
+    pref = json.loads(pfile.read_text())
+    pref["sessions"].append({"name": orphan_name, "session_id": "sid-orphan",
+                             "nnn": 42,
+                             "created": _dt.datetime.now(
+                                 _dt.timezone.utc).isoformat()})
+    pref["counter"] = 42
+    pfile.write_text(json.dumps(pref))
+    state.update_fields(key, 42, created=(_dt.datetime.now(
+        _dt.timezone.utc) - _dt.timedelta(hours=1)).isoformat())
+    state.update_fields(key, 42, off=True)      # abandoned-startup marking
+    with lock.held(key):
+        res = bootstrap.try_claim(key, new_session_id=_NEW_SID,
+                                  cfg=config.load_config(cwd=repo))
+    assert res is not None and res["new_nnn"] == 42
+    assert state.load_state(key, 42)["off"] is False
