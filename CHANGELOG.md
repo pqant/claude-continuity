@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.71] - 2026-11-26
+
+### Fixed
+
+- A hard-limit context-400 brick now self-heals (issue #100, live on a connector pane). The hard-limit gate parks a session in `HANDOFF_REQUESTED` and asks the model to write the handoff draft; when the very next API call then 400s (input plus the requested output exceeding the window), the turn dies without a Stop hook, so the draft is never finalized and the pane sits idle forever: the deterministic context-400 recovery refused to run for exactly this state, even though its own documented route starts from `HANDOFF_REQUESTED` (the idempotent walk `HANDOFF_REQUESTED -> HANDOFF_FAILED -> finalize -> CHECKPOINT_VERIFIED -> rotator restart`). Both state gates (the recoverable-state set and the watchdog dispatch permit) now include `HANDOFF_REQUESTED`; every other brick state behaves exactly as before and the per-daemon dedup is untouched. Two tests were written first, one per gate.
+
 ## [0.3.70] - 2026-11-26
 
 ### Fixed
