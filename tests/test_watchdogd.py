@@ -2873,3 +2873,26 @@ def test_try_recover_400_skip_does_not_arm_rec400(cc_home, tmp_path,
     assert watchdogd._try_recover_400(ctx, "proj-a", 1, rec,
                                       "cc-proj-a-0a9b", line) is True
     assert len(calls) == 2 and "cc-proj-a-0a9b" in ctx.rec400
+
+
+# --- issue #100: hard-limit brick gate (HANDOFF_REQUESTED) ----------------
+
+
+def test_try_recover_400_accepts_hard_limit_brick(cc_home, tmp_path,
+                                                  monkeypatch):
+    # issue #100 (connector-280 live): the hard-limit gate parked the
+    # session in HANDOFF_REQUESTED, the model wrote the draft, the turn
+    # 400'd and Stop never fired - the ONLY exit is recover_400, whose
+    # documented route starts from HANDOFF_REQUESTED. The tick gate must
+    # hand it over like the other brick states.
+    io = FakeIO(sessions=["cc-proj-a-0a9b"])
+    _mk(st="HANDOFF_REQUESTED", turn_active=True)
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    rec = state.load_state("proj-a", 1)
+    line = {"events": []}
+    assert watchdogd._try_recover_400(ctx, "proj-a", 1, rec,
+                                      "cc-proj-a-0a9b", line) is True
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert any(ev.endswith(":recovered") for ev in line["events"])
+    assert "cc-proj-a-0a9b" in ctx.rec400

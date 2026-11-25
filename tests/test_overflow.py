@@ -306,3 +306,34 @@ def test_recover_400_verified_checkpoint_survives_deferred_restamp(
     evs = [e for e in ledger.read(paths.session_dir(key, 1))
            if e.get("type") == "context400_recovered"]
     assert len(evs) == 1
+
+
+# --- issue #100: hard-limit brick recovery (HANDOFF_REQUESTED) ------------
+
+
+def test_recover_400_from_handoff_requested(cc_home, tmp_path, monkeypatch):
+    # issue #100 (connector-280 live): the hard-limit gate parked the
+    # session in HANDOFF_REQUESTED, the model wrote the draft, then the
+    # turn died on a 400 (input+32000 > window) and the Stop hook never
+    # fired. recover_400's own route starts from HANDOFF_REQUESTED
+    # (advance() is idempotent there), so the frozenset must include it.
+    key = _mk(cc_home, tmp_path)
+    state.update_fields(key, 1, state="ACTIVE")
+    state.transition(key, 1, "WARNED")
+    state.transition(key, 1, "ROTATION_PENDING")
+    state.transition(key, 1, "HANDOFF_REQUESTED")
+    spawns = []
+    monkeypatch.setattr(overflow.rotator, "spawn",
+                        lambda sid, pane, rid: spawns.append(
+                            (sid, pane, rid)) or 4242)
+    monkeypatch.setattr(overflow.checkpoint, "finalize", _fake_finalize)
+    info = {"window": W, "input_tokens": W - 32000, "text_head": "API Error"}
+    res = overflow.recover_400(key, 1, "sid-a", "proj:cc.0",
+                               dict(config.DEFAULTS), tmp_path, info)
+    assert res == "recovered"
+    rec = state.load_state(key, 1)
+    assert rec["state"] == "ROTATING"
+    assert spawns == [("sid-a", "proj:cc.0", rec["rotation_id"])]
+    evs = [e for e in ledger.read(paths.session_dir(key, 1))
+           if e.get("type") == "context400_recovered"]
+    assert len(evs) == 1
