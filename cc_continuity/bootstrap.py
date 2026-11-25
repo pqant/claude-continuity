@@ -347,13 +347,21 @@ def try_claim(key: str, *, new_session_id: str, cfg: dict,
         # the same way after its recorded pane is probed dead.
         nnn_new = int((reuse or corpse)["nnn"])
         name_new = (reuse or corpse)["name"]
+        # Issue #99 (connector-280 live): the successor may carry the
+        # off=True marking its abandoned startup got from
+        # SessionEnd(reason=resume) (regression 2026-09-27 047). Adoption
+        # makes this record the live session, so clear off in the same
+        # write - a stale off would leave hooks/rotator/watchdog gating
+        # out a real attached pane and the status line rendering "off".
         if corpse is not None:
             state.update_fields_unlocked(key, nnn_new,
                                          session_id=new_session_id,
-                                         state="BOOTSTRAPPING")
+                                         state="BOOTSTRAPPING",
+                                         off=False)
         else:
             state.update_fields_unlocked(key, nnn_new,
-                                         session_id=new_session_id)
+                                         session_id=new_session_id,
+                                         off=False)
         entry = next((s for s in pref["sessions"]
                       if int(s.get("nnn", -1)) == nnn_new), None)
         if entry is not None:
