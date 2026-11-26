@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.72] - 2026-11-26
+
+### Fixed
+
+- The hard-limit brick self-heal from v0.3.71 now actually fires in production (issue #100, found on the same connector pane). v0.3.71 admitted `HANDOFF_REQUESTED` to both recovery gates, but the watchdog tick loop dispatched the context-400 scan only for sessions the classifier judged ALIVE, TURN_DEAD, STALLED or FROZEN; the classifier SKIPs everything outside ACTIVE/WARNED, so the brick state never reached the recovery gate and the v0.3.71 dispatch stayed unreachable code. The SKIP branch now carries `HANDOFF_REQUESTED` into recovery next to `CHECKPOINT_VERIFIED` (following the BUG-6 precedent); the per-daemon dedup, the recovery gate's own checks and every other SKIP behavior are untouched. One test was written first, mirroring the verified-checkpoint dispatch test.
+
 ## [0.3.71] - 2026-11-26
 
 ### Fixed
