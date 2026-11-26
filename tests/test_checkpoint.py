@@ -912,3 +912,48 @@ def test_finalize_silent_when_notify_disabled(cc_home, tmp_path, monkeypatch):
                         lambda *a, **kw: sent.append(a) or True)
     checkpoint.finalize(key, nnn, cfg=_cfg_for(repo), root=repo)
     assert sent == []
+
+
+# --- issue #101: dash tolerance for template headings (connector-280 live) --
+
+
+def _hyphen_draft(**overrides):
+    # A local model following a no-em-dash writing rule rewrote the em dash
+    # in the template heading to an ASCII hyphen. Same heading, different
+    # dash: it must still be recognized as that section.
+    bodies = {k.replace("—", "-"): v for k, v in DRAFT_BODIES.items()}
+    bodies.update(overrides)
+    order = [t.replace("—", "-") for t in HEADING_ORDER]
+    return "\n".join(f"## {t}\n{bodies[t]}\n" for t in order)
+
+
+def test_draft_hyphen_dash_heading_variant_ok():
+    # connector-280 live case: the draft was complete (9 sections) but the
+    # heading carried a hyphen, so validate_draft called it missing AND
+    # unexpected, and finalize degraded the whole checkpoint to
+    # deterministic state. The dash is typography; matching must fold it.
+    r = checkpoint.validate_draft(_hyphen_draft(), _cfg())
+    assert r.ok is True, r.problems
+
+
+def test_draft_both_dash_variants_of_one_heading_reported_duplicate():
+    r = checkpoint.validate_draft(
+        _draft() + "\n## Rejected Approaches - Do Not Repeat\nDuplicate too.\n",
+        _cfg())
+    assert r.ok is False
+    assert any(p.startswith("duplicate heading:") for p in r.problems)
+    assert not any(p.startswith("unexpected heading:") for p in r.problems)
+
+
+def test_draft_hyphen_variant_still_enforces_required_content():
+    # Dash tolerance must not silently skip the required-section content
+    # checks: a short required body is still flagged.
+    r = checkpoint.validate_draft(_hyphen_draft(Objective="short"), _cfg())
+    assert r.ok is False
+    assert any("section too short" in p for p in r.problems)
+
+
+def test_headings_in_order_accepts_hyphen_dash_variant():
+    # The finalized handoff.md embeds the model's heading verbatim; the
+    # final verify (headings_in_order) must fold dashes the same way.
+    assert checkpoint.headings_in_order(_hyphen_draft()) is True
