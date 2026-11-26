@@ -1462,8 +1462,13 @@ def tick(ctx: TickCtx) -> dict:
         # semantics); _try_recover_400's own gate (full_auto/state/
         # rec400-dedup/400-scan + overflow.recover_400's fresh-prompt
         # check) stays the single source of truth.
+        # Issue #100: HANDOFF_REQUESTED joins this dispatch - classify
+        # SKIPs everything outside ACTIVE/WARNED, so the hard-limit brick
+        # (gate entry + draft written + turn 400'd, no Stop hook) was
+        # unreachable despite the _try_recover_400 gate admitting it.
         if (outcome == "SKIP" and rec.get("turn_active")
-                and rec.get("state") == "CHECKPOINT_VERIFIED"
+                and rec.get("state") in ("CHECKPOINT_VERIFIED",
+                                         "HANDOFF_REQUESTED")
                 and _try_recover_400(ctx, key, nnn, rec, target, line)):
             continue
 
