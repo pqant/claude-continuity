@@ -2896,3 +2896,26 @@ def test_try_recover_400_accepts_hard_limit_brick(cc_home, tmp_path,
     assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
     assert any(ev.endswith(":recovered") for ev in line["events"])
     assert "cc-proj-a-0a9b" in ctx.rec400
+
+
+def test_tick_context400_handoff_requested_triggers_recovery(
+        cc_home, tmp_path, monkeypatch):
+    # issue #100 (connector-280 live, third gate): classify() SKIPs
+    # everything outside ACTIVE/WARNED, so the hard-limit brick
+    # (gate entry + draft written + turn 400'd, no Stop hook) never
+    # reached _try_recover_400 even after its gate admitted the state -
+    # the tick loop's SKIP dispatch only carried CHECKPOINT_VERIFIED
+    # (BUG-6 precedent). SKIP + HANDOFF_REQUESTED + turn_active must
+    # reach the gate too (full_auto/state/dedup/400-scan/fresh-prompt
+    # checks stay inside _try_recover_400 - single source of truth).
+    pushes = _capture_pushes(monkeypatch)
+    io = FakeIO(pane=PROMPT_PANE, sessions=["cc-proj-a-0a9b"])
+    sdir = _mk(st="HANDOFF_REQUESTED", turn_active=True)
+    _stale_prompt(sdir)  # age is moot: row 7 SKIP dominates eligibility
+    calls = _patch400(monkeypatch, tmp_path)
+    ctx = _ctx(io, now=10_000.0)
+    line = watchdogd.tick(ctx)
+    assert line["sessions"][0]["outcome"] == "SKIP"
+    assert calls == [("proj-a", 1, "sid-proj-a-1", "cc-proj-a-0a9b")]
+    assert any(e.startswith("context400:") for e in line["events"])
+    assert io.sends == [] and pushes == []
