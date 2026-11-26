@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-26
+
+### Fixed
+
+- Hyphenated template headings no longer degrade a complete handoff draft (issue #101, live on a connector pane). The seventh template heading carries a literal em dash (U+2014) in its middle; a model obeying a no-em-dash writing rule retypes the heading with a plain hyphen, and strict template matching then treated the section as both missing and unexpected: an otherwise complete nine-section draft was discarded and the checkpoint finalized as deterministic-only (degraded), leaving the successor to reconstruct intent from user prompts alone. Template matching now folds typographic dashes (em dash and en dash) to the hyphen at every comparison site in draft validation and in the final handoff check; the draft text is preserved verbatim, the printed template the model sees is unchanged, required-section content checks keep enforcing through normalized keys, and genuinely wrong headings fail exactly as before. Four tests were written first (three RED confirmed, one guard).
+
 ## [0.3.72] - 2026-11-26
 
 ### Fixed
