@@ -109,6 +109,20 @@ def _parse_headings(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _norm_title(title: str) -> str:
+    """Fold typographic dashes to ASCII hyphen for template matching only.
+
+    Issue #101 (connector-280 live): the template carries an em dash
+    (U+2014) in the middle of "Rejected Approaches <dash> Do Not Repeat"; a
+    model obeying a no-em-dash writing rule emits the hyphen variant, and
+    strict equality then called the section both missing AND unexpected,
+    degrading an otherwise complete draft. The dash is typography: matching
+    folds it (em dash U+2014 and en dash U+2013 to "-"), the draft text
+    itself is preserved verbatim.
+    """
+    return title.replace("—", "-").replace("–", "-")
+
+
 def _section_bodies(text: str) -> dict:
     """Map level-2 title → body text (up to the next heading of any level)."""
     bodies: dict = {}
@@ -137,12 +151,16 @@ def validate_draft(text: str, cfg: dict) -> DraftReport:
     problems: list = []
     headings = _parse_headings(redacted_text)
     h2 = [t for lvl, t in headings if lvl == 2]
+    # Issue #101: every template comparison folds typographic dashes (see
+    # _norm_title); the draft text itself is kept verbatim.
+    h2n = [_norm_title(t) for t in h2]
+    template_n = [_norm_title(h) for h in TEMPLATE_HEADINGS]
     first_level: dict[str, int] = {}
     for lvl, t in headings:
-        first_level.setdefault(t, lvl)
-    for h in TEMPLATE_HEADINGS:
-        if h not in h2:
-            lvl = first_level.get(h)
+        first_level.setdefault(_norm_title(t), lvl)
+    for h, hn in zip(TEMPLATE_HEADINGS, template_n):
+        if hn not in h2n:
+            lvl = first_level.get(hn)
             if lvl is not None:
                 # Actionable for weak models: name the exact required form so
                 # the fix is a copy, not a guess (2026-10-27 e2e: H1 draft).
@@ -151,23 +169,26 @@ def validate_draft(text: str, cfg: dict) -> DraftReport:
             else:
                 problems.append(f"missing heading: {h}")
     seen: list = []
-    for h in h2:
-        if h in TEMPLATE_HEADINGS and h not in seen:
-            seen.append(h)
-    expected = [h for h in TEMPLATE_HEADINGS if h in h2]
+    for hn in h2n:
+        if hn in template_n and hn not in seen:
+            seen.append(hn)
+    expected = [hn for hn in template_n if hn in h2n]
     if seen != expected:
         problems.append(f"headings out of order: got {seen}")
     for h in dict.fromkeys(h2):
-        if h in TEMPLATE_HEADINGS and h2.count(h) > 1:
+        hn = _norm_title(h)
+        if hn in template_n and h2n.count(hn) > 1:
             problems.append(f"duplicate heading: {h}")
     for h in dict.fromkeys(h2):
-        if h not in TEMPLATE_HEADINGS:
+        if _norm_title(h) not in template_n:
             problems.append(f"unexpected heading: {h}")
-    bodies = _section_bodies(redacted_text)
+    bodies = {_norm_title(k): v for k, v in _section_bodies(redacted_text).items()}
     for idx in REQUIRED_NONEMPTY:
-        h = TEMPLATE_HEADINGS[idx]
-        if h in bodies and len(bodies[h].strip()) < MIN_REQUIRED_CHARS:
-            problems.append(f"section too short (< {MIN_REQUIRED_CHARS} chars): {h}")
+        hn = _norm_title(TEMPLATE_HEADINGS[idx])
+        body = bodies.get(hn)
+        if body is not None and len(body.strip()) < MIN_REQUIRED_CHARS:
+            problems.append(f"section too short (< {MIN_REQUIRED_CHARS} chars): "
+                            f"{TEMPLATE_HEADINGS[idx]}")
     word_count = len(redacted_text.split())
     max_words = cfg.get("handoff_max_words", 5000)
     if word_count > max_words:
@@ -181,9 +202,9 @@ def headings_in_order(text: str) -> bool:
 
     Used on the FINAL handoff.md, whose appendix adds extra H2s (allowed).
     """
-    h2 = [t for lvl, t in _parse_headings(text) if lvl == 2]
+    h2 = [_norm_title(t) for lvl, t in _parse_headings(text) if lvl == 2]
     it = iter(h2)
-    return all(any(h == t for t in it) for h in TEMPLATE_HEADINGS)
+    return all(any(_norm_title(h) == t for t in it) for h in TEMPLATE_HEADINGS)
 
 
 MAX_STATUS_LINES = 200    # PRD §10.2
