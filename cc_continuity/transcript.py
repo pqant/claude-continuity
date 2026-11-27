@@ -338,8 +338,10 @@ body.split header.mini .hdmini{width:calc(50% - 36px)}
 #panelsbtn,#panelbtn{position:absolute;left:50%;transform:translateX(-50%)}
 #panelsbtn,#panelbtn{color:#d1242f}
 [data-theme=dark] #panelsbtn,[data-theme=dark] #panelbtn{color:#ff7b72}
-main.split{max-width:none;columns:2;column-gap:28px;zoom:.75}
-main.split .block{break-inside:avoid}
+main.split{max-width:none;display:flex;gap:28px;zoom:.75}
+main.split .pane{flex:1 1 50%;min-width:0;overflow-y:auto;position:relative}
+.pagebadge{position:absolute;top:8px;right:12px;pointer-events:none;opacity:0;transition:opacity .4s ease;background:var(--hdr);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:3px 12px;font-size:20px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.18)}
+main:not(.split) .pagebadge{display:none}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
 section.block{padding:6px 14px 12px;margin:10px 0;border-radius:10px}
 section.block.user{background:var(--userbg)}
@@ -403,14 +405,27 @@ root.dataset.theme=modes[i];bt.textContent='theme: '+modes[i];
 bt.onclick=()=>{i=(i+1)%3;root.dataset.theme=modes[i];localStorage.setItem('th',i);bt.textContent='theme: '+modes[i];};
 var hdEl=document.querySelector('header'),pb=document.getElementById('panelbtn'),ps=document.getElementById('panelsbtn');
 function hcGet(){try{return localStorage.getItem('hc')==='1'}catch(e){return false}}
-function hcSet(v){hdEl.classList.toggle('mini',v);try{localStorage.setItem('hc',v?'1':'0')}catch(e){}}
+function hcSet(v){hdEl.classList.toggle('mini',v);try{localStorage.setItem('hc',v?'1':'0')}catch(e){}fitPanes();}
 if(hcGet())hdEl.classList.add('mini');
 ps.onclick=function(){hcSet(!hdEl.classList.contains('mini'))};
 pb.onclick=function(){hcSet(false)};
 var mn=document.querySelector('main'),sp=document.getElementById('sp');
 function spGet(){try{return localStorage.getItem('sp')!=='0'}catch(e){return true}}
 var spOn=spGet();sp.checked=spOn;mn.classList.toggle('split',spOn);document.body.classList.toggle('split',spOn);
-sp.onchange=function(){mn.classList.toggle('split',sp.checked);document.body.classList.toggle('split',sp.checked);try{localStorage.setItem('sp',sp.checked?'1':'0')}catch(e){}};
+sp.onchange=function(){spOn=sp.checked;mn.classList.toggle('split',sp.checked);document.body.classList.toggle('split',sp.checked);try{localStorage.setItem('sp',sp.checked?'1':'0')}catch(e){}fitPanes();};
+var panes=[].slice.call(mn.querySelectorAll('.pane'));
+function fitPanes(){if(!spOn){for(var k=0;k<panes.length;k++)panes[k].style.height='';return;}
+var cs=getComputedStyle(mn),pt=parseFloat(cs.paddingTop)||0,pb=parseFloat(cs.paddingBottom)||0;
+var hh=hdEl.offsetHeight||0,h=Math.max(200,(window.innerHeight-hh-pt-pb)/0.75);
+for(var k=0;k<panes.length;k++)panes[k].style.height=h+'px';}
+function wireBadge(pn){var t;pn.addEventListener('scroll',function(){var ch=pn.clientHeight||1;
+var tot=Math.max(1,Math.ceil(pn.scrollHeight/ch));var cur=Math.min(tot,Math.floor(pn.scrollTop/ch)+1);
+if(!pn._pb){pn._pb=document.createElement('div');pn._pb.className='pagebadge';pn.appendChild(pn._pb);}
+var b=pn._pb;b.textContent=cur+'/'+tot;b.style.opacity='1';clearTimeout(t);
+t=setTimeout(function(){b.style.opacity='0'},1000);},{passive:true});}
+for(var k=0;k<panes.length;k++)wireBadge(panes[k]);
+window.addEventListener('resize',fitPanes);
+fitPanes();
 """
 
 
@@ -704,6 +719,30 @@ def _meta_val(meta: dict, key: str) -> str:
     return html.escape(str(val))
 
 
+def _split_panes(sections: list[str], weights: list[int]) -> tuple[str, str]:
+    """Split block sections into the two split-view panes (issue #102).
+
+    Reading order is kept: the left pane takes blocks until it holds at
+    least half the total weight, the right pane gets the rest. Weight is
+    the block's text length (callers must NOT pass rendered section
+    length: image data URIs would swallow the whole scale). The CSS
+    multi-column flow balanced heights at paint time; this proxy keeps the
+    two columns visually even in plain Python. Both panes are always
+    emitted (empty strings included) so the split toggle keeps working on
+    short transcripts.
+    """
+    total = sum(weights)
+    left: list[str] = []
+    taken = 0
+    for section, w in zip(sections, weights):
+        left.append(section)
+        taken += w
+        if taken * 2 >= total:
+            break
+    cut = len(left)
+    return "".join(left), "".join(sections[cut:])
+
+
 def render_html(blocks: list[Block], meta: dict) -> str:
     """One complete readable HTML page for the conversation (v5 design).
 
@@ -726,6 +765,7 @@ def render_html(blocks: list[Block], meta: dict) -> str:
                   f'<select id="s" data-cur="{cur}" data-up="{up}"></select>')
         switch_js = _SWITCH_JS
     sections = []
+    weights = []
     galleries = []
     has_chips = False
     for role, text, ts, *rest in blocks:
@@ -765,6 +805,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
             f'<section class="block {cls}"><h2 class="{cls}">{label} '
             f'<span class="ts">{_ts_hms(ts)}</span></h2>'
             f'<div class="body">{body}</div></section>')
+        weights.append(len(text))
+    pl, pr = _split_panes(sections, weights)
     return (
         '<!doctype html><html data-theme="auto"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
@@ -787,7 +829,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn" title="panel up">&#9650;</button></div></div>\n'
         f'<div class="hdmini" hidden><span class="v">&#8250; {_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>'
         f'<button id="panelbtn" title="panel down">&#9660;</button></div></header>\n'
-        f'<main class="split">{"".join(sections)}</main>\n'
+        f'<main class="split"><div class="pane" id="pl">{pl}</div>'
+        f'<div class="pane" id="pr">{pr}</div></main>\n'
         f'{"".join(galleries)}'
         f'{_LIGHTBOX if galleries or has_chips else ""}'
         f'{ext}<script>{_JS}{switch_js}'
