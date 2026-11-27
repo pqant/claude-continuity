@@ -418,10 +418,12 @@ function fitPanes(){if(!spOn){for(var k=0;k<panes.length;k++)panes[k].style.heig
 var cs=getComputedStyle(mn),pt=parseFloat(cs.paddingTop)||0,pb=parseFloat(cs.paddingBottom)||0;
 var hh=hdEl.offsetHeight||0,h=Math.max(200,(window.innerHeight-hh-pt-pb)/0.75);
 for(var k=0;k<panes.length;k++)panes[k].style.height=h+'px';}
-function panePages(pn){var ch=pn.clientHeight||1;return Math.max(1,Math.ceil(pn.scrollHeight/ch));}
-function wireBadge(pn,k){var t;pn.addEventListener('scroll',function(){var ch=pn.clientHeight||1,all=0,off=0,mine=1;
+function visH(pn){var r=pn.getBoundingClientRect();var sc=r.height/(pn.clientHeight||1)||1;
+var t0=Math.max(r.top,0),b0=Math.min(r.bottom,window.innerHeight||1e9);return Math.max(160,(b0-t0)/(sc||1));}
+function panePages(pn){return Math.max(1,Math.ceil(pn.scrollHeight/visH(pn)));}
+function wireBadge(pn,k){var t;pn.addEventListener('scroll',function(){var ch=visH(pn),all=0,off=0,mine=1;
 for(var j=0;j<panes.length;j++){var v=panePages(panes[j]);all+=v;if(j<k){off+=v;}else if(j===k)mine=v;}
-var cur=Math.min(mine,Math.floor(pn.scrollTop/ch)+1);
+var cur=Math.min(mine,Math.floor((pn.scrollTop+ch/2)/ch)+1);
 if(pn.scrollTop+ch>=pn.scrollHeight-2)cur=mine;
 var g=Math.min(all,Math.max(1,cur+off));
 if(!pn._pb){pn._pb=document.createElement('div');pn._pb.className='pagebadge';pn.appendChild(pn._pb);}
