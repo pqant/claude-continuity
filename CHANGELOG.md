@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.75] - 2026-11-27
+
+### Fixed
+
+- The split-view page badge now numbers one global sequence across both panes and always reaches the last page (issue #103). v0.3.74 numbered each pane's own pages, so the two halves of one conversation showed independent 1/3..3/3 sequences and the right half restarted at 1 while visually continuing the left. The badge now sums the two panes' page counts at scroll time (each pane's own ceil(scrollHeight/clientHeight)), adds the page counts of the panes before it as an offset (left 0, right = left's count) and shows cur+off clamped to 1..total: the left reads 1/N..k/N and the right continues k+1/N..N/N over one shared total. Independently, when a pane's content height is not an exact multiple of its client height, floor(scrollTop/clientHeight)+1 can never produce the pane's final page (at maximum scrollTop the formula yields total-1), which made the counter look frozen near the bottom of short panes; reaching the bottom (scrollTop+clientHeight >= scrollHeight-2) now counts as the pane's last page, so the right pane at bottom always reads N/N. Independent pane scrolling, the one-second fade, the absolute overlay with no layout cost, the 0.75 zoom, the toggles, search, the matching-blocks filter, theme and the session switcher are untouched. Two tests were written first (one updated to the global contract, one new for the sequence and the clamp).
+
 ## [0.3.74] - 2026-11-27
 
 ### Added
