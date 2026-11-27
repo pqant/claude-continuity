@@ -903,9 +903,20 @@ def test_page_badge_js_computes_pages_and_fades():
     assert "pagebadge" in js
     assert "Math.floor(" in js and "Math.ceil(" in js
     assert "scrollTop" in js and "clientHeight" in js and "scrollHeight" in js
-    assert "cur+'/'+tot" in js
+    assert "g+'/'+all" in js
     assert "1000" in js  # fade about 1s after the last scroll
     assert "passive:true" in js
+
+
+def test_page_badge_js_numbers_one_global_sequence():
+    # issue #103: both panes share a single page sequence, so the right pane
+    # continues the left instead of restarting at 1.
+    d = transcript.render_html([("user", "x", None)], META)
+    js = d[d.index("<script>"):]
+    assert "panePages" in js  # per-pane page counts feed one shared total
+    assert "off+=" in js  # a pane offsets by the page counts before it
+    assert "scrollHeight-2" in js  # bottom clamp makes the last page reachable
+    assert "g+'/'+all" in js  # badge text is the global page over the total
 
 
 def test_pane_sizing_wired_to_split_toggle():
