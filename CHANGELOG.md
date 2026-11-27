@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.76] - 2026-11-27
+
+### Fixed
+
+- The split-view page badge now advances with natural scroll gestures and sizes pages by the pane's visible viewport (issue #104, follow-up to #103 found on a large display). The counter showed only first pages (1/N on the left, 4/6 on the right) because floor(scrollTop/clientHeight)+1 counts fully scrolled-away screens: measured in a real Chrome on a 2581 px pane, eight 150 px wheel notches, 62 percent of a screen of travel, kept the badge on page 1, so ordinary wheel and trackpad gestures looked frozen. The page unit is now the pane's actually visible height, measured on every scroll event from the pane's getBoundingClientRect intersected with the window viewport divided by the pane's on-screen scale (floored at 160 px), so the 0.75 split zoom, the header mini toggle and window resize need no assumptions; the current page is the screenful under the vertical center of that visible viewport, so about half a screen of travel advances the counter. The bottom clamp still guarantees each pane's last page, the right pane at bottom still reads N/N, and the global sequence, per-pane offsets, the one-second fade and independent scrolling are untouched. Human-gesture replay: left 1/6 at the top, 2/6 by the seventh notch, 3/6 at bottom; right 4/6, 5/6, 6/6 across two flicks and the bottom. One test was written first (visible-height and center-term tokens); the #103 global-sequence tokens keep guarding.
+
 ## [0.3.75] - 2026-11-27
 
 ### Fixed
