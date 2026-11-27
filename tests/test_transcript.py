@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -819,8 +820,8 @@ def test_density_split_checkbox_and_css():
     d = transcript.render_html(b, META)
     assert 'id="sp"' in d
     assert "2-column" in d
-    assert "main.split{max-width:none;columns:2" in d
-    assert "main.split .block{break-inside:avoid}" in d
+    assert "main.split{max-width:none;display:flex" in d
+    assert "main.split .pane{" in d
     assert "zoom:.75" in d
     assert '<main class="split">' in d
     assert "return localStorage.getItem('sp')!=='0'" in d
@@ -835,3 +836,81 @@ def test_density_js_persistence_guards():
                    "localStorage.setItem('hc'", "localStorage.setItem('sp'"):
         assert needle in d
     assert d.count("try{") >= 2
+
+
+# --- issue #102: split view panes scroll independently, ephemeral page badge ----
+
+def _panes(d):
+    m = re.search(r'<div class="pane" id="pl">(.*?)</div>'
+                  r'<div class="pane" id="pr">(.*?)</main>', d, re.S)
+    assert m, "split view must render two pane divs (issue #102)"
+    return m.group(1), m.group(2)
+
+
+def _words(pane):
+    return re.findall(r"<p>([^<]*)</p>", pane)
+
+
+def test_split_view_two_panes_keep_reading_order():
+    # Equal-length words keep the length-weighted split at exactly 2/2.
+    b = [("user", t, None) for t in ("alpha", "bravo", "delta", "oscar")]
+    d = transcript.render_html(b, META)
+    left, right = _panes(d)
+    assert _words(left) == ["alpha", "bravo"]
+    assert _words(right) == ["delta", "oscar"]
+    assert d.count('<div class="pane"') == 2
+
+
+def test_split_view_odd_block_count_fills_left_first():
+    b = [("user", t, None) for t in ("a1", "b2", "c3", "d4", "e5")]
+    d = transcript.render_html(b, META)
+    left, right = _panes(d)
+    assert _words(left) + _words(right) == ["a1", "b2", "c3", "d4", "e5"]
+    assert len(_words(left)) == 3 and len(_words(right)) == 2
+
+
+def test_split_view_empty_conversation_keeps_both_panes():
+    d = transcript.render_html([], META)
+    assert d.count('<div class="pane"') == 2
+
+
+def test_split_panes_own_their_scrollbar():
+    d = transcript.render_html([("user", "x", None)], META)
+    rule = re.search(r"main\.split \.pane\{([^}]*)\}", d)
+    assert rule, "pane rule required (issue #102)"
+    body = rule.group(1)
+    assert "overflow-y:auto" in body
+    assert "position:relative" in body
+    assert "flex:1 1 50%" in body
+    assert re.search(r"main\.split\{[^}]*display:flex", d), "split mode is flex, not columns"
+    assert "columns:2" not in d
+
+
+def test_page_badge_is_an_ephemeral_overlay():
+    d = transcript.render_html([("user", "x", None)], META)
+    rule = re.search(r"\.pagebadge\{([^}]*)\}", d)
+    assert rule, ".pagebadge CSS rule required (issue #102)"
+    body = rule.group(1)
+    assert "position:absolute" in body
+    assert "pointer-events:none" in body
+    assert "opacity:0" in body and "transition:opacity" in body
+    assert "main:not(.split) .pagebadge{display:none}" in d
+
+
+def test_page_badge_js_computes_pages_and_fades():
+    d = transcript.render_html([("user", "x", None)], META)
+    js = d[d.index("<script>"):]
+    assert "pagebadge" in js
+    assert "Math.floor(" in js and "Math.ceil(" in js
+    assert "scrollTop" in js and "clientHeight" in js and "scrollHeight" in js
+    assert "cur+'/'+tot" in js
+    assert "1000" in js  # fade about 1s after the last scroll
+    assert "passive:true" in js
+
+
+def test_pane_sizing_wired_to_split_toggle():
+    d = transcript.render_html([("user", "x", None)], META)
+    js = d[d.index("<script>"):]
+    assert "fitPanes" in js
+    assert js.count("fitPanes") >= 4  # definition + start + toggle + resize
+    assert "addEventListener('resize'" in js
