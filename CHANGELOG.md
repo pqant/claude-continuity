@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.74] - 2026-11-27
+
+### Added
+
+- The transcript split view now scrolls its two panes independently and flashes a page counter (issue #102). The 2-column view was a single CSS multi-column flow: the whole document scrolled as one and the left half could never be parked at a different reading position than the right half. The split view is now two flex panes, each with its own overflow and scrollTop, so scrolling one pane never moves the other; reading order is kept by a text-length weighted split (image data URIs are excluded from the weight so an image-heavy block cannot swallow the balance), and the non-split page stays the same single full-width flow. While a pane is scrolled, a bold page badge (for example 14/38) appears in the top-right corner of exactly that pane and fades out one second after scrolling stops: an absolute overlay that takes no layout space and never intercepts clicks. The page is one viewport screenful of the pane being scrolled, floor(scrollTop/clientHeight)+1 over ceil(scrollHeight/clientHeight), the reader-counter definition researched for this issue (NN/G scroll fading, the back-to-top pattern, PDF reader page counters). Pane height tracks the viewport minus header and main padding (mirroring the 0.75 zoom) and re-fits on toggle, header collapse and window resize. Search, the matching-blocks filter, theme, the zoom toggle, the session switcher and the lightbox are untouched. Eight tests were written first.
+
 ## [0.3.73] - 2026-11-26
 
 ### Fixed
