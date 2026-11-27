@@ -821,7 +821,7 @@ def test_density_split_checkbox_and_css():
     assert 'id="sp"' in d
     assert "2-column" in d
     assert "main.split{max-width:none;display:flex" in d
-    assert "main.split .pane{" in d
+    assert "main.split .panewrap .pane{" in d
     assert "zoom:.75" in d
     assert '<main class="split">' in d
     assert "return localStorage.getItem('sp')!=='0'" in d

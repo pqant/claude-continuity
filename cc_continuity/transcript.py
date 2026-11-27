@@ -339,7 +339,8 @@ body.split header.mini .hdmini{width:calc(50% - 36px)}
 #panelsbtn,#panelbtn{color:#d1242f}
 [data-theme=dark] #panelsbtn,[data-theme=dark] #panelbtn{color:#ff7b72}
 main.split{max-width:none;display:flex;gap:28px;zoom:.75}
-main.split .pane{flex:1 1 50%;min-width:0;overflow-y:auto;position:relative}
+main.split .panewrap{flex:1 1 50%;min-width:0;position:relative;display:flex}
+main.split .panewrap .pane{flex:1 1 auto;min-width:0;overflow-y:auto}
 .pagebadge{position:absolute;top:8px;right:12px;pointer-events:none;opacity:0;transition:opacity .4s ease;background:var(--hdr);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:3px 12px;font-size:20px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.18)}
 main:not(.split) .pagebadge{display:none}
 main{max-width:1160px;margin:0 auto;padding:10px 28px 80px}
@@ -426,7 +427,7 @@ for(var j=0;j<panes.length;j++){var v=panePages(panes[j]);all+=v;if(j<k){off+=v;
 var cur=Math.min(mine,Math.floor((pn.scrollTop+ch/2)/ch)+1);
 if(pn.scrollTop+ch>=pn.scrollHeight-2)cur=mine;
 var g=Math.min(all,Math.max(1,cur+off));
-if(!pn._pb){pn._pb=document.createElement('div');pn._pb.className='pagebadge';pn.appendChild(pn._pb);}
+if(!pn._pb){pn._pb=document.createElement('div');pn._pb.className='pagebadge';pn.parentElement.appendChild(pn._pb);}
 var b=pn._pb;b.textContent=g+'/'+all;b.style.opacity='1';clearTimeout(t);
 t=setTimeout(function(){b.style.opacity='0'},1000);},{passive:true});}
 for(var k=0;k<panes.length;k++)wireBadge(panes[k],k);
@@ -835,8 +836,8 @@ def render_html(blocks: list[Block], meta: dict) -> str:
         f'<button id="t">theme</button><span id="stats"></span><button id="panelsbtn" title="panel up">&#9650;</button></div></div>\n'
         f'<div class="hdmini" hidden><span class="v">&#8250; {_meta_val(meta, "name")} (cp-{_meta_val(meta, "nnn")})</span>'
         f'<button id="panelbtn" title="panel down">&#9660;</button></div></header>\n'
-        f'<main class="split"><div class="pane" id="pl">{pl}</div>'
-        f'<div class="pane" id="pr">{pr}</div></main>\n'
+        f'<main class="split"><div class="panewrap"><div class="pane" id="pl">{pl}</div></div>'
+        f'<div class="panewrap"><div class="pane" id="pr">{pr}</div></div></main>\n'
         f'{"".join(galleries)}'
         f'{_LIGHTBOX if galleries or has_chips else ""}'
         f'{ext}<script>{_JS}{switch_js}'
