@@ -4,6 +4,12 @@ All notable changes to cc-continuity are documented here.
 
 ## [Unreleased]
 
+## [0.3.77] - 2026-11-27
+
+### Fixed
+
+- The split-view page badge is now pinned to the visible frame of the pane being scrolled, so it stays on screen during scrolling (issue #105, found by a user on the v0.3.76 sample). The badge was appended inside each pane, and the pane is the scroll container (position:relative with overflow-y:auto): an absolutely positioned child of a scroller anchors to the content's top edge and scrolls away with the text. Measured in a real Chrome with device metrics 1600x2200 (pane visible viewport y=182..2118): after one wheel notch the badge box sat at y=38..68, above the pane, and after eight notches at y=-1012, while its opacity stayed 1 and its text kept updating, so during any real scroll the reader saw nothing at all. Each pane is now wrapped in a non-scrolling .panewrap that becomes the flex item and the absolute-positioning context, and the badge is appended to the wrapper instead of the pane, so it stays fixed in the pane's top-right corner while the content flows underneath; the pane keeps its own scrollbar, and the global page sequence, the visible-viewport page unit, the bottom clamp, the one-second fade and independent scrolling are untouched. The live proof standard was raised at the same time: the probe now asserts the badge box intersects the pane's visible viewport on every gesture step, so an opacity-only pass can never happen again. Human-gesture replay after the fix: the badge box held y=188..218 inside the viewport at all eight notches and both flicks with visible=true throughout, still advancing 1/6 to 2/6 at the seventh notch. One test was written first (wrapper markup, wrapper CSS role, badge-append site).
+
 ## [0.3.76] - 2026-11-27
 
 ### Fixed
