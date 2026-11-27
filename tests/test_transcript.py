@@ -841,9 +841,9 @@ def test_density_js_persistence_guards():
 # --- issue #102: split view panes scroll independently, ephemeral page badge ----
 
 def _panes(d):
-    m = re.search(r'<div class="pane" id="pl">(.*?)</div>'
-                  r'<div class="pane" id="pr">(.*?)</main>', d, re.S)
-    assert m, "split view must render two pane divs (issue #102)"
+    m = re.search(r'<div class="panewrap"><div class="pane" id="pl">(.*?)</div></div>'
+                  r'<div class="panewrap"><div class="pane" id="pr">(.*?)</main>', d, re.S)
+    assert m, "split view must render two panes inside non-scrolling wrappers (issues #102, #105)"
     return m.group(1), m.group(2)
 
 
@@ -875,15 +875,31 @@ def test_split_view_empty_conversation_keeps_both_panes():
 
 
 def test_split_panes_own_their_scrollbar():
+    # issue #105 moved the flex/positioning role to the wrapper; the pane
+    # keeps its own scrollbar.
     d = transcript.render_html([("user", "x", None)], META)
-    rule = re.search(r"main\.split \.pane\{([^}]*)\}", d)
-    assert rule, "pane rule required (issue #102)"
-    body = rule.group(1)
-    assert "overflow-y:auto" in body
-    assert "position:relative" in body
-    assert "flex:1 1 50%" in body
+    rule = re.search(r"main\.split \.panewrap \.pane\{([^}]*)\}", d)
+    assert rule, "pane rule required (issues #102, #105)"
+    assert "overflow-y:auto" in rule.group(1)
     assert re.search(r"main\.split\{[^}]*display:flex", d), "split mode is flex, not columns"
     assert "columns:2" not in d
+
+
+def test_page_badge_pinned_to_visible_frame():
+    # issue #105: the badge was appended INSIDE the scroller, so it anchored
+    # to the content top and scrolled away (measured y=-1012 while opacity
+    # stayed 1: visible nothing during scroll). It must live in a
+    # NON-scrolling wrapper that is the pane's positioning context.
+    d = transcript.render_html([("user", "x", None)], META)
+    assert d.count('<div class="panewrap"><div class="pane"') == 2
+    rule = re.search(r"main\.split \.panewrap\{([^}]*)\}", d)
+    assert rule, ".panewrap rule required (issue #105)"
+    body = rule.group(1)
+    assert "position:relative" in body  # badge anchors to the visible frame
+    assert "flex:1 1 50%" in body       # the wrapper (not the pane) is the flex item
+    assert "overflow" not in body       # the wrapper itself must never scroll
+    js = d[d.index("<script>"):]
+    assert "pn.parentElement.appendChild(pn._pb)" in js  # badge outside the scroller
 
 
 def test_page_badge_is_an_ephemeral_overlay():
