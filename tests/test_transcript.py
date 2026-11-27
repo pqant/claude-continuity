@@ -919,6 +919,17 @@ def test_page_badge_js_numbers_one_global_sequence():
     assert "g+'/'+all" in js  # badge text is the global page over the total
 
 
+def test_page_badge_js_sizes_pages_by_visible_viewport():
+    # issue #104: pages are measured by the pane's actually visible height
+    # (on-screen rect ∩ viewport), and the counter advances on natural
+    # gestures because the current page is the screenful under its center.
+    d = transcript.render_html([("user", "x", None)], META)
+    js = d[d.index("<script>"):]
+    assert "getBoundingClientRect" in js  # real on-screen geometry, no fitPanes guess
+    assert "visH" in js  # measured visible height drives every page computation
+    assert "scrollTop+ch/2" in js  # current page = screenful under the center
+
+
 def test_pane_sizing_wired_to_split_toggle():
     d = transcript.render_html([("user", "x", None)], META)
     js = d[d.index("<script>"):]
